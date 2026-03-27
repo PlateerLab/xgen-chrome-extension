@@ -1,66 +1,142 @@
+/**
+ * GenericHandler — @page-agent/page-controller 기반 범용 핸들러
+ *
+ * alibaba/page-agent의 PageController를 그대로 활용:
+ * - getBrowserState(): DOM을 "[0]<button>..." 형태로 평탄화 (LLM 토큰 효율적)
+ * - clickElement(index): 합성 이벤트 시퀀스로 실제 클릭
+ * - inputText(index, text): React/native input 호환 입력
+ * - selectOption(index, text): 드롭다운 선택
+ * - scroll(options): 스크롤
+ * - showMask() / SimulatorMask: 가상 커서 오버레이 (smooth 이동 + click ripple)
+ *
+ * XGEN 특화 로직 없음 — 연결 고리는 page_tools.py + page_command SSE가 담당
+ */
+
+import { PageController } from '@page-agent/page-controller';
 import type { PageHandler, PageContext, PageCommandResult, PageType } from '../types';
-import { getPageTitle, getVisibleHeadings, getTableData, getSelectedText } from '../dom-utils';
+import { detectPageType } from '../page-detector';
 
 export class GenericHandler implements PageHandler {
   readonly pageType: PageType = 'unknown';
 
-  private observer: MutationObserver | null = null;
+  private controller: PageController;
+  private stopObserveFn: (() => void) | null = null;
 
-  matches(): boolean {
-    return true; // fallback — always matches
+  constructor() {
+    this.controller = new PageController({
+      enableMask: true,         // SimulatorMask 활성화 (smooth cursor + click ripple)
+      viewportExpansion: 0,     // 뷰포트 내 요소만 추출 (토큰 절약)
+      highlightOpacity: 0.3,
+    });
   }
 
-  extractContext(): PageContext {
-    const tableData = getTableData();
+  matches(): boolean {
+    return true; // fallback — 항상 매칭
+  }
 
+  async extractContext(): Promise<PageContext> {
+    const state = await this.controller.getBrowserState();
+    // state.content = "[0]<button>새 워크플로우</button>\n[1]<input placeholder='검색...'/>..."
     return {
-      pageType: this.pageType,
-      url: window.location.href,
-      title: getPageTitle(),
-      data: {
-        headings: getVisibleHeadings(),
-        selectedText: getSelectedText(),
-        ...(tableData ? { table: tableData } : {}),
-      },
+      pageType: detectPageType(new URL(window.location.href)),
+      url: state.url,
+      title: state.title,
+      elements: state.content,  // LLM이 읽는 DOM 평탄화 텍스트
+      data: {},
       availableActions: this.getAvailableActions(),
       timestamp: Date.now(),
     };
   }
 
   getAvailableActions(): string[] {
-    return ['navigate'];
+    return ['click_element', 'input_text', 'select_option', 'scroll', 'navigate'];
   }
 
   async executeCommand(
     action: string,
     params: Record<string, unknown>,
   ): Promise<PageCommandResult> {
-    if (action === 'navigate' && typeof params.path === 'string') {
-      window.location.href = params.path;
-      return { success: true, action };
-    }
+    try {
+      switch (action) {
+        case 'click_element':
+          await this.controller.clickElement(params.index as number);
+          break;
 
-    return { success: false, action, error: `Unknown action: ${action}` };
+        case 'input_text':
+          await this.controller.inputText(params.index as number, params.text as string);
+          break;
+
+        case 'select_option':
+          await this.controller.selectOption(params.index as number, params.text as string);
+          break;
+
+        case 'scroll':
+          await this.controller.scroll({
+            down: (params.down as boolean) ?? true,
+            numPages: (params.num_pages as number) ?? 1,
+          });
+          break;
+
+        case 'navigate':
+          if (typeof params.path === 'string') {
+            window.location.href = params.path;
+          }
+          break;
+
+        default:
+          return { success: false, action, error: `Unknown action: ${action}` };
+      }
+
+      return { success: true, action };
+    } catch (err) {
+      return {
+        success: false,
+        action,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
   }
 
   observe(callback: (context: PageContext) => void): void {
+    let lastUrl = window.location.href;
     let debounceTimer: ReturnType<typeof setTimeout>;
 
-    this.observer = new MutationObserver(() => {
+    // URL 변경 감지 (SPA 네비게이션) — 500ms 폴링
+    const urlInterval = setInterval(() => {
+      if (window.location.href !== lastUrl) {
+        lastUrl = window.location.href;
+        this.extractContext()
+          .then((ctx) => callback(ctx))
+          .catch(() => {});
+      }
+    }, 500);
+
+    // DOM 변경 감지 (page_command 실행 후 UI 갱신 반영) — 1초 debounce
+    const mutationObserver = new MutationObserver(() => {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
-        callback(this.extractContext());
+        this.extractContext()
+          .then((ctx) => callback(ctx))
+          .catch(() => {});
       }, 1000);
     });
 
-    this.observer.observe(document.body, {
+    mutationObserver.observe(document.body, {
       childList: true,
       subtree: true,
     });
+
+    this.stopObserveFn = () => {
+      clearInterval(urlInterval);
+      mutationObserver.disconnect();
+      clearTimeout(debounceTimer);
+    };
   }
 
   disconnect(): void {
-    this.observer?.disconnect();
-    this.observer = null;
+    this.stopObserveFn?.();
+    this.stopObserveFn = null;
+    // controller는 dispose하지 않음 — page-agent가 동일 인스턴스를 재활성화할 수 있음
+    // content script 언로드 시 자동 GC
   }
 }

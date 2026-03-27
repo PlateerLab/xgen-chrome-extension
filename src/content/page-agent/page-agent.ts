@@ -56,12 +56,15 @@ export class PageAgent {
       } satisfies ExtensionMessage).catch(() => {});
     });
 
-    // Send initial context
-    const context = this.activeHandler.extractContext();
-    chrome.runtime.sendMessage({
-      type: 'PAGE_CONTEXT_UPDATE',
-      context,
-    } satisfies ExtensionMessage).catch(() => {});
+    // Send initial context (sync or async 모두 처리)
+    Promise.resolve(this.activeHandler.extractContext())
+      .then((context) => {
+        chrome.runtime.sendMessage({
+          type: 'PAGE_CONTEXT_UPDATE',
+          context,
+        } satisfies ExtensionMessage).catch(() => {});
+      })
+      .catch(() => {});
 
     console.log('[XGEN PageAgent] Page:', this.activeHandler.pageType);
   }
@@ -113,9 +116,11 @@ export class PageAgent {
           return true; // async response
         }
 
-        const context = this.activeHandler?.extractContext() ?? this.getFallbackContext();
-        sendResponse(context);
-        return false;
+        // sync 또는 async 모두 처리 (GenericHandler는 Promise 반환)
+        Promise.resolve(this.activeHandler?.extractContext() ?? this.getFallbackContext())
+          .then((ctx) => sendResponse(ctx))
+          .catch(() => sendResponse(this.getFallbackContext()));
+        return true; // async response
       }
 
       case 'CANVAS_COMMAND':

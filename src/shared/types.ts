@@ -53,6 +53,7 @@ export interface PageContext {
   pageType: PageType;
   url: string;
   title: string;
+  elements?: string;             // DOM 평탄화 텍스트 "[0]<button>..." (PageController)
   data: Record<string, unknown>;
   availableActions: string[];
   timestamp: number;
