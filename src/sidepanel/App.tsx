@@ -3,6 +3,7 @@ import { useChat } from './hooks/useChat';
 import { ChatMessage } from './components/ChatMessage';
 import { InputArea } from './components/InputArea';
 import { PageIndicator } from './components/PageIndicator';
+import { SettingsBar } from './components/SettingsBar';
 
 export function App() {
   const { messages, isStreaming, pageContext, sendMessage, clearMessages } = useChat();
@@ -30,6 +31,9 @@ export function App() {
           Clear
         </button>
       </header>
+
+      {/* Settings */}
+      <SettingsBar />
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-3">

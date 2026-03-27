@@ -123,7 +123,8 @@ async function handleSendMessage(content: string) {
 
     broadcastToSidePanel({ type: 'STREAM_DONE' });
   } catch (err) {
-    const error = err instanceof Error ? err.message : 'Unknown error';
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    const error = `${msg}\n(서버: ${serverUrl}/api/ai-chat/stream)`;
     broadcastToSidePanel({ type: 'STREAM_ERROR', error });
   }
 }
