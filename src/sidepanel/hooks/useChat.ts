@@ -125,9 +125,14 @@ export function useChat() {
       setMessages((prev) => [...prev, userMsg]);
       setIsStreaming(true);
 
-      chrome.runtime.sendMessage({ type: 'SEND_MESSAGE', content: content.trim() });
+      const summary = buildSummary(messages);
+      chrome.runtime.sendMessage({
+        type: 'SEND_MESSAGE',
+        content: content.trim(),
+        ...(summary ? { summary } : {}),
+      } satisfies ExtensionMessage);
     },
-    [isStreaming],
+    [isStreaming, messages],
   );
 
   const clearMessages = useCallback(() => {
@@ -137,4 +142,25 @@ export function useChat() {
   }, []);
 
   return { messages, isStreaming, pageContext, sendMessage, clearMessages };
+}
+
+/** 최근 대화 요약 빌드 (최대 6턴, 토큰 절약) */
+function buildSummary(messages: ChatMessage[]): string {
+  if (messages.length === 0) return '';
+  const recent = messages.slice(-12); // 최대 6쌍
+  const lines = recent
+    .map((m) => {
+      if (m.role === 'user') return `사용자: ${m.content.slice(0, 100)}`;
+      if (m.role === 'assistant') {
+        const tools =
+          m.toolCalls
+            ?.map((t) => `${t.tool}(${t.input.slice(0, 50)})`)
+            .join(', ') || '';
+        const text = m.content.slice(0, 100);
+        return `AI: ${text}${tools ? ` [도구: ${tools}]` : ''}`;
+      }
+      return '';
+    })
+    .filter(Boolean);
+  return lines.join('\n');
 }

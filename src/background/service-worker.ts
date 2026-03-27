@@ -47,7 +47,7 @@ chrome.runtime.onMessage.addListener(
         break;
 
       case 'SEND_MESSAGE':
-        handleSendMessage(message.content);
+        handleSendMessage(message.content, message.summary);
         sendResponse({ ok: true });
         break;
 
@@ -63,8 +63,22 @@ chrome.runtime.onMessage.addListener(
         sendResponse({ ok: true });
         break;
 
-      case 'CANVAS_RESULT':
       case 'PAGE_COMMAND_RESULT':
+        // DOM 재스캔 결과로 context 갱신 — 다음 턴에 fresh DOM 제공
+        if (message.result?.pageContext) {
+          cachedPageContext = message.result.pageContext as PageContext;
+        }
+        sendResponse({ ok: true });
+        break;
+
+      case 'CANVAS_RESULT':
+        // canvas state 캐싱 — 다음 턴에 갱신된 state 제공
+        if (message.result && cachedPageContext) {
+          cachedPageContext = {
+            ...cachedPageContext,
+            data: { ...cachedPageContext.data, canvasState: message.result },
+          };
+        }
         sendResponse({ ok: true });
         break;
     }
@@ -85,7 +99,7 @@ chrome.storage.local.get(null, (items) => {
 
 // ── Core: handle user message ──
 
-async function handleSendMessage(content: string) {
+async function handleSendMessage(content: string, summary?: string) {
   activeAbortController?.abort();
   activeAbortController = new AbortController();
 
@@ -117,6 +131,7 @@ async function handleSendMessage(content: string) {
     messages: [{ role: 'user', content }],
     provider,
     model,
+    ...(summary ? { conversation_summary: summary } : {}),
     ...(pageContext ? { page_context: pageContext } : {}),
     ...(pageContext?.pageType === 'canvas' && pageContext.data?.canvasState
       ? { canvas_state: pageContext.data.canvasState as Record<string, unknown> }

@@ -35,6 +35,7 @@ export interface AiChatRequest {
   model: string;
   canvas_state?: Record<string, unknown>;
   page_context?: PageContext;
+  conversation_summary?: string;
 }
 
 // ── Page Agent ──
@@ -63,13 +64,14 @@ export interface PageCommandResult {
   success: boolean;
   action: string;
   result?: unknown;
+  pageContext?: PageContext;  // 액션 실행 후 DOM 재스캔 결과
   error?: string;
 }
 
 // ── Chrome Extension Messages ──
 
 export type ExtensionMessage =
-  | { type: 'SEND_MESSAGE'; content: string }
+  | { type: 'SEND_MESSAGE'; content: string; summary?: string }
   | { type: 'STREAM_TOKEN'; content: string }
   | { type: 'TOOL_START'; tool: string; input: string }
   | { type: 'TOOL_END'; tool: string; output: string }

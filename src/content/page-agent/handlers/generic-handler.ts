@@ -87,7 +87,19 @@ export class GenericHandler implements PageHandler {
           return { success: false, action, error: `Unknown action: ${action}` };
       }
 
-      return { success: true, action };
+      // 액션 실행 후 DOM 재스캔 — 다음 턴에 fresh context 제공
+      const state = await this.controller.getBrowserState();
+      const updatedContext: PageContext = {
+        pageType: detectPageType(new URL(window.location.href)),
+        url: state.url,
+        title: state.title,
+        elements: state.content,
+        data: {},
+        availableActions: this.getAvailableActions(),
+        timestamp: Date.now(),
+      };
+
+      return { success: true, action, pageContext: updatedContext };
     } catch (err) {
       return {
         success: false,
