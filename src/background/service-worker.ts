@@ -125,7 +125,11 @@ async function handleSendMessage(content: string, summary?: string) {
   const provider = settings[STORAGE_KEYS.PROVIDER] || DEFAULT_PROVIDER;
   const model = settings[STORAGE_KEYS.MODEL] || DEFAULT_MODEL;
 
-  const pageContext = await getPageContextFromTab().catch(() => null);
+  const pageContext = await getPageContextFromTab().catch((err) => {
+    console.warn('[XGEN SW] getPageContextFromTab 실패:', err);
+    return null;
+  });
+  console.log('[XGEN SW] pageContext:', pageContext ? `elements=${pageContext.elements?.length ?? 0}ch, pageType=${pageContext.pageType}` : 'null');
 
   const request: AiChatRequest = {
     messages: [{ role: 'user', content }],

@@ -23,11 +23,18 @@ export class GenericHandler implements PageHandler {
   private stopObserveFn: (() => void) | null = null;
 
   constructor() {
-    this.controller = new PageController({
-      enableMask: true,         // SimulatorMask 활성화 (smooth cursor + click ripple)
-      viewportExpansion: 0,     // 뷰포트 내 요소만 추출 (토큰 절약)
-      highlightOpacity: 0.3,
-    });
+    try {
+      this.controller = new PageController({
+        enableMask: true,         // SimulatorMask 활성화 (smooth cursor + click ripple)
+        viewportExpansion: 0,     // 뷰포트 내 요소만 추출 (토큰 절약)
+        highlightOpacity: 0.3,
+      });
+      console.log('[XGEN GenericHandler] PageController 초기화 성공');
+    } catch (err) {
+      console.error('[XGEN GenericHandler] PageController 초기화 실패:', err);
+      // fallback: mask 없이 재시도
+      this.controller = new PageController({ viewportExpansion: 0 });
+    }
   }
 
   matches(): boolean {
@@ -36,7 +43,10 @@ export class GenericHandler implements PageHandler {
 
   async extractContext(): Promise<PageContext> {
     const state = await this.controller.getBrowserState();
-    // state.content = "[0]<button>새 워크플로우</button>\n[1]<input placeholder='검색...'/>..."
+    console.log('[XGEN GenericHandler] extractContext — elements length:', state.content?.length ?? 0, 'url:', state.url);
+    if (!state.content) {
+      console.warn('[XGEN GenericHandler] getBrowserState().content가 비어있음!');
+    }
     return {
       pageType: detectPageType(new URL(window.location.href)),
       url: state.url,
