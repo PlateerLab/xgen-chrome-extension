@@ -64,9 +64,13 @@ chrome.runtime.onMessage.addListener(
         break;
 
       case 'PAGE_COMMAND_RESULT':
-        // DOM 재스캔 결과로 context 갱신 — 다음 턴에 fresh DOM 제공
+        // DOM 재스캔 결과로 context 갱신
         if (message.result?.pageContext) {
           cachedPageContext = message.result.pageContext as PageContext;
+        }
+        // 백엔드 에이전트 루프에 결과 전달 — 다음 스텝 결정에 필요
+        if (message.requestId) {
+          postCommandResultToBackend(message.requestId, message.result);
         }
         sendResponse({ ok: true });
         break;
@@ -184,7 +188,7 @@ async function handleSSEEvent(event: SSEEvent) {
     case 'page_command':
       await sendToContentScript({
         type: 'PAGE_COMMAND',
-        requestId: crypto.randomUUID(),
+        requestId: (event as any).requestId || crypto.randomUUID(),
         action: event.action,
         params: event.params,
       });
@@ -247,6 +251,29 @@ async function sendToContentScript(message: ExtensionMessage) {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tabs.length > 0 && tabs[0].id) {
     await chrome.tabs.sendMessage(tabs[0].id, message).catch(() => {});
+  }
+}
+
+async function postCommandResultToBackend(
+  requestId: string,
+  result: unknown,
+) {
+  const serverUrl = await getOriginFromTab();
+  if (!serverUrl) return;
+
+  const authToken = tokensByOrigin[serverUrl] || (await getStoredToken(serverUrl));
+
+  try {
+    await fetch(`${serverUrl}/api/ai-chat/command-result/${requestId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+      },
+      body: JSON.stringify(result),
+    });
+  } catch (err) {
+    console.error('[XGEN SW] Failed to POST command result:', err);
   }
 }
 

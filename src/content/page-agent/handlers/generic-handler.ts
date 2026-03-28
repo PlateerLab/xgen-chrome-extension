@@ -26,14 +26,14 @@ export class GenericHandler implements PageHandler {
     try {
       this.controller = new PageController({
         enableMask: true,         // SimulatorMask 활성화 (smooth cursor + click ripple)
-        viewportExpansion: 0,     // 뷰포트 내 요소만 추출 (토큰 절약)
+        viewportExpansion: 3,     // 뷰포트 ±3배 범위 요소 추출 (스크롤 밖 요소도 포함)
         highlightOpacity: 0.3,
       });
       console.log('[XGEN GenericHandler] PageController 초기화 성공');
     } catch (err) {
       console.error('[XGEN GenericHandler] PageController 초기화 실패:', err);
       // fallback: mask 없이 재시도
-      this.controller = new PageController({ viewportExpansion: 0 });
+      this.controller = new PageController({ viewportExpansion: 3 });
     }
   }
 
@@ -57,7 +57,7 @@ export class GenericHandler implements PageHandler {
   }
 
   getAvailableActions(): string[] {
-    return ['click_element', 'input_text', 'select_option', 'scroll', 'navigate'];
+    return ['click_element', 'input_text', 'select_option', 'scroll'];
   }
 
   async executeCommand(
@@ -65,8 +65,9 @@ export class GenericHandler implements PageHandler {
     params: Record<string, unknown>,
   ): Promise<PageCommandResult> {
     try {
-      // 액션 실행 전 하이라이트 표시 — 어떤 요소를 조작하는지 시각적 피드백
-      await this.controller.updateTree();
+      // updateTree()를 호출하지 않음 — extractContext()에서 빌드한 트리의 인덱스를
+      // 그대로 사용해야 AI가 지정한 인덱스와 일치한다.
+      // updateTree()는 DOM을 재스캔하여 인덱스를 재할당하므로 불일치 발생.
 
       switch (action) {
         case 'click_element':
@@ -88,18 +89,12 @@ export class GenericHandler implements PageHandler {
           });
           break;
 
-        case 'navigate':
-          if (typeof params.path === 'string') {
-            window.location.href = params.path;
-          }
-          break;
-
         default:
           return { success: false, action, error: `Unknown action: ${action}` };
       }
 
-      // 액션 실행 후 잠시 대기 (DOM 반영) → 재스캔 → 하이라이트 정리
-      await new Promise((r) => setTimeout(r, 300));
+      // DOM이 안정될 때까지 대기 (MutationObserver 기반)
+      await this.waitForDomStability();
       const state = await this.controller.getBrowserState();
       await this.controller.cleanUpHighlights();
       const updatedContext: PageContext = {
@@ -156,6 +151,44 @@ export class GenericHandler implements PageHandler {
       mutationObserver.disconnect();
       clearTimeout(debounceTimer);
     };
+  }
+
+  /**
+   * DOM이 안정될 때까지 대기 — MutationObserver 기반.
+   * quietMs 동안 DOM 변경이 없으면 안정 상태로 판단.
+   * timeoutMs 초과 시 강제 resolve (애니메이션/폴링 페이지 대응).
+   */
+  private waitForDomStability(timeoutMs = 5000, quietMs = 300): Promise<void> {
+    return new Promise((resolve) => {
+      let quietTimer: ReturnType<typeof setTimeout>;
+
+      const observer = new MutationObserver(() => {
+        clearTimeout(quietTimer);
+        quietTimer = setTimeout(() => {
+          observer.disconnect();
+          resolve();
+        }, quietMs);
+      });
+
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+      });
+
+      // 초기 quiet timer 시작 — 변경이 전혀 없으면 quietMs 후 resolve
+      quietTimer = setTimeout(() => {
+        observer.disconnect();
+        resolve();
+      }, quietMs);
+
+      // hard timeout — 무한 대기 방지
+      setTimeout(() => {
+        clearTimeout(quietTimer);
+        observer.disconnect();
+        resolve();
+      }, timeoutMs);
+    });
   }
 
   disconnect(): void {

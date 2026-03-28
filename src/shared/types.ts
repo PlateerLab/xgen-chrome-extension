@@ -23,7 +23,7 @@ export type SSEEvent =
   | { type: 'tool_start'; tool: string; input: string }
   | { type: 'tool_end'; tool: string; output: string }
   | { type: 'canvas_command'; action: string; params: Record<string, unknown> }
-  | { type: 'page_command'; action: string; params: Record<string, unknown> }
+  | { type: 'page_command'; action: string; params: Record<string, unknown>; requestId?: string }
   | { type: 'done' }
   | { type: 'error'; content: string };
 
