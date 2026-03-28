@@ -194,6 +194,10 @@ async function handleSSEEvent(event: SSEEvent) {
       });
       break;
 
+    case 'token_usage':
+      broadcastToSidePanel({ type: 'STREAM_TOKEN_USAGE', tokenUsage: (event as any).usage });
+      break;
+
     case 'error':
       broadcastToSidePanel({ type: 'STREAM_ERROR', error: event.content });
       break;

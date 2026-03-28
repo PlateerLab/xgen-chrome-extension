@@ -1,3 +1,11 @@
+// ── Token Usage ──
+
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 // ── Chat Messages ──
 
 export interface ChatMessage {
@@ -6,6 +14,7 @@ export interface ChatMessage {
   content: string;
   timestamp: number;
   toolCalls?: ToolCall[];
+  tokenUsage?: TokenUsage;
 }
 
 export interface ToolCall {
@@ -24,6 +33,7 @@ export type SSEEvent =
   | { type: 'tool_end'; tool: string; output: string }
   | { type: 'canvas_command'; action: string; params: Record<string, unknown> }
   | { type: 'page_command'; action: string; params: Record<string, unknown>; requestId?: string }
+  | { type: 'token_usage'; usage: TokenUsage }
   | { type: 'done' }
   | { type: 'error'; content: string };
 
@@ -76,6 +86,7 @@ export type ExtensionMessage =
   | { type: 'TOOL_START'; tool: string; input: string }
   | { type: 'TOOL_END'; tool: string; output: string }
   | { type: 'STREAM_DONE' }
+  | { type: 'STREAM_TOKEN_USAGE'; tokenUsage: TokenUsage }
   | { type: 'STREAM_ERROR'; error: string }
   | { type: 'SET_TOKEN'; token: string; origin: string }
   | { type: 'SET_ORIGIN'; origin: string }

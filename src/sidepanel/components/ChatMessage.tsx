@@ -38,6 +38,14 @@ export function ChatMessage({ message }: Props) {
             <MarkdownRenderer content={message.content} />
           </div>
         )}
+
+        {!isUser && message.tokenUsage && (
+          <div className="text-[10px] text-gray-400 mt-1.5 pt-1 border-t border-gray-200/50 flex gap-2">
+            <span>in: {message.tokenUsage.inputTokens.toLocaleString()}</span>
+            <span>out: {message.tokenUsage.outputTokens.toLocaleString()}</span>
+            <span>total: {message.tokenUsage.totalTokens.toLocaleString()}</span>
+          </div>
+        )}
       </div>
     </div>
   );

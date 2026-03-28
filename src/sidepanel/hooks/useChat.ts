@@ -78,6 +78,18 @@ export function useChat() {
           break;
         }
 
+        case 'STREAM_TOKEN_USAGE': {
+          if (streamingRef.current) {
+            const msgId = streamingRef.current.messageId;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === msgId ? { ...m, tokenUsage: message.tokenUsage } : m,
+              ),
+            );
+          }
+          break;
+        }
+
         case 'STREAM_DONE': {
           setIsStreaming(false);
           streamingRef.current = null;
