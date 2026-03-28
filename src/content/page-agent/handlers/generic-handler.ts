@@ -43,14 +43,17 @@ export class GenericHandler implements PageHandler {
 
   async extractContext(): Promise<PageContext> {
     const state = await this.controller.getBrowserState();
-    // 컨텍스트 추출 후 하이라이트 제거 — 평상시에는 깨끗한 화면 유지
     await this.controller.cleanUpHighlights();
+
+    // 메뉴 사전탐색 — 접힌 메뉴를 펼쳐서 전체 네비게이션 구조를 파악
+    const menuMap = await this.scanMenuHierarchy();
+
     return {
       pageType: detectPageType(new URL(window.location.href)),
       url: state.url,
       title: state.title,
       elements: state.content,
-      data: {},
+      data: { ...(menuMap ? { menuMap } : {}) },
       availableActions: this.getAvailableActions(),
       timestamp: Date.now(),
     };
@@ -151,6 +154,166 @@ export class GenericHandler implements PageHandler {
       mutationObserver.disconnect();
       clearTimeout(debounceTimer);
     };
+  }
+
+  /**
+   * 메뉴 사전탐색 — 사이드바/네비게이션의 접힌 메뉴를 펼쳐서 전체 구조를 파악한다.
+   *
+   * 흐름:
+   * 1. nav, sidebar, [role="navigation"] 등 네비게이션 컨테이너를 찾음
+   * 2. 접힌 메뉴 항목(aria-expanded="false" 또는 숨겨진 서브메뉴)을 클릭해서 펼침
+   * 3. 서브메뉴 텍스트를 수집
+   * 4. 원래 상태(접힌 상태)로 복원
+   * 5. "부모 메뉴 > [서브1, 서브2, ...]" 형태의 맵을 반환
+   *
+   * AI가 "도구 관리"가 "사용자 관리" 아래에 있다는 것을 사전에 파악할 수 있게 한다.
+   */
+  private async scanMenuHierarchy(): Promise<string | null> {
+    try {
+      // 네비게이션 컨테이너에서 접힌 메뉴 항목 찾기
+      const collapsedItems = document.querySelectorAll<HTMLElement>(
+        [
+          'nav [aria-expanded="false"]',
+          'aside [aria-expanded="false"]',
+          '[role="navigation"] [aria-expanded="false"]',
+          '.sidebar [aria-expanded="false"]',
+          '[class*="sidebar"] [aria-expanded="false"]',
+          '[class*="nav"] [aria-expanded="false"]',
+        ].join(','),
+      );
+
+      if (collapsedItems.length === 0) {
+        // aria-expanded 미사용 시: 서브메뉴가 숨겨진 메뉴 구조를 DOM으로 탐색
+        return this.scanMenuFromDom();
+      }
+
+      const menuEntries: string[] = [];
+
+      for (const item of collapsedItems) {
+        const parentLabel = this.getMenuItemText(item);
+        if (!parentLabel) continue;
+
+        // 클릭해서 서브메뉴 펼치기
+        item.click();
+        await new Promise((r) => setTimeout(r, 200));
+
+        // 펼쳐진 서브메뉴의 자식 항목 수집
+        const childTexts = this.collectSubmenuTexts(item);
+
+        if (childTexts.length > 0) {
+          menuEntries.push(`${parentLabel} > [${childTexts.join(', ')}]`);
+        }
+
+        // 원래 상태로 복원 (다시 접기)
+        if (item.getAttribute('aria-expanded') === 'true') {
+          item.click();
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+
+      return menuEntries.length > 0
+        ? '[메뉴 구조]\n' + menuEntries.join('\n')
+        : null;
+    } catch (err) {
+      console.warn('[XGEN GenericHandler] scanMenuHierarchy 실패:', err);
+      return null;
+    }
+  }
+
+  /**
+   * aria-expanded가 없는 경우: DOM 구조에서 메뉴 계층을 직접 추출한다.
+   * 숨겨진(display:none 등) 서브메뉴도 텍스트를 읽을 수 있다.
+   */
+  private scanMenuFromDom(): string | null {
+    const navContainers = document.querySelectorAll<HTMLElement>(
+      'nav, aside, [role="navigation"], .sidebar, [class*="sidebar"]',
+    );
+
+    if (navContainers.length === 0) return null;
+
+    const menuEntries: string[] = [];
+
+    for (const nav of navContainers) {
+      // 자식이 있는 메뉴 항목 찾기 (ul > li > ul 패턴)
+      const topItems = nav.querySelectorAll<HTMLElement>(
+        ':scope > ul > li, :scope > div > ul > li, :scope > div > div > ul > li',
+      );
+
+      for (const li of topItems) {
+        const subList = li.querySelector('ul, [role="menu"], [role="group"]');
+        if (!subList) continue;
+
+        const parentLink = li.querySelector('a, button, [role="menuitem"]');
+        const parentLabel = parentLink?.textContent?.trim();
+        if (!parentLabel) continue;
+
+        const childItems = subList.querySelectorAll<HTMLElement>(
+          ':scope > li > a, :scope > li > button, :scope > [role="menuitem"]',
+        );
+        const childTexts = Array.from(childItems)
+          .map((el) => el.textContent?.trim())
+          .filter((t): t is string => !!t && t.length > 0);
+
+        if (childTexts.length > 0) {
+          menuEntries.push(`${parentLabel} > [${childTexts.join(', ')}]`);
+        }
+      }
+    }
+
+    return menuEntries.length > 0
+      ? '[메뉴 구조]\n' + menuEntries.join('\n')
+      : null;
+  }
+
+  /** 메뉴 항목에서 접힌 후 펼쳐진 서브메뉴 텍스트를 수집한다. */
+  private collectSubmenuTexts(parentItem: HTMLElement): string[] {
+    // 방법 1: aria-controls로 연결된 서브메뉴 찾기
+    const controlsId = parentItem.getAttribute('aria-controls');
+    if (controlsId) {
+      const submenu = document.getElementById(controlsId);
+      if (submenu) {
+        return this.extractLinkTexts(submenu);
+      }
+    }
+
+    // 방법 2: 인접 형제/자식에서 서브메뉴 찾기
+    const sibling = parentItem.nextElementSibling;
+    if (sibling && (sibling.matches('ul, [role="menu"], [role="group"]') ||
+        sibling.querySelector('ul, [role="menu"]'))) {
+      return this.extractLinkTexts(sibling as HTMLElement);
+    }
+
+    // 방법 3: 부모의 자식 중 서브메뉴 컨테이너 찾기
+    const parent = parentItem.closest('li, div');
+    if (parent) {
+      const submenu = parent.querySelector('ul, [role="menu"], [role="group"]');
+      if (submenu && submenu !== parentItem) {
+        return this.extractLinkTexts(submenu as HTMLElement);
+      }
+    }
+
+    return [];
+  }
+
+  /** 컨테이너 내 링크/버튼 텍스트를 추출한다. */
+  private extractLinkTexts(container: HTMLElement): string[] {
+    const items = container.querySelectorAll<HTMLElement>(
+      'a, button, [role="menuitem"], [role="treeitem"]',
+    );
+    return Array.from(items)
+      .map((el) => el.textContent?.trim())
+      .filter((t): t is string => !!t && t.length > 0 && t.length < 100);
+  }
+
+  /** 메뉴 항목의 텍스트를 추출한다 (아이콘 등 제외). */
+  private getMenuItemText(el: HTMLElement): string {
+    // aria-label 우선
+    const label = el.getAttribute('aria-label');
+    if (label) return label;
+
+    // 텍스트 노드만 추출 (아이콘 SVG 등 제외)
+    const text = el.textContent?.trim() ?? '';
+    return text.length > 0 && text.length < 100 ? text : '';
   }
 
   /**
