@@ -322,43 +322,71 @@ export class GenericHandler implements PageHandler {
     }
 
     const executedSteps: string[] = [];
+    const urlBefore = window.location.href;
 
     for (const stepText of steps) {
-      // 1. DOM을 재스캔하여 현재 페이지의 요소를 파악
-      await this.controller.getBrowserState();
+      const domBefore = document.body.innerHTML.length;
 
-      // 2. 텍스트에 매칭되는 클릭 가능한 요소 찾기
+      // 1. 텍스트에 매칭되는 클릭 가능한 요소 찾기
       const element = this.findClickableByText(stepText);
       if (!element) {
-        await this.controller.cleanUpHighlights();
         return {
           success: false,
           action: 'navigate_plan',
-          error: `"${stepText}" 요소를 찾을 수 없습니다. 완료된 스텝: [${executedSteps.join(' → ')}]`,
+          error: `"${stepText}" 요소를 찾을 수 없습니다. 완료: [${executedSteps.join(' → ')}]`,
         };
       }
 
-      // 3. 클릭
+      // 2. 클릭
+      console.log(`[XGEN navigate_plan] 클릭: "${stepText}" →`, element.tagName, element.className?.substring(0, 40));
       element.click();
       executedSteps.push(stepText);
 
-      // 4. DOM 안정화 대기
+      // 3. DOM 안정화 대기
       await this.waitForDomStability();
+
+      // 4. 클릭 효과 검증: URL 또는 DOM이 변했는지 확인
+      const urlChanged = window.location.href !== urlBefore;
+      const domChanged = Math.abs(document.body.innerHTML.length - domBefore) > 50;
+      if (!urlChanged && !domChanged) {
+        console.warn(`[XGEN navigate_plan] "${stepText}" 클릭했지만 변화 없음`);
+        // 사이드바가 숨겨진 상태일 수 있음 — 사이드바 열기 시도
+        const sidebarToggle = document.querySelector<HTMLElement>(
+          'button[class*="sidebarToggle"], button[class*="closeOnly"], [aria-label*="사이드바"]',
+        );
+        if (sidebarToggle && sidebarToggle !== element) {
+          sidebarToggle.click();
+          await new Promise((r) => setTimeout(r, 300));
+          // 다시 클릭 시도
+          const retry = this.findClickableByText(stepText);
+          if (retry) {
+            retry.click();
+            await this.waitForDomStability();
+          }
+        }
+      }
     }
 
     // 최종 상태 반환
     const state = await this.controller.getBrowserState();
     await this.controller.cleanUpHighlights();
 
+    const finalUrl = window.location.href;
+    const navigated = finalUrl !== urlBefore;
+
     return {
       success: true,
       action: 'navigate_plan',
       pageContext: {
-        pageType: detectPageType(new URL(window.location.href)),
+        pageType: detectPageType(new URL(finalUrl)),
         url: state.url,
         title: state.title,
         elements: state.content,
-        data: {},
+        data: {
+          navigated,
+          executedSteps,
+          ...(navigated ? {} : { warning: '클릭은 수행했지만 URL이 변경되지 않았습니다. click_element_by_index로 직접 시도해보세요.' }),
+        },
         availableActions: this.getAvailableActions(),
         timestamp: Date.now(),
       },
@@ -367,35 +395,39 @@ export class GenericHandler implements PageHandler {
 
   /**
    * 텍스트로 클릭 가능한 DOM 요소를 찾는다.
-   * 정확한 매칭 → 부분 매칭 → 포함 매칭 순으로 시도한다.
+   * 사이드바/네비게이션 요소를 우선 매칭한다.
    */
   private findClickableByText(targetText: string): HTMLElement | null {
     const target = targetText.trim().toLowerCase();
 
-    // 클릭 가능한 요소 후보
-    const candidates = document.querySelectorAll<HTMLElement>(
-      'a, button, [role="button"], [role="menuitem"], [role="tab"], [role="link"]',
+    // 1순위: 사이드바/네비게이션 내 요소 (가장 정확)
+    const navCandidates = document.querySelectorAll<HTMLElement>(
+      'aside a, aside button, nav a, nav button, [role="navigation"] a, [role="navigation"] button',
     );
-
-    // 1차: 정확한 텍스트 매칭
-    for (const el of candidates) {
+    for (const el of navCandidates) {
       const text = el.textContent?.trim().toLowerCase() ?? '';
       if (text === target) return el;
     }
 
-    // 2차: 시작 매칭 (앞부분 일치)
-    for (const el of candidates) {
+    // 2순위: 페이지 내 모든 클릭 가능 요소에서 정확 매칭
+    const allCandidates = document.querySelectorAll<HTMLElement>(
+      'a, button, [role="button"], [role="menuitem"], [role="tab"]',
+    );
+    for (const el of allCandidates) {
       const text = el.textContent?.trim().toLowerCase() ?? '';
-      if (text.startsWith(target) || target.startsWith(text)) return el;
+      if (text === target) return el;
     }
 
-    // 3차: 포함 매칭
-    for (const el of candidates) {
+    // 3순위: 사이드바에서 포함 매칭
+    for (const el of navCandidates) {
       const text = el.textContent?.trim().toLowerCase() ?? '';
-      if (text.includes(target) || target.includes(text)) {
-        // 너무 긴 텍스트는 부모 요소일 가능성 → 스킵
-        if (text.length < target.length * 3) return el;
-      }
+      if (text.includes(target) && text.length < target.length * 2) return el;
+    }
+
+    // 4순위: 전체에서 포함 매칭 (가장 느슨)
+    for (const el of allCandidates) {
+      const text = el.textContent?.trim().toLowerCase() ?? '';
+      if (text.includes(target) && text.length < target.length * 2) return el;
     }
 
     return null;
