@@ -1,39 +1,50 @@
 /**
  * SimulatorMask 커서 스타일 오버라이드
- * 기존 75px 그라데이션 커서 → 32px 미니멀 블루 커서
+ * 기존 SVG 그라데이션 커서를 완전히 숨기고
+ * 일반 마우스 포인터 스타일의 커서로 대체
  */
 export function injectCursorOverride(): void {
   const style = document.createElement('style');
   style.textContent = `
-    /* 커서 크기 축소: 75px → 32px */
+    /* 커서 컨테이너 — 작게 */
     ._cursor_1dgwb_2 {
-      --cursor-size: 32px !important;
-      width: 32px !important;
-      height: 32px !important;
+      --cursor-size: 24px !important;
+      width: 24px !important;
+      height: 24px !important;
     }
 
-    /* 보더 — 슬림한 블루-퍼플 그라데이션 */
-    ._cursorBorder_1dgwb_10 {
-      background: linear-gradient(135deg, #3b82f6, #8b5cf6) !important;
-      transform: rotate(-135deg) scale(1) !important;
-      margin-left: -4px !important;
-      margin-top: -8px !important;
-    }
-
-    /* 필링 — 깔끔한 흰색 + 가벼운 그림자 */
+    /* 기존 SVG 보더/필링 완전 숨김 */
+    ._cursorBorder_1dgwb_10,
     ._cursorFilling_1dgwb_25 {
-      transform: rotate(-135deg) scale(1) !important;
-      margin-left: -4px !important;
-      margin-top: -8px !important;
-      filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.15)) !important;
+      display: none !important;
     }
 
-    /* ripple — 얇은 블루 테두리 */
+    /* 커서 컨테이너에 마우스 포인터 SVG 직접 적용 */
+    ._cursor_1dgwb_2::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 24px;
+      height: 24px;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cdefs%3E%3Cfilter id='s' x='-20%25' y='-20%25' width='140%25' height='140%25'%3E%3CfeDropShadow dx='0.5' dy='1' stdDeviation='0.8' flood-color='%23000' flood-opacity='0.25'/%3E%3C/filter%3E%3C/defs%3E%3Cpath d='M 3 2 L 3 18 L 7.5 13.5 L 12 20 L 14 19 L 9.5 12.5 L 15 12 Z' fill='white' stroke='%23222' stroke-width='1.2' stroke-linejoin='round' filter='url(%23s)'/%3E%3C/svg%3E");
+      background-size: contain;
+      background-repeat: no-repeat;
+      pointer-events: none;
+      z-index: 10001;
+    }
+
+    /* ripple — 작고 세련된 블루 */
+    ._cursorRipple_1dgwb_39 {
+      margin-left: -100% !important;
+      margin-top: -100% !important;
+    }
+
     ._cursorRipple_1dgwb_39::after {
-      border: 2px solid rgba(59, 130, 246, 0.8) !important;
+      border: 2px solid rgba(59, 130, 246, 0.6) !important;
     }
 
-    /* 오버레이 래퍼 — 배경 제거, 커서만 표시 */
+    /* 오버레이 래퍼 — 배경/상호작용 차단 제거 */
     ._wrapper_1ooyb_1 {
       background: none !important;
       cursor: default !important;
