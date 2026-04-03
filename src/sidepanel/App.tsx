@@ -7,7 +7,7 @@ import { useElementPicker, PickerResultPanel } from './components/ElementPickerB
 
 export function App() {
   const { messages, isStreaming, sendMessage, stopStream, clearMessages } = useChat();
-  const picker = useElementPicker(sendMessage);
+  const picker = useElementPicker();
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -58,6 +58,7 @@ export function App() {
         <PickerResultPanel
           result={picker.result}
           registered={picker.registered}
+          registerError={picker.registerError}
           registerApi={picker.registerApi}
           closeResult={picker.closeResult}
         />

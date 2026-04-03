@@ -120,6 +120,19 @@ chrome.runtime.onMessage.addListener(
         break;
       }
 
+      // ── Sidepanel → SW 직접 PAGE_COMMAND (register_tool 등) ──
+      case 'PAGE_COMMAND': {
+        if (!sender.tab) {
+          // sidepanel에서 보낸 경우 (sender.tab 없음) → SW에서 직접 처리
+          handleApiHookAction(message.action, message.params).then((hookResult) => {
+            sendResponse(hookResult || { success: false, action: message.action, error: 'Unknown action' });
+          });
+          return true;
+        }
+        sendResponse({ ok: true });
+        break;
+      }
+
       // ── Element Picker ──
       case 'ELEMENT_PICKER_START':
         sendToContentScript({ type: 'ELEMENT_PICKER_START' } as ExtensionMessage);
@@ -654,12 +667,19 @@ async function autoMatchAuthProfile(
       }
     }
 
-    // 2) 매칭 실패 → 캡처된 API에서 인증 헤더를 가져와 auth profile 자동 생성
-    const capturedAuth = findCapturedAuthForDomain(apiDomain);
-    if (!capturedAuth) return undefined;
-
+    // 2) 매칭 실패 → 캡처된 로그인 요청 또는 인증 헤더로 auth profile 자동 생성
     const serviceId = apiDomain.replace('www.', '').replace(/\./g, '_');
-    const profileData = buildAuthProfileFromCaptured(serviceId, apiDomain, serverUrl, capturedAuth);
+
+    // 먼저 캡처된 로그인 요청 찾기 (자동 갱신 가능)
+    const capturedLogin = findCapturedLoginForDomain(apiDomain);
+    // 로그인이 없으면 인증 헤더로 fallback (fixed 토큰)
+    const capturedAuth = capturedLogin ? null : findCapturedAuthForDomain(apiDomain);
+
+    if (!capturedLogin && !capturedAuth) return undefined;
+
+    const profileData = capturedLogin
+      ? buildAuthProfileFromLogin(serviceId, apiDomain, capturedLogin)
+      : buildAuthProfileFromCaptured(serviceId, apiDomain, serverUrl, capturedAuth!);
 
     const createResp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
       method: 'POST',
@@ -690,7 +710,137 @@ async function autoMatchAuthProfile(
 }
 
 /**
- * 캡처된 API 데이터에서 특정 도메인의 인증 헤더를 찾는다.
+ * 캡처된 API에서 로그인 요청을 찾는다.
+ * POST 메서드 + URL에 login/auth/token/signin 포함 + 요청 body에 자격증명 포함
+ */
+interface CapturedLogin {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  payload: Record<string, unknown>;
+  responseBody: Record<string, unknown>;
+  tokenFields: { name: string; keyPath: string }[];
+}
+
+function findCapturedLoginForDomain(domain: string): CapturedLogin | null {
+  const loginUrlPatterns = /\/(login|auth|token|signin|oauth|session)/i;
+
+  for (const [, apis] of capturedApisByTab) {
+    for (const api of apis) {
+      if (api.method !== 'POST') continue;
+
+      try {
+        if (!new URL(api.url).hostname.includes(domain.replace('www.', ''))) continue;
+      } catch { continue; }
+
+      if (!loginUrlPatterns.test(api.url)) continue;
+
+      // request body 파싱
+      let payload: Record<string, unknown> = {};
+      if (api.requestBody) {
+        try { payload = JSON.parse(api.requestBody); } catch { continue; }
+      }
+      if (Object.keys(payload).length === 0) continue;
+
+      // response body에서 토큰 필드 탐지
+      let responseBody: Record<string, unknown> = {};
+      if (api.responseBody) {
+        try { responseBody = JSON.parse(api.responseBody); } catch { continue; }
+      }
+
+      // 토큰 필드 찾기: access_token, token, jwt, id_token 등
+      const tokenFieldNames = ['access_token', 'token', 'accessToken', 'jwt', 'id_token', 'auth_token', 'session_token'];
+      const tokenFields: { name: string; keyPath: string }[] = [];
+
+      for (const fieldName of tokenFieldNames) {
+        if (responseBody[fieldName] && typeof responseBody[fieldName] === 'string') {
+          tokenFields.push({ name: fieldName, keyPath: fieldName });
+        }
+      }
+
+      // 중첩 구조 탐색 (data.access_token, result.token 등)
+      for (const [topKey, topVal] of Object.entries(responseBody)) {
+        if (typeof topVal === 'object' && topVal !== null) {
+          for (const fieldName of tokenFieldNames) {
+            if ((topVal as any)[fieldName] && typeof (topVal as any)[fieldName] === 'string') {
+              tokenFields.push({ name: fieldName, keyPath: `${topKey}.${fieldName}` });
+            }
+          }
+        }
+      }
+
+      if (tokenFields.length === 0) continue;
+
+      // request headers에서 Content-Type만 보존
+      const headers: Record<string, string> = {};
+      const ct = api.requestHeaders['content-type'] || api.requestHeaders['Content-Type'];
+      if (ct) headers['Content-Type'] = ct;
+
+      console.log(`[XGEN SW] Found login request: ${api.method} ${api.url}, tokens: ${tokenFields.map(f => f.name).join(', ')}`);
+
+      return {
+        url: api.url,
+        method: api.method,
+        headers,
+        payload,
+        responseBody,
+        tokenFields,
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * 캡처된 로그인 요청으로 auto-refresh 가능한 auth profile을 생성한다.
+ */
+function buildAuthProfileFromLogin(
+  serviceId: string,
+  domain: string,
+  login: CapturedLogin,
+) {
+  // 주요 토큰 필드 (첫 번째를 access_token으로 사용)
+  const primaryToken = login.tokenFields[0];
+
+  // extraction rules: 응답 body에서 토큰 추출
+  const extractionRules = login.tokenFields.map((f) => ({
+    name: f.name,
+    source: 'body' as const,
+    key_path: f.keyPath,
+  }));
+
+  // injection rules: Authorization: Bearer {access_token}
+  const injectionRules = [
+    {
+      source_field: primaryToken.name,
+      target: 'header',
+      key: 'Authorization',
+      value_template: `Bearer {${primaryToken.name}}`,
+      required: true,
+    },
+  ];
+
+  return {
+    service_id: serviceId,
+    name: `${domain} (자동 생성)`,
+    description: `캡처된 로그인 요청으로 자동 생성된 인증 프로필. 토큰 만료 시 자동 갱신됩니다.`,
+    auth_type: 'bearer',
+    login_config: {
+      url: login.url,
+      method: login.method,
+      headers: login.headers,
+      payload: login.payload,
+      timeout: 30,
+    },
+    extraction_rules: extractionRules,
+    injection_rules: injectionRules,
+    ttl: 3600,
+    refresh_before_expire: 300,
+  };
+}
+
+/**
+ * 캡처된 API 데이터에서 특정 도메인의 인증 헤더를 찾는다. (fallback)
  */
 function findCapturedAuthForDomain(domain: string): { type: string; key: string; value: string } | null {
   for (const [, apis] of capturedApisByTab) {

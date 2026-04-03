@@ -7,14 +7,11 @@ interface PickerResult {
   elementInfo: { tag: string; text: string; url: string };
 }
 
-/**
- * 아이콘 버튼 (toolbar용) — 반환
- * 결과 패널은 renderResultPanel()로 별도 렌더링
- */
-export function useElementPicker(chatSendMessage?: (content: string) => void) {
+export function useElementPicker() {
   const [picking, setPicking] = useState(false);
   const [result, setResult] = useState<PickerResult | null>(null);
-  const [registered, setRegistered] = useState(false);
+  const [registered, setRegistered] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+  const [registerError, setRegisterError] = useState('');
 
   useEffect(() => {
     const listener = (message: ExtensionMessage) => {
@@ -37,32 +34,50 @@ export function useElementPicker(chatSendMessage?: (content: string) => void) {
     } else {
       setPicking(true);
       setResult(null);
-      setRegistered(false);
+      setRegistered('idle');
       chrome.runtime.sendMessage({ type: 'ELEMENT_PICKER_START' } satisfies ExtensionMessage);
     }
   }, [picking]);
 
-  const registerApi = useCallback((api: CapturedApi) => {
+  const registerApi = useCallback(async (api: CapturedApi) => {
     let pathname: string;
     try { pathname = new URL(api.url).pathname; } catch { pathname = api.url; }
     const toolName = pathname.split('/').filter(Boolean).join('_') || 'api_tool';
     const description = `${api.method} ${pathname}`;
 
-    const message = `다음 API를 XGEN 실행도구에 등록해줘. register_tool을 호출해서 등록하고 결과를 알려줘.\n- function_name: ${toolName}\n- api_url: ${api.url}\n- api_method: ${api.method}\n- description: ${description}\n- body_type: ${api.contentType || 'application/json'}${api.requestBody ? `\n- api_body 예시: ${api.requestBody.slice(0, 300)}` : ''}`;
+    setRegistered('loading');
+    setRegisterError('');
 
-    if (chatSendMessage) {
-      chatSendMessage(message);
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'PAGE_COMMAND',
+        requestId: crypto.randomUUID(),
+        action: 'register_tool',
+        params: {
+          function_name: toolName,
+          api_url: api.url,
+          api_method: api.method,
+          description,
+          body_type: api.contentType || 'application/json',
+        },
+      } satisfies ExtensionMessage);
+
+      // PAGE_COMMAND_RESULT는 비동기로 올 수 있으므로 약간 대기
+      await new Promise(r => setTimeout(r, 2000));
+      setRegistered('done');
+    } catch (err) {
+      setRegistered('error');
+      setRegisterError(err instanceof Error ? err.message : 'Unknown error');
     }
-
-    setRegistered(true);
-  }, [chatSendMessage]);
+  }, []);
 
   const closeResult = useCallback(() => {
     setResult(null);
-    setRegistered(false);
+    setRegistered('idle');
+    setRegisterError('');
   }, []);
 
-  return { picking, result, registered, togglePicker, registerApi, closeResult };
+  return { picking, result, registered, registerError, togglePicker, registerApi, closeResult };
 }
 
 export function ElementPickerButton() {
@@ -89,12 +104,15 @@ export function ElementPickerButton() {
   );
 }
 
-export function PickerResultPanel({ result, registered, registerApi, closeResult }: {
+export function PickerResultPanel({ result, registered, registerError, registerApi, closeResult }: {
   result: PickerResult;
-  registered: boolean;
+  registered: 'idle' | 'loading' | 'done' | 'error';
+  registerError: string;
   registerApi: (api: CapturedApi) => void;
   closeResult: () => void;
 }) {
+  const filteredApis = result.apis.filter(a => a.method !== 'NAVIGATION');
+
   return (
     <div className="border-b border-gray-200 bg-gray-50 px-3 py-2">
       <div className="flex items-center justify-between mb-1.5">
@@ -106,42 +124,55 @@ export function PickerResultPanel({ result, registered, registerApi, closeResult
         </button>
       </div>
 
-      <div className="text-[11px] text-gray-500 mb-1.5">
-        <span className="font-mono bg-gray-200 px-1 rounded">{result.elementInfo.tag}</span>
-        {result.elementInfo.text && (
-          <span className="ml-1">"{result.elementInfo.text.slice(0, 20)}"</span>
-        )}
-      </div>
+      {registered === 'loading' && (
+        <p className="text-[11px] text-violet-500">등록 중...</p>
+      )}
+      {registered === 'done' && (
+        <p className="text-[11px] text-green-600">등록 완료</p>
+      )}
+      {registered === 'error' && (
+        <p className="text-[11px] text-red-500">등록 실패: {registerError}</p>
+      )}
 
-      {result.apis.filter(a => a.method !== 'NAVIGATION').length === 0 ? (
-        <p className="text-[11px] text-gray-400">
-          API 요청이 캡처되지 않았습니다.
-        </p>
-      ) : (
-        <div className="space-y-1 max-h-40 overflow-y-auto">
-          {result.apis.filter(a => a.method !== 'NAVIGATION').map((api) => (
-            <div key={api.id} className="flex items-center gap-1.5 text-[10px]">
-              <span className={`font-mono font-bold px-1 py-0.5 rounded ${
-                api.method === 'GET' ? 'bg-green-100 text-green-700' :
-                api.method === 'POST' ? 'bg-blue-100 text-blue-700' :
-                'bg-gray-100 text-gray-600'
-              }`}>
-                {api.method}
-              </span>
-              <span className="font-mono text-gray-500 truncate flex-1">
-                {(() => { try { return new URL(api.url).pathname; } catch { return api.url; } })()}
-              </span>
-              <span className="text-gray-300">{api.responseStatus}</span>
-              <button
-                onClick={() => registerApi(api)}
-                disabled={registered}
-                className="px-1.5 py-0.5 bg-violet-500 text-white rounded hover:bg-violet-600 disabled:opacity-40 text-[9px] flex-none"
-              >
-                {registered ? '전송됨' : '등록'}
-              </button>
+      {registered === 'idle' && (
+        <>
+          <div className="text-[11px] text-gray-500 mb-1.5">
+            <span className="font-mono bg-gray-200 px-1 rounded">{result.elementInfo.tag}</span>
+            {result.elementInfo.text && (
+              <span className="ml-1">"{result.elementInfo.text.slice(0, 20)}"</span>
+            )}
+          </div>
+
+          {filteredApis.length === 0 ? (
+            <p className="text-[11px] text-gray-400">
+              API 요청이 캡처되지 않았습니다.
+            </p>
+          ) : (
+            <div className="space-y-1 max-h-40 overflow-y-auto">
+              {filteredApis.map((api) => (
+                <div key={api.id} className="flex items-center gap-1.5 text-[10px]">
+                  <span className={`font-mono font-bold px-1 py-0.5 rounded ${
+                    api.method === 'GET' ? 'bg-green-100 text-green-700' :
+                    api.method === 'POST' ? 'bg-blue-100 text-blue-700' :
+                    'bg-gray-100 text-gray-600'
+                  }`}>
+                    {api.method}
+                  </span>
+                  <span className="font-mono text-gray-500 truncate flex-1">
+                    {(() => { try { return new URL(api.url).pathname; } catch { return api.url; } })()}
+                  </span>
+                  <span className="text-gray-300">{api.responseStatus}</span>
+                  <button
+                    onClick={() => registerApi(api)}
+                    className="px-1.5 py-0.5 bg-violet-500 text-white rounded hover:bg-violet-600 text-[9px] flex-none"
+                  >
+                    등록
+                  </button>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+        </>
       )}
     </div>
   );
