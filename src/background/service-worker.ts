@@ -656,9 +656,11 @@ async function autoMatchAuthProfile(
     if (apiDomain === 'localhost') return undefined;
 
     // 1) 기존 프로필에서 도메인 매칭
+    console.log(`[XGEN SW] autoMatchAuthProfile: serverUrl=${serverUrl}, apiDomain=${apiDomain}, token=${authToken?.slice(0, 20)}...`);
     const resp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
       headers: { Authorization: `Bearer ${authToken}` },
     });
+    console.log(`[XGEN SW] auth-profiles response: ${resp.status}`);
 
     if (resp.ok) {
       const profiles = await resp.json() as Array<{
