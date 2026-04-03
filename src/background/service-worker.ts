@@ -596,6 +596,7 @@ async function handleApiHookAction(
           },
         };
 
+        console.log(`[XGEN SW] register_tool savePayload auth_profile_id: ${(savePayload.content as any).auth_profile_id ?? 'NONE'}`);
         const response = await fetch(`${serverUrl}/api/tools/storage/save`, {
           method: 'POST',
           headers: {
