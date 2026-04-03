@@ -46,7 +46,9 @@ export function mainWorldHookFunction() {
   const originalFetch = window.fetch;
   window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
     const startTime = Date.now();
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    // 상대 경로를 절대 URL로 변환
+    const url = rawUrl.startsWith('/') ? `${window.location.origin}${rawUrl}` : rawUrl.startsWith('http') ? rawUrl : `${window.location.origin}/${rawUrl}`;
 
     if (shouldIgnore(url)) {
       return originalFetch.call(this, input, init);
@@ -116,9 +118,11 @@ export function mainWorldHookFunction() {
   const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
 
   XMLHttpRequest.prototype.open = function (method: string, url: string | URL, ...rest: any[]) {
+    const rawUrl = typeof url === 'string' ? url : url.toString();
+    const fullUrl = rawUrl.startsWith('/') ? `${window.location.origin}${rawUrl}` : rawUrl.startsWith('http') ? rawUrl : `${window.location.origin}/${rawUrl}`;
     (this as any).__xgen = {
       method: method.toUpperCase(),
-      url: typeof url === 'string' ? url : url.toString(),
+      url: fullUrl,
       requestHeaders: {} as Record<string, string>,
       startTime: 0,
     };
