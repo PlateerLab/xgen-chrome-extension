@@ -20,8 +20,22 @@ export function mainWorldHookFunction() {
     if (url.startsWith('chrome-extension://')) return true;
     if (url.startsWith('data:')) return true;
     if (url.startsWith('blob:')) return true;
-    // favicon, analytics 등 무시
+    // 정적 리소스 무시
     if (url.includes('favicon.ico')) return true;
+    if (/\.(css|js|woff2?|ttf|eot|svg|png|jpg|jpeg|gif|webp|ico|map)(\?|$)/i.test(url)) return true;
+    // analytics/tracking 무시
+    if (url.includes('google-analytics') || url.includes('gtag') || url.includes('fbevents')) return true;
+    return false;
+  }
+
+  /** HTML 응답은 API가 아닌 페이지 요청이므로 캡처 제외 */
+  function shouldSkipResponse(contentType: string): boolean {
+    if (!contentType) return false;
+    const ct = contentType.toLowerCase();
+    if (ct.includes('text/html')) return true;
+    if (ct.includes('text/css')) return true;
+    if (ct.includes('image/')) return true;
+    if (ct.includes('font/')) return true;
     return false;
   }
 
@@ -77,6 +91,12 @@ export function mainWorldHookFunction() {
 
       const responseHeaders: Record<string, string> = {};
       response.headers.forEach((value, key) => { responseHeaders[key] = value; });
+
+      // HTML/이미지/폰트 등 비-API 응답은 캡처 제외
+      const respContentType = response.headers.get('content-type') || '';
+      if (shouldSkipResponse(respContentType)) {
+        return response;
+      }
 
       dispatch({
         id: crypto.randomUUID(),
@@ -161,19 +181,23 @@ export function mainWorldHookFunction() {
         }
       });
 
-      dispatch({
-        id: crypto.randomUUID(),
-        timestamp: meta.startTime,
-        url: meta.url,
-        method: meta.method,
-        requestHeaders: meta.requestHeaders,
-        requestBody: truncate(requestBody),
-        responseStatus: this.status,
-        responseHeaders,
-        responseBody: truncate(this.responseText || null),
-        contentType: this.getResponseHeader('content-type') || '',
-        duration,
-      });
+      // HTML/이미지 등 비-API 응답 제외
+      const xhrContentType = this.getResponseHeader('content-type') || '';
+      if (!shouldSkipResponse(xhrContentType)) {
+        dispatch({
+          id: crypto.randomUUID(),
+          timestamp: meta.startTime,
+          url: meta.url,
+          method: meta.method,
+          requestHeaders: meta.requestHeaders,
+          requestBody: truncate(requestBody),
+          responseStatus: this.status,
+          responseHeaders,
+          responseBody: truncate(this.responseText || null),
+          contentType: xhrContentType,
+          duration,
+        });
+      }
     });
 
     return originalSend.call(this, body);
