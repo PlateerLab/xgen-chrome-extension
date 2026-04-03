@@ -11,7 +11,7 @@ interface PickerResult {
  * 아이콘 버튼 (toolbar용) — 반환
  * 결과 패널은 renderResultPanel()로 별도 렌더링
  */
-export function useElementPicker() {
+export function useElementPicker(chatSendMessage?: (content: string) => void) {
   const [picking, setPicking] = useState(false);
   const [result, setResult] = useState<PickerResult | null>(null);
   const [registered, setRegistered] = useState(false);
@@ -46,13 +46,14 @@ export function useElementPicker() {
     const toolName = new URL(api.url).pathname.split('/').filter(Boolean).join('_') || 'api_tool';
     const description = `${api.method} ${new URL(api.url).pathname}`;
 
-    chrome.runtime.sendMessage({
-      type: 'SEND_MESSAGE',
-      content: `다음 API를 XGEN 도구로 등록해줘:\n- function_name: ${toolName}\n- api_url: ${api.url}\n- api_method: ${api.method}\n- description: ${description}\n- body_type: ${api.contentType || 'application/json'}${api.requestBody ? `\n- request body 예시: ${api.requestBody.slice(0, 300)}` : ''}`,
-    } satisfies ExtensionMessage);
+    const message = `다음 API를 XGEN 실행도구에 등록해줘. register_tool을 호출해서 등록하고 결과를 알려줘.\n- function_name: ${toolName}\n- api_url: ${api.url}\n- api_method: ${api.method}\n- description: ${description}\n- body_type: ${api.contentType || 'application/json'}${api.requestBody ? `\n- request body 예시: ${api.requestBody.slice(0, 300)}` : ''}`;
+
+    if (chatSendMessage) {
+      chatSendMessage(message);
+    }
 
     setRegistered(true);
-  }, []);
+  }, [chatSendMessage]);
 
   const closeResult = useCallback(() => {
     setResult(null);
