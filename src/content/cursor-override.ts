@@ -44,6 +44,13 @@ export function injectCursorOverride(): void {
       transition: transform 0.1s ease;
     }
 
+    /* ai-motion WebGL 테두리 효과 완전 제거 */
+    ._wrapper_1ooyb_1 canvas,
+    ._wrapper_1ooyb_1 > *:not(._cursor_1dgwb_2) {
+      display: none !important;
+      visibility: hidden !important;
+    }
+
     /* 오버레이 래퍼 — 배경 없음, 상호작용 차단 안 함 */
     ._wrapper_1ooyb_1,
     ._wrapper_1ooyb_1._visible_1ooyb_11 {
