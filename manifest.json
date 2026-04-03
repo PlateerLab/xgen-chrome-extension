@@ -21,11 +21,7 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "https://xgen.x2bee.com/*",
-        "http://localhost:*/*",
-        "https://*.x2bee.com/*"
-      ],
+      "matches": ["<all_urls>"],
       "js": ["src/content/index.ts"],
       "run_at": "document_idle"
     }

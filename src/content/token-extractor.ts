@@ -1,4 +1,12 @@
+function isXgenDomain(): boolean {
+  const host = window.location.hostname;
+  return host.includes('x2bee.com') || host === 'localhost';
+}
+
 export function extractAndSendToken(): void {
+  // XGEN 도메인에서만 토큰 추출
+  if (!isXgenDomain()) return;
+
   const token =
     localStorage.getItem('xgen_access_token') ??
     document.cookie.match(/access_token=([^;]+)/)?.[1] ??
@@ -16,6 +24,8 @@ export function extractAndSendToken(): void {
 }
 
 export function watchTokenChanges(): void {
+  if (!isXgenDomain()) return;
+
   // Re-extract token periodically (handles token refresh)
   setInterval(extractAndSendToken, 30_000);
 
