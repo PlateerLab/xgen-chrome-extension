@@ -60,7 +60,11 @@ export class GenericHandler implements PageHandler {
   }
 
   getAvailableActions(): string[] {
-    return ['click_element', 'input_text', 'select_option', 'scroll'];
+    return [
+      'click_element', 'input_text', 'select_option', 'scroll',
+      // API Hook (service worker에서 처리)
+      'start_api_hook', 'stop_api_hook', 'get_captured_apis', 'clear_captured_apis', 'register_tool',
+    ];
   }
 
   async executeCommand(
@@ -72,16 +76,22 @@ export class GenericHandler implements PageHandler {
       // 그대로 사용해야 AI가 지정한 인덱스와 일치한다.
       // updateTree()는 DOM을 재스캔하여 인덱스를 재할당하므로 불일치 발생.
 
+      // 마스크 표시 (가상 커서 오버레이)
+      await this.controller.showMask().catch(() => {});
+
       switch (action) {
         case 'click_element':
+          await this.moveCursorToElement(params.index as number);
           await this.controller.clickElement(params.index as number);
           break;
 
         case 'input_text':
+          await this.moveCursorToElement(params.index as number);
           await this.controller.inputText(params.index as number, params.text as string);
           break;
 
         case 'select_option':
+          await this.moveCursorToElement(params.index as number);
           await this.controller.selectOption(params.index as number, params.text as string);
           break;
 
@@ -101,6 +111,10 @@ export class GenericHandler implements PageHandler {
 
       // DOM이 안정될 때까지 대기 (MutationObserver 기반)
       await this.waitForDomStability();
+
+      // 마스크 숨기기
+      await this.controller.hideMask().catch(() => {});
+
       const state = await this.controller.getBrowserState();
       await this.controller.cleanUpHighlights();
       const updatedContext: PageContext = {
@@ -115,11 +129,47 @@ export class GenericHandler implements PageHandler {
 
       return { success: true, action, pageContext: updatedContext };
     } catch (err) {
+      await this.controller.hideMask().catch(() => {});
       return {
         success: false,
         action,
         error: err instanceof Error ? err.message : String(err),
       };
+    }
+  }
+
+  /**
+   * 가상 커서를 대상 요소 위치로 이동시킨다.
+   * PageController 내부의 SimulatorMask가 MovePointerTo 이벤트를 수신하여 커서를 이동.
+   */
+  private async moveCursorToElement(index: number): Promise<void> {
+    try {
+      // PageController의 selectorMap에서 element 가져오기 (내부 API 사용)
+      // clickElement가 내부적으로 하는 것과 동일하게 element 찾기
+      const state = (this.controller as any);
+      const selectorMap = state.selectorMap as Map<number, any> | undefined;
+      if (!selectorMap) return;
+
+      const node = selectorMap.get(index);
+      if (!node?.ref) return;
+
+      const el = node.ref as HTMLElement;
+      const rect = el.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+
+      // SimulatorMask의 커서 이동 이벤트 발생
+      window.dispatchEvent(new CustomEvent('PageAgent::MovePointerTo', {
+        detail: { x, y },
+      }));
+
+      // 커서 이동 애니메이션 대기
+      await new Promise((r) => setTimeout(r, 400));
+
+      // 클릭 애니메이션 이벤트 발생
+      window.dispatchEvent(new CustomEvent('PageAgent::ClickPointer'));
+    } catch {
+      // 커서 이동 실패해도 동작에 영향 없음
     }
   }
 

@@ -97,15 +97,7 @@ chrome.runtime.onMessage.addListener(
         sendResponse({ ok: true });
         break;
 
-      // ── API Hook ──
-      case 'API_HOOK_START':
-        handleApiHookStart().then(() => sendResponse({ ok: true }));
-        return true;
-
-      case 'API_HOOK_STOP':
-        handleApiHookStop().then(() => sendResponse({ ok: true }));
-        return true;
-
+      // ── API Hook: content script relay → SW 저장 ──
       case 'API_CAPTURED': {
         const tabId = sender.tab?.id || 0;
         const captured = message.data as CapturedApi;
@@ -115,16 +107,9 @@ chrome.runtime.onMessage.addListener(
           capturedApisByTab.set(tabId, []);
         }
         capturedApisByTab.get(tabId)!.push(captured);
-
-        // sidepanel에 실시간 전달
-        broadcastToSidePanel({ type: 'API_CAPTURED', data: captured });
         sendResponse({ ok: true });
         break;
       }
-
-      case 'SAVE_TOOL':
-        handleSaveTool(message.tool, message.serverUrl).then((result) => sendResponse(result));
-        return true;
     }
 
     return false;
@@ -225,14 +210,25 @@ async function handleSSEEvent(event: SSEEvent) {
       });
       break;
 
-    case 'page_command':
+    case 'page_command': {
+      const requestId = (event as any).requestId || crypto.randomUUID();
+
+      // API Hook 액션은 SW에서 직접 처리 (content script로 보내지 않음)
+      const apiHookResult = await handleApiHookAction(event.action, event.params);
+      if (apiHookResult) {
+        await postCommandResultToBackend(requestId, apiHookResult);
+        break;
+      }
+
+      // 그 외 액션은 content script로 전달
       await sendToContentScript({
         type: 'PAGE_COMMAND',
-        requestId: (event as any).requestId || crypto.randomUUID(),
+        requestId,
         action: event.action,
         params: event.params,
       });
       break;
+    }
 
     case 'token_usage':
       broadcastToSidePanel({ type: 'STREAM_TOKEN_USAGE', tokenUsage: (event as any).usage });
@@ -325,86 +321,205 @@ function broadcastToSidePanel(message: ExtensionMessage) {
   chrome.runtime.sendMessage(message).catch(() => {});
 }
 
-// ── API Hook helpers ──
+// ── API Hook: page_command 액션 처리 ──
 
-async function handleApiHookStart() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs.length === 0 || !tabs[0].id) return;
-  const tabId = tabs[0].id;
+const API_HOOK_ACTIONS = new Set([
+  'start_api_hook',
+  'stop_api_hook',
+  'get_captured_apis',
+  'clear_captured_apis',
+  'register_tool',
+]);
 
-  if (hookedTabs.has(tabId)) return; // 이미 활성
-
-  // 1) relay (content script, isolated world) 먼저 주입
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: apiHookRelayFunction,
-    world: 'ISOLATED',
-  });
-
-  // 2) MAIN world 후킹 주입
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: mainWorldHookFunction,
-    world: 'MAIN',
-  });
-
-  hookedTabs.add(tabId);
-  capturedApisByTab.set(tabId, []);
-  broadcastToSidePanel({ type: 'API_HOOK_STATUS', active: true });
-}
-
-async function handleApiHookStop() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs.length === 0 || !tabs[0].id) return;
-  const tabId = tabs[0].id;
-
-  // MAIN world에서 flag 해제
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: mainWorldUnhookFunction,
-    world: 'MAIN',
-  }).catch(() => {});
-
-  hookedTabs.delete(tabId);
-  broadcastToSidePanel({ type: 'API_HOOK_STATUS', active: false });
-}
-
-async function handleSaveTool(
-  tool: import('../shared/api-hook-types').ToolSaveRequest,
-  serverUrl: string,
-) {
-  // XGEN 도구 관리에 저장할 토큰 획득
-  const authToken = tokensByOrigin[serverUrl] || await getStoredToken(serverUrl);
-  if (!authToken) {
-    broadcastToSidePanel({
-      type: 'SAVE_TOOL_RESULT',
-      success: false,
-      error: `${serverUrl}에 로그인되어 있지 않습니다`,
-    });
-    return { success: false };
-  }
+/**
+ * API Hook 관련 page_command 액션을 SW에서 직접 처리.
+ * 해당 액션이면 결과를 반환, 아니면 null 반환 (content script로 전달).
+ */
+async function handleApiHookAction(
+  action: string,
+  params: Record<string, unknown>,
+): Promise<import('../shared/types').PageCommandResult | null> {
+  if (!API_HOOK_ACTIONS.has(action)) return null;
 
   try {
-    const response = await fetch(`${serverUrl}/api/tools/storage/save`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${authToken}`,
-      },
-      body: JSON.stringify(tool),
-    });
+    switch (action) {
+      case 'start_api_hook': {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tabs.length === 0 || !tabs[0].id) {
+          return { success: false, action, error: 'Active tab not found' };
+        }
+        const tabId = tabs[0].id;
 
-    const result = await response.json();
-    if (!response.ok) {
-      throw new Error(result.detail || `HTTP ${response.status}`);
+        if (hookedTabs.has(tabId)) {
+          return { success: true, action, result: 'API hook already active' };
+        }
+
+        // relay (isolated world) + MAIN world hook 주입
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          func: apiHookRelayFunction,
+          world: 'ISOLATED' as any,
+        });
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          func: mainWorldHookFunction,
+          world: 'MAIN' as any,
+        });
+
+        hookedTabs.add(tabId);
+        capturedApisByTab.set(tabId, []);
+        return { success: true, action, result: 'API hook started. All fetch/XHR requests on this page will be captured.' };
+      }
+
+      case 'stop_api_hook': {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tabs.length === 0 || !tabs[0].id) {
+          return { success: false, action, error: 'Active tab not found' };
+        }
+        const tabId = tabs[0].id;
+
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          func: mainWorldUnhookFunction,
+          world: 'MAIN' as any,
+        }).catch(() => {});
+
+        const count = capturedApisByTab.get(tabId)?.length || 0;
+        hookedTabs.delete(tabId);
+        return { success: true, action, result: `API hook stopped. ${count} requests captured.` };
+      }
+
+      case 'get_captured_apis': {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        const tabId = tabs[0]?.id || 0;
+        const captured = capturedApisByTab.get(tabId) || [];
+
+        // 필터 적용
+        let filtered = captured;
+        if (params.url_pattern) {
+          const pattern = (params.url_pattern as string).toLowerCase();
+          filtered = filtered.filter((a) => a.url.toLowerCase().includes(pattern));
+        }
+        if (params.method) {
+          const method = (params.method as string).toUpperCase();
+          filtered = filtered.filter((a) => a.method === method);
+        }
+        if (params.min_status) {
+          filtered = filtered.filter((a) => a.responseStatus >= (params.min_status as number));
+        }
+        if (params.max_status) {
+          filtered = filtered.filter((a) => a.responseStatus <= (params.max_status as number));
+        }
+
+        // 요약 형태로 반환 (토큰 효율)
+        const summary = filtered.map((a) => ({
+          id: a.id,
+          method: a.method,
+          url: a.url,
+          status: a.responseStatus,
+          content_type: a.contentType,
+          duration: a.duration,
+          request_body_preview: a.requestBody?.slice(0, 200) || null,
+          response_body_preview: a.responseBody?.slice(0, 500) || null,
+        }));
+
+        return {
+          success: true,
+          action,
+          result: {
+            total: captured.length,
+            filtered: filtered.length,
+            apis: summary,
+          },
+        };
+      }
+
+      case 'clear_captured_apis': {
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        const tabId = tabs[0]?.id || 0;
+        const count = capturedApisByTab.get(tabId)?.length || 0;
+        capturedApisByTab.set(tabId, []);
+        return { success: true, action, result: `Cleared ${count} captured APIs.` };
+      }
+
+      case 'register_tool': {
+        const toolData = params as Record<string, unknown>;
+
+        // XGEN 서버 URL 결정: params에 지정되었으면 사용, 아니면 저장된 origin 사용
+        let serverUrl = toolData.server_url as string | undefined;
+        if (!serverUrl) {
+          // 저장된 XGEN origin에서 가져오기
+          const stored = await chrome.storage.local.get(STORAGE_KEYS.SERVER_URL);
+          serverUrl = stored[STORAGE_KEYS.SERVER_URL] as string;
+        }
+        if (!serverUrl) {
+          // 마지막 시도: 토큰이 있는 xgen origin 찾기
+          const xgenOrigin = Object.keys(tokensByOrigin).find((o) => o.includes('xgen'));
+          serverUrl = xgenOrigin;
+        }
+        if (!serverUrl) {
+          return { success: false, action, error: 'XGEN server URL not found. Provide server_url parameter or log in to XGEN first.' };
+        }
+
+        const authToken = tokensByOrigin[serverUrl] || await getStoredToken(serverUrl);
+        if (!authToken) {
+          return { success: false, action, error: `Not logged in to ${serverUrl}` };
+        }
+
+        // tool 저장 요청
+        const savePayload = {
+          function_name: toolData.function_name as string,
+          content: {
+            function_name: toolData.function_name as string,
+            function_id: (toolData.function_id as string) || `tool_${Date.now().toString(36)}`,
+            description: (toolData.description as string) || '',
+            api_url: toolData.api_url as string,
+            api_method: (toolData.api_method as string) || 'GET',
+            api_header: (toolData.api_header as Record<string, string>) || {},
+            api_body: (toolData.api_body as Record<string, unknown>) || {},
+            static_body: (toolData.static_body as Record<string, unknown>) || {},
+            body_type: (toolData.body_type as string) || 'application/json',
+            api_timeout: (toolData.api_timeout as number) || 30,
+            is_query_string: (toolData.is_query_string as boolean) || false,
+            response_filter: (toolData.response_filter as boolean) || false,
+            html_parser: (toolData.html_parser as boolean) || false,
+            response_filter_path: (toolData.response_filter_path as string) || '',
+            response_filter_field: (toolData.response_filter_field as string) || '',
+            status: 'active',
+            metadata: (toolData.metadata as Record<string, unknown>) || {},
+          },
+        };
+
+        const response = await fetch(`${serverUrl}/api/tools/storage/save`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify(savePayload),
+        });
+
+        const result = await response.json();
+        if (!response.ok) {
+          return { success: false, action, error: result.detail || `HTTP ${response.status}` };
+        }
+
+        return {
+          success: true,
+          action,
+          result: `Tool "${toolData.function_name}" registered successfully to ${serverUrl}`,
+        };
+      }
+
+      default:
+        return null;
     }
-
-    broadcastToSidePanel({ type: 'SAVE_TOOL_RESULT', success: true });
-    return { success: true };
   } catch (err) {
-    const error = err instanceof Error ? err.message : 'Unknown error';
-    broadcastToSidePanel({ type: 'SAVE_TOOL_RESULT', success: false, error });
-    return { success: false, error };
+    return {
+      success: false,
+      action,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 

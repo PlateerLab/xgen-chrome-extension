@@ -96,11 +96,5 @@ export type ExtensionMessage =
   | { type: 'PAGE_COMMAND_RESULT'; requestId: string; result: PageCommandResult }
   | { type: 'CANVAS_COMMAND'; requestId: string; action: string; params: Record<string, unknown> }
   | { type: 'CANVAS_RESULT'; requestId: string; result: unknown }
-  // ── API Hook ──
-  | { type: 'API_HOOK_START' }
-  | { type: 'API_HOOK_STOP' }
-  | { type: 'API_HOOK_STATUS'; active: boolean }
-  | { type: 'API_CAPTURED'; data: import('./api-hook-types').CapturedApi }
-  | { type: 'API_CAPTURED_LIST'; list: import('./api-hook-types').CapturedApi[] }
-  | { type: 'SAVE_TOOL'; tool: import('./api-hook-types').ToolSaveRequest; serverUrl: string }
-  | { type: 'SAVE_TOOL_RESULT'; success: boolean; error?: string };
+  // ── API Hook (content script → service worker) ──
+  | { type: 'API_CAPTURED'; data: import('./api-hook-types').CapturedApi };
