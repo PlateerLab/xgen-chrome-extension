@@ -62,7 +62,13 @@ export function useElementPicker() {
         },
       } satisfies ExtensionMessage);
 
-      if (result && result.success === false) {
+      if (result && result.success && result.result) {
+        const hasAuth = result.result.includes('auth_profile');
+        setRegistered('done');
+        if (!hasAuth) {
+          setRegisterError('인증 프로필 없이 등록됨 — 인증 필요 시 로그인 후 재등록 필요');
+        }
+      } else if (result && result.success === false) {
         const isAuthError = result.error?.includes('인증이 필요');
         if (isAuthError) {
           // 인증 필요 → AI에게 내부적으로 로그인 유도 메시지 전송 (채팅에 안 보임)
@@ -80,8 +86,6 @@ export function useElementPicker() {
           setRegistered('error');
           setRegisterError(result.error || '등록 실패');
         }
-      } else {
-        setRegistered('done');
       }
     } catch (err) {
       setRegistered('error');

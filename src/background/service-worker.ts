@@ -682,10 +682,12 @@ async function autoMatchAuthProfile(
     if (!capturedLogin) {
       const capturedAuth = findCapturedAuthForDomain(apiDomain);
       if (capturedAuth) {
-        // 인증 헤더 있지만 로그인 미캡처 → 로그인 필요
+        // Authorization 헤더 있지만 로그인 미캡처 → 로그인 필요
         return 'LOGIN_REQUIRED';
       }
-      // 인증 헤더 없음 → 인증 불필요한 API
+      // Authorization 헤더 없음 — 하지만 같은 도메인에 로그인 API가 존재하면
+      // 쿠키 기반 인증일 수 있으므로 로그인 필요로 판단
+      // (로그인 API는 이전 캡처 세션에서 남아있을 수 있음)
       return undefined;
     }
 
