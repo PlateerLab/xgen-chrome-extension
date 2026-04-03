@@ -1,19 +1,20 @@
 /**
  * SimulatorMask 커서 스타일 오버라이드
- * 기존 SVG 그라데이션 커서 + 테두리를 완전 제거하고
- * 깔끔한 마우스 포인터로 대체
+ * 기존 SVG 그라데이션 커서를 완전 제거하고
+ * Lucide mouse-pointer-2 아이콘 기반의 깔끔한 마우스 커서로 대체
+ * (https://lucide.dev/icons/mouse-pointer-2 — ISC License)
  */
 export function injectCursorOverride(): void {
   const style = document.createElement('style');
   style.textContent = `
     /* 커서 컨테이너 */
     ._cursor_1dgwb_2 {
-      --cursor-size: 20px !important;
-      width: 20px !important;
-      height: 20px !important;
+      --cursor-size: 28px !important;
+      width: 28px !important;
+      height: 28px !important;
     }
 
-    /* 기존 보더/필링/ripple 내부 요소 전부 숨김 */
+    /* 기존 보더/필링/ripple 전부 제거 */
     ._cursorBorder_1dgwb_10,
     ._cursorFilling_1dgwb_25,
     ._cursorRipple_1dgwb_39 {
@@ -23,35 +24,36 @@ export function injectCursorOverride(): void {
       visibility: hidden !important;
     }
 
-    /* 마우스 포인터 — ::before로 삽입 */
+    /* Lucide mouse-pointer-2: 흰색 fill + 그레이 stroke */
     ._cursor_1dgwb_2::before {
       content: '';
       position: absolute;
       top: 0;
       left: 0;
-      width: 17px;
-      height: 22px;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='17' height='22' fill='none'%3E%3Cpath d='M1 1v18.094l4.713-4.715 3.974 7.058 2.755-1.55-3.974-7.06H15.4L1 1z' fill='%23fff'/%3E%3Cpath d='M1 1v18.094l4.713-4.715 3.974 7.058 2.755-1.55-3.974-7.06H15.4L1 1z' stroke='%23666' stroke-width='1' stroke-linejoin='round'/%3E%3C/svg%3E");
-      background-size: 17px 22px;
+      width: 28px;
+      height: 28px;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 24 24' fill='white' stroke='%23555' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z'/%3E%3C/svg%3E");
+      background-size: 28px 28px;
       background-repeat: no-repeat;
+      filter: drop-shadow(0 1px 2px rgba(0,0,0,0.18));
       pointer-events: none;
       z-index: 10001;
     }
 
-    /* 클릭 시 살짝 줄어드는 효과 */
+    /* 클릭 시 축소 효과 */
     ._cursor_1dgwb_2._clicking_1dgwb_57::before {
-      transform: scale(0.85);
+      transform: scale(0.82);
       transition: transform 0.1s ease;
     }
 
-    /* ai-motion WebGL 테두리 효과 완전 제거 */
+    /* ai-motion WebGL 테두리 효과 제거 */
     ._wrapper_1ooyb_1 canvas,
     ._wrapper_1ooyb_1 > *:not(._cursor_1dgwb_2) {
       display: none !important;
       visibility: hidden !important;
     }
 
-    /* 오버레이 래퍼 — 배경 없음, 상호작용 차단 안 함 */
+    /* 오버레이 래퍼 — 배경 없음 */
     ._wrapper_1ooyb_1,
     ._wrapper_1ooyb_1._visible_1ooyb_11 {
       background: none !important;
