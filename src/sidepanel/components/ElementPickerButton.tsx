@@ -43,8 +43,10 @@ export function useElementPicker(chatSendMessage?: (content: string) => void) {
   }, [picking]);
 
   const registerApi = useCallback((api: CapturedApi) => {
-    const toolName = new URL(api.url).pathname.split('/').filter(Boolean).join('_') || 'api_tool';
-    const description = `${api.method} ${new URL(api.url).pathname}`;
+    let pathname: string;
+    try { pathname = new URL(api.url).pathname; } catch { pathname = api.url; }
+    const toolName = pathname.split('/').filter(Boolean).join('_') || 'api_tool';
+    const description = `${api.method} ${pathname}`;
 
     const message = `다음 API를 XGEN 실행도구에 등록해줘. register_tool을 호출해서 등록하고 결과를 알려줘.\n- function_name: ${toolName}\n- api_url: ${api.url}\n- api_method: ${api.method}\n- description: ${description}\n- body_type: ${api.contentType || 'application/json'}${api.requestBody ? `\n- request body 예시: ${api.requestBody.slice(0, 300)}` : ''}`;
 
