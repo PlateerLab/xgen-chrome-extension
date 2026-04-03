@@ -137,14 +137,13 @@ async function handleSendMessage(content: string, summary?: string) {
     STORAGE_KEYS.MODEL,
   ]);
 
-  // 항상 active tab의 origin을 서버 URL로 사용
-  const serverUrl = (await getOriginFromTab()) || '';
+  // XGEN 서버 URL 결정: 저장된 XGEN origin 우선, 없으면 active tab origin
+  const serverUrl = await resolveXgenServerUrl();
   if (!serverUrl) {
-    broadcastToSidePanel({ type: 'STREAM_ERROR', error: 'XGEN 페이지를 먼저 열어주세요' });
+    broadcastToSidePanel({ type: 'STREAM_ERROR', error: 'XGEN에 먼저 로그인해주세요 (XGEN 페이지에서 한 번 접속하면 세션이 유지됩니다)' });
     return;
   }
 
-  // active tab의 origin에 매칭되는 토큰 사용
   const authToken = tokensByOrigin[serverUrl] || await getStoredToken(serverUrl);
   if (!authToken) {
     broadcastToSidePanel({ type: 'STREAM_ERROR', error: `${serverUrl}에 먼저 로그인해주세요` });
@@ -257,6 +256,33 @@ async function getOriginFromTab(): Promise<string | null> {
   return null;
 }
 
+/**
+ * XGEN 서버 URL을 결정한다.
+ * 1순위: 토큰이 있는 XGEN origin (메모리 캐시)
+ * 2순위: storage에 저장된 serverUrl
+ * 3순위: active tab의 origin (XGEN 페이지인 경우)
+ */
+async function resolveXgenServerUrl(): Promise<string | null> {
+  // 1순위: 이미 토큰이 있는 xgen origin
+  const xgenOrigin = Object.keys(tokensByOrigin).find((o) => o.includes('xgen'));
+  if (xgenOrigin) return xgenOrigin;
+
+  // 2순위: storage에 저장된 서버 URL
+  const stored = await chrome.storage.local.get(STORAGE_KEYS.SERVER_URL);
+  const storedUrl = stored[STORAGE_KEYS.SERVER_URL] as string | undefined;
+  if (storedUrl) {
+    // 토큰도 복원 시도
+    const token = await getStoredToken(storedUrl);
+    if (token) return storedUrl;
+  }
+
+  // 3순위: active tab이 XGEN인 경우
+  const tabOrigin = await getOriginFromTab();
+  if (tabOrigin?.includes('xgen')) return tabOrigin;
+
+  return null;
+}
+
 async function getStoredToken(origin: string): Promise<string> {
   const result = await chrome.storage.local.get(`token:${origin}`);
   const token = result[`token:${origin}`] || '';
@@ -298,7 +324,7 @@ async function postCommandResultToBackend(
   requestId: string,
   result: unknown,
 ) {
-  const serverUrl = await getOriginFromTab();
+  const serverUrl = await resolveXgenServerUrl();
   if (!serverUrl) return;
 
   const authToken = tokensByOrigin[serverUrl] || (await getStoredToken(serverUrl));
@@ -445,20 +471,10 @@ async function handleApiHookAction(
       case 'register_tool': {
         const toolData = params as Record<string, unknown>;
 
-        // XGEN 서버 URL 결정: params에 지정되었으면 사용, 아니면 저장된 origin 사용
-        let serverUrl = toolData.server_url as string | undefined;
+        // XGEN 서버 URL 결정
+        let serverUrl = (toolData.server_url as string | undefined) || await resolveXgenServerUrl();
         if (!serverUrl) {
-          // 저장된 XGEN origin에서 가져오기
-          const stored = await chrome.storage.local.get(STORAGE_KEYS.SERVER_URL);
-          serverUrl = stored[STORAGE_KEYS.SERVER_URL] as string;
-        }
-        if (!serverUrl) {
-          // 마지막 시도: 토큰이 있는 xgen origin 찾기
-          const xgenOrigin = Object.keys(tokensByOrigin).find((o) => o.includes('xgen'));
-          serverUrl = xgenOrigin;
-        }
-        if (!serverUrl) {
-          return { success: false, action, error: 'XGEN server URL not found. Provide server_url parameter or log in to XGEN first.' };
+          return { success: false, action, error: 'XGEN server URL not found. Log in to XGEN first.' };
         }
 
         const authToken = tokensByOrigin[serverUrl] || await getStoredToken(serverUrl);
