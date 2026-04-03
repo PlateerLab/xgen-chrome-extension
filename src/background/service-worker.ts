@@ -688,14 +688,12 @@ async function autoMatchAuthProfile(
 
     const capturedLogin = findCapturedLoginForDomain(apiDomain);
     if (!capturedLogin) {
-      // 로그인 요청이 캡처되지 않음
-      // 인증 헤더가 있으면 api_header에 직접 포함하여 등록 가능 (auth profile 없이)
       const capturedAuth = findCapturedAuthForDomain(apiDomain);
       if (capturedAuth) {
-        // 인증 헤더는 있지만 로그인 캡처 없음 → auth profile 없이 진행 (undefined 반환)
-        return undefined;
+        // 인증 헤더 있지만 로그인 미캡처 → 로그인 필요
+        return 'LOGIN_REQUIRED';
       }
-      // 인증 헤더도 없음 → 등록 가능 (인증 불필요한 API)
+      // 인증 헤더 없음 → 인증 불필요한 API
       return undefined;
     }
 
