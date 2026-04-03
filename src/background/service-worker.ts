@@ -59,6 +59,13 @@ chrome.runtime.onMessage.addListener(
         sendResponse({ ok: true });
         break;
 
+      case 'STOP_STREAM':
+        activeAbortController?.abort();
+        activeAbortController = null;
+        broadcastToSidePanel({ type: 'STREAM_DONE' });
+        sendResponse({ ok: true });
+        break;
+
       case 'GET_PAGE_CONTEXT':
         getPageContextFromTab()
           .then((ctx) => sendResponse(ctx))

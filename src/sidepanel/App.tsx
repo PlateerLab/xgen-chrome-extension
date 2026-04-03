@@ -5,7 +5,7 @@ import { InputArea } from './components/InputArea';
 import { SettingsBar } from './components/SettingsBar';
 
 export function App() {
-  const { messages, isStreaming, sendMessage, clearMessages } = useChat();
+  const { messages, isStreaming, sendMessage, stopStream, clearMessages } = useChat();
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -50,7 +50,7 @@ export function App() {
       </div>
 
       {/* Input */}
-      <InputArea onSend={sendMessage} disabled={isStreaming} />
+      <InputArea onSend={sendMessage} onStop={stopStream} isStreaming={isStreaming} />
     </div>
   );
 }

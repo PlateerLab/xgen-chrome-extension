@@ -147,13 +147,17 @@ export function useChat() {
     [isStreaming, messages],
   );
 
+  const stopStream = useCallback(() => {
+    chrome.runtime.sendMessage({ type: 'STOP_STREAM' } satisfies ExtensionMessage);
+  }, []);
+
   const clearMessages = useCallback(() => {
     setMessages([]);
     streamingRef.current = null;
     setIsStreaming(false);
   }, []);
 
-  return { messages, isStreaming, pageContext, sendMessage, clearMessages };
+  return { messages, isStreaming, pageContext, sendMessage, stopStream, clearMessages };
 }
 
 /** 최근 대화 요약 빌드 (최대 6턴, 토큰 절약) */

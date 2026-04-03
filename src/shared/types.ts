@@ -82,6 +82,7 @@ export interface PageCommandResult {
 
 export type ExtensionMessage =
   | { type: 'SEND_MESSAGE'; content: string; summary?: string }
+  | { type: 'STOP_STREAM' }
   | { type: 'STREAM_TOKEN'; content: string }
   | { type: 'TOOL_START'; tool: string; input: string }
   | { type: 'TOOL_END'; tool: string; output: string }
