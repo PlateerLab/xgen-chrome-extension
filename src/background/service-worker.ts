@@ -116,6 +116,12 @@ chrome.runtime.onMessage.addListener(
           capturedApisByTab.set(tabId, []);
         }
         capturedApisByTab.get(tabId)!.push(captured);
+
+        // 로그인 요청 감지 시 auth profile 즉시 자동 생성
+        if (captured.method === 'POST' && /\/(login|auth|token|signin|oauth|session)/i.test(captured.url)) {
+          autoCreateAuthProfileFromCapture(captured.url).catch(() => {});
+        }
+
         sendResponse({ ok: true });
         break;
       }
@@ -931,6 +937,56 @@ function buildAuthProfileFromCaptured(
     ttl: 3600,
     refresh_before_expire: 300,
   };
+}
+
+// ── 로그인 캡처 시 auth profile 즉시 생성 ──
+
+async function autoCreateAuthProfileFromCapture(loginUrl: string) {
+  try {
+    const apiDomain = new URL(loginUrl).hostname;
+    const serverUrl = await resolveXgenServerUrl();
+    if (!serverUrl) return;
+
+    const authToken = tokensByOrigin[serverUrl] || await getStoredToken(serverUrl);
+    if (!authToken) return;
+
+    // 이미 프로필 있는지 확인
+    const resp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
+    if (resp.ok) {
+      const profiles = await resp.json() as Array<{ service_id: string; status: string }>;
+      const serviceId = apiDomain.replace('www.', '').replace(/\./g, '_');
+      if (profiles.some((p) => p.service_id === serviceId)) {
+        console.log(`[XGEN SW] Auth profile already exists: ${serviceId}`);
+        return;
+      }
+    }
+
+    // 로그인 캡처 찾기
+    const capturedLogin = findCapturedLoginForDomain(apiDomain);
+    if (!capturedLogin) return;
+
+    const serviceId = apiDomain.replace('www.', '').replace(/\./g, '_');
+    const profileData = buildAuthProfileFromLogin(serviceId, apiDomain, capturedLogin);
+
+    const createResp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authToken}`,
+      },
+      body: JSON.stringify(profileData),
+    });
+
+    if (createResp.ok) {
+      console.log(`[XGEN SW] Auto-created auth profile on login capture: ${serviceId}`);
+    } else if (createResp.status === 409) {
+      console.log(`[XGEN SW] Auth profile already exists: ${serviceId}`);
+    }
+  } catch (e) {
+    console.warn('[XGEN SW] autoCreateAuthProfileFromCapture error:', e);
+  }
 }
 
 // ── Element Picker: hook inject ──
