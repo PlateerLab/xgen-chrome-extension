@@ -10,12 +10,19 @@ import type {
   PageContext,
   SSEEvent,
 } from '../shared/types';
+import type { CapturedApi } from '../shared/api-hook-types';
+import { mainWorldHookFunction, mainWorldUnhookFunction } from '../content/api-hook/main-world-hook';
+import { apiHookRelayFunction } from '../content/api-hook/relay';
 
 // ── State ──
 // origin별 토큰 저장 — 멀티 인스턴스 (xgen.x2bee.com / jeju-xgen.x2bee.com) 동시 사용 지원
 const tokensByOrigin: Record<string, string> = {};
 let cachedPageContext: PageContext | null = null;
 let activeAbortController: AbortController | null = null;
+
+// ── API Hook State ──
+const hookedTabs = new Set<number>();
+const capturedApisByTab = new Map<number, CapturedApi[]>();
 
 // ── Side Panel open on icon click ──
 
@@ -89,6 +96,35 @@ chrome.runtime.onMessage.addListener(
         }
         sendResponse({ ok: true });
         break;
+
+      // ── API Hook ──
+      case 'API_HOOK_START':
+        handleApiHookStart().then(() => sendResponse({ ok: true }));
+        return true;
+
+      case 'API_HOOK_STOP':
+        handleApiHookStop().then(() => sendResponse({ ok: true }));
+        return true;
+
+      case 'API_CAPTURED': {
+        const tabId = sender.tab?.id || 0;
+        const captured = message.data as CapturedApi;
+        captured.tabId = tabId;
+
+        if (!capturedApisByTab.has(tabId)) {
+          capturedApisByTab.set(tabId, []);
+        }
+        capturedApisByTab.get(tabId)!.push(captured);
+
+        // sidepanel에 실시간 전달
+        broadcastToSidePanel({ type: 'API_CAPTURED', data: captured });
+        sendResponse({ ok: true });
+        break;
+      }
+
+      case 'SAVE_TOOL':
+        handleSaveTool(message.tool, message.serverUrl).then((result) => sendResponse(result));
+        return true;
     }
 
     return false;
@@ -288,3 +324,92 @@ async function postCommandResultToBackend(
 function broadcastToSidePanel(message: ExtensionMessage) {
   chrome.runtime.sendMessage(message).catch(() => {});
 }
+
+// ── API Hook helpers ──
+
+async function handleApiHookStart() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tabs.length === 0 || !tabs[0].id) return;
+  const tabId = tabs[0].id;
+
+  if (hookedTabs.has(tabId)) return; // 이미 활성
+
+  // 1) relay (content script, isolated world) 먼저 주입
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: apiHookRelayFunction,
+    world: 'ISOLATED',
+  });
+
+  // 2) MAIN world 후킹 주입
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: mainWorldHookFunction,
+    world: 'MAIN',
+  });
+
+  hookedTabs.add(tabId);
+  capturedApisByTab.set(tabId, []);
+  broadcastToSidePanel({ type: 'API_HOOK_STATUS', active: true });
+}
+
+async function handleApiHookStop() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tabs.length === 0 || !tabs[0].id) return;
+  const tabId = tabs[0].id;
+
+  // MAIN world에서 flag 해제
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: mainWorldUnhookFunction,
+    world: 'MAIN',
+  }).catch(() => {});
+
+  hookedTabs.delete(tabId);
+  broadcastToSidePanel({ type: 'API_HOOK_STATUS', active: false });
+}
+
+async function handleSaveTool(
+  tool: import('../shared/api-hook-types').ToolSaveRequest,
+  serverUrl: string,
+) {
+  // XGEN 도구 관리에 저장할 토큰 획득
+  const authToken = tokensByOrigin[serverUrl] || await getStoredToken(serverUrl);
+  if (!authToken) {
+    broadcastToSidePanel({
+      type: 'SAVE_TOOL_RESULT',
+      success: false,
+      error: `${serverUrl}에 로그인되어 있지 않습니다`,
+    });
+    return { success: false };
+  }
+
+  try {
+    const response = await fetch(`${serverUrl}/api/tools/storage/save`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authToken}`,
+      },
+      body: JSON.stringify(tool),
+    });
+
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.detail || `HTTP ${response.status}`);
+    }
+
+    broadcastToSidePanel({ type: 'SAVE_TOOL_RESULT', success: true });
+    return { success: true };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : 'Unknown error';
+    broadcastToSidePanel({ type: 'SAVE_TOOL_RESULT', success: false, error });
+    return { success: false, error };
+  }
+}
+
+// ── 탭 닫힘 시 정리 ──
+chrome.tabs.onRemoved.addListener((tabId) => {
+  hookedTabs.delete(tabId);
+  capturedApisByTab.delete(tabId);
+});
