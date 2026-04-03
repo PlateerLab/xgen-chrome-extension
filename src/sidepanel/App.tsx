@@ -16,10 +16,7 @@ export function App() {
   return (
     <div className="flex flex-col h-screen bg-white text-gray-800">
       {/* Header */}
-      <header className="flex items-center justify-between px-3 py-2 border-b border-gray-200">
-        <h1 className="text-sm font-medium text-gray-700 tracking-tight">
-          XGEN AI
-        </h1>
+      <header className="flex items-center justify-end px-3 py-2 border-b border-gray-200">
         <button
           onClick={clearMessages}
           className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors"
