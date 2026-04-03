@@ -31,7 +31,7 @@ export function SettingsBar() {
         setServerUrl(savedUrl);
 
         if (savedUrl) {
-          fetchProviders(savedUrl, result[STORAGE_KEYS.AUTH_TOKEN] || '');
+          fetchProviders(savedUrl, result[STORAGE_KEYS.AUTH_TOKEN] || '', savedModel);
         }
       },
     );
@@ -52,7 +52,7 @@ export function SettingsBar() {
     return () => chrome.storage.local.onChanged.removeListener(listener);
   }, []);
 
-  const fetchProviders = useCallback(async (url: string, token: string) => {
+  const fetchProviders = useCallback(async (url: string, token: string, currentModel?: string) => {
     setLoading(true);
     try {
       const resp = await fetch(`${url}${API_PROVIDERS_ENDPOINT}`, {
@@ -63,8 +63,9 @@ export function SettingsBar() {
         const list: ProviderInfo[] = data.providers || [];
         setProviders(list);
 
-        // Auto-select if current provider/model is empty
-        if (!model) {
+        // Auto-select only if model is truly empty (not set by user)
+        const modelToCheck = currentModel ?? model;
+        if (!modelToCheck) {
           const current = list.find((p) => p.provider === provider && p.available);
           if (current?.default_model) {
             setModel(current.default_model);
