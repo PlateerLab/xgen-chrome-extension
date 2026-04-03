@@ -737,8 +737,8 @@ function buildAuthProfileFromCaptured(
     description: `Element Picker에서 자동 생성된 인증 프로필. 로그인 자동 갱신을 위해 login_config를 업데이트하세요.`,
     auth_type: auth.type,
     login_config: {
-      // health 엔드포인트로 200 응답 보장 — fixed extraction은 응답 내용 무관
-      url: `${serverUrl}/api/session-station/v1/health`,
+      // gateway health 엔드포인트로 200 응답 보장 — fixed extraction은 응답 내용 무관
+      url: `${serverUrl}/api/health`,
       method: 'GET',
       headers: {},
       payload: {},
