@@ -74,8 +74,8 @@ chrome.runtime.onMessage.addListener(
           if (streamUrl) {
             try {
               const parsed = new URL(streamUrl);
-              // 프론트엔드(3000) → gateway(8000)로 교체
-              if (parsed.port === '3000' || !parsed.port) {
+              // 프론트엔드(3000/3001) → gateway(8000)로 교체
+              if (parsed.port === '3000' || parsed.port === '3001' || !parsed.port) {
                 parsed.port = '8000';
                 streamUrl = parsed.origin;
               }
