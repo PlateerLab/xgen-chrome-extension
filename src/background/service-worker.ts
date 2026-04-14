@@ -74,8 +74,10 @@ chrome.runtime.onMessage.addListener(
           if (streamUrl) {
             try {
               const parsed = new URL(streamUrl);
-              // 프론트엔드(3000/3001) → gateway(8000)로 교체
-              if (parsed.port === '3000' || parsed.port === '3001' || !parsed.port) {
+              // 로컬 환경에서만 프론트엔드(3000/3001) → gateway(8000)로 교체
+              // 서버 환경(외부 도메인)에서는 포트 교체 안 함 (방화벽/프록시 이슈)
+              const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+              if (isLocal && (parsed.port === '3000' || parsed.port === '3001')) {
                 parsed.port = '8000';
                 streamUrl = parsed.origin;
               }
