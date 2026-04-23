@@ -533,7 +533,9 @@ async function handleApiHookAction(
         }
 
         // ── 캡처된 원본 request body로 static_body/api_body 보정 ──
-        // AI가 필드명을 상상해서 넣는 것을 방지. 캡처된 원본이 있으면 그것이 단일 진실 원천.
+        // 전략: 원본 body 전체를 static_body에 주입 → 런타임에서 AI 파라미터가 있으면 덮어쓰고,
+        // 없으면 원본 값으로 호출되므로 "body 빈 채로 나가서 500" 문제를 원천 차단.
+        // api_body는 AI 스키마를 그대로 두되, JSON Schema 형식(properties/required)로 래핑한다.
         let aiApiBody = (toolData.api_body as Record<string, unknown>) || {};
         let aiStaticBody = (toolData.static_body as Record<string, unknown>) || {};
         let aiBodyType = (toolData.body_type as string) || 'application/json';
@@ -556,33 +558,45 @@ async function handleApiHookAction(
 
           if (matched?.requestBody) {
             const ct = (matched.contentType || '').toLowerCase();
-            // JSON 원본: api_body 스키마에 선언된 파라미터는 런타임 주입용으로 남기고,
-            // 나머지 원본 필드는 static_body로 강제 주입. AI가 지어낸 필드명은 제거됨.
             if (ct.includes('application/json') || matched.requestBody.trim().startsWith('{')) {
               try {
                 const original = JSON.parse(matched.requestBody) as Record<string, unknown>;
                 if (original && typeof original === 'object' && !Array.isArray(original)) {
-                  const paramKeys = new Set(Object.keys(aiApiBody || {}));
-                  const rebuiltStatic: Record<string, unknown> = {};
-                  for (const [k, v] of Object.entries(original)) {
-                    if (!paramKeys.has(k)) rebuiltStatic[k] = v;
+                  // 1) static_body = 원본 전체 (AI static_body보다 우선)
+                  aiStaticBody = { ...aiStaticBody, ...original };
+
+                  // 2) api_body 정규화: AI가 flat하게 만들든 JSON Schema로 만들든 다 처리
+                  //    - 이미 properties 키가 있으면 그대로 (JSON Schema)
+                  //    - 아니면 flat 형식으로 보고 properties로 래핑
+                  //    - 원본에 없는 AI 상상 필드는 제거
+                  const hasProperties = 'properties' in aiApiBody &&
+                    typeof (aiApiBody as any).properties === 'object';
+
+                  if (hasProperties) {
+                    const props = (aiApiBody as any).properties as Record<string, unknown>;
+                    const cleanedProps: Record<string, unknown> = {};
+                    for (const [k, v] of Object.entries(props)) {
+                      if (k in original) cleanedProps[k] = v;
+                    }
+                    aiApiBody = { ...aiApiBody, properties: cleanedProps };
+                  } else {
+                    // flat → JSON Schema로 래핑 (기존 엔트리가 {type, description} 형태라고 가정)
+                    const cleanedProps: Record<string, unknown> = {};
+                    for (const [k, v] of Object.entries(aiApiBody)) {
+                      if (k in original) cleanedProps[k] = v;
+                    }
+                    aiApiBody = { type: 'object', properties: cleanedProps, required: [] };
                   }
-                  // 원본에 없는 api_body 필드(AI 상상) 제거
-                  const cleanedApiBody: Record<string, unknown> = {};
-                  for (const [k, v] of Object.entries(aiApiBody)) {
-                    if (k in original) cleanedApiBody[k] = v;
-                  }
-                  aiStaticBody = rebuiltStatic;
-                  aiApiBody = cleanedApiBody;
+
                   aiBodyType = 'application/json';
-                  console.log(`[XGEN SW] register_tool: body normalized from captured original. ` +
-                    `static_body keys=${Object.keys(rebuiltStatic).join(',')}, api_body keys=${Object.keys(cleanedApiBody).join(',')}`);
+                  console.log(`[XGEN SW] register_tool: body normalized. ` +
+                    `static_body keys=${Object.keys(aiStaticBody).join(',')}, ` +
+                    `api_body.properties keys=${Object.keys((aiApiBody as any).properties || {}).join(',')}`);
                 }
               } catch (e) {
                 console.warn('[XGEN SW] register_tool: captured JSON body parse failed, keeping AI values', e);
               }
             } else {
-              // 비 JSON 원본(form-urlencoded 등)은 원본 문자열을 그대로 static_body 힌트로 남김
               console.log(`[XGEN SW] register_tool: non-JSON captured body (contentType=${ct}), keeping AI values`);
             }
           } else {
