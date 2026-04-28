@@ -24,6 +24,37 @@ let cachedPageContextTabId: number | null = null;
 const hookedTabs = new Set<number>();
 const capturedApisByTab = new Map<number, CapturedApi[]>();
 
+// AI agent가 page_command/canvas_command로 탭을 운전 중인 윈도우.
+// 이 시간 동안 캡처된 API는 origin='ai'로 태깅되어 사용자 capture session에서 제외된다.
+// Map<tabId, expiresAtMs>. dispatchPageCommand 호출 시점에 ~2초 갱신.
+const aiDrivingTabIds = new Map<number, number>();
+const AI_DRIVE_WINDOW_MS = 2000;
+
+function markAiDriving(tabId: number): void {
+  aiDrivingTabIds.set(tabId, Date.now() + AI_DRIVE_WINDOW_MS);
+}
+
+function isAiDriving(tabId: number): boolean {
+  const expires = aiDrivingTabIds.get(tabId);
+  if (!expires) return false;
+  if (Date.now() >= expires) {
+    aiDrivingTabIds.delete(tabId);
+    return false;
+  }
+  return true;
+}
+
+// ── User Capture Session State ──
+// 사용자가 🔴 버튼으로 시작 → 같은 탭에서 발생한 origin='user' 캡처를 누적 → ⏹로 종료.
+// 다른 탭으로 전환해도 원래 탭의 캡처만 모음 (사용자 요청).
+interface CaptureSession {
+  tabId: number;
+  startedAt: number;
+  captures: CapturedApi[];
+}
+let activeCaptureSession: CaptureSession | null = null;
+const CAPTURE_SESSION_MAX = 500; // FIFO 상한 — 5분 무활동 자동종료는 Phase 2에서 추가
+
 // ── Side Panel open on icon click ──
 
 chrome.sidePanel
@@ -101,6 +132,10 @@ chrome.runtime.onMessage.addListener(
         const event = (message as any).event as SSEEvent;
         console.log('[XGEN SW] RELAY_COMMAND received:', event.type, event);
         (async () => {
+          // AI agent의 직접 dispatch — 이후 ~2초 캡처를 origin='ai'로 태깅하기 위해 active tab 마킹
+          const tabsForMark = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tabsForMark[0]?.id) markAiDriving(tabsForMark[0].id);
+
           if (event.type === 'canvas_command') {
             await sendToContentScript({
               type: 'CANVAS_COMMAND',
@@ -114,12 +149,8 @@ chrome.runtime.onMessage.addListener(
             if (apiHookResult) {
               await postCommandResultToBackend(requestId, apiHookResult);
             } else {
-              await sendToContentScript({
-                type: 'PAGE_COMMAND',
-                requestId,
-                action: event.action,
-                params: event.params,
-              });
+              // 네비게이션 생존주기 처리 포함 디스패치
+              await dispatchPageCommand(requestId, event.action, event.params);
             }
           }
           sendResponse({ ok: true });
@@ -142,12 +173,18 @@ chrome.runtime.onMessage.addListener(
           .catch(() => sendResponse(null));
         return true; // async response
 
-      case 'PAGE_CONTEXT_UPDATE':
+      case 'PAGE_CONTEXT_UPDATE': {
+        const senderTabId = sender.tab?.id ?? null;
         cachedPageContext = message.context;
-        cachedPageContextTabId = sender.tab?.id ?? null;
-        broadcastToSidePanel({ type: 'PAGE_CONTEXT_UPDATE', context: message.context });
+        cachedPageContextTabId = senderTabId;
+        broadcastToSidePanel({
+          type: 'PAGE_CONTEXT_UPDATE',
+          context: message.context,
+          tabId: senderTabId ?? undefined,
+        });
         sendResponse({ ok: true });
         break;
+      }
 
       case 'PAGE_COMMAND_RESULT':
         // DOM 재스캔 결과로 context 갱신
@@ -181,11 +218,31 @@ chrome.runtime.onMessage.addListener(
         const tabId = sender.tab?.id || 0;
         const captured = message.data as CapturedApi;
         captured.tabId = tabId;
+        captured.origin = isAiDriving(tabId) ? 'ai' : 'user';
 
         if (!capturedApisByTab.has(tabId)) {
           capturedApisByTab.set(tabId, []);
         }
         capturedApisByTab.get(tabId)!.push(captured);
+
+        // 사용자 capture session에 누적: 같은 탭 + origin='user'만
+        if (
+          activeCaptureSession &&
+          activeCaptureSession.tabId === tabId &&
+          captured.origin === 'user'
+        ) {
+          activeCaptureSession.captures.push(captured);
+          if (activeCaptureSession.captures.length > CAPTURE_SESSION_MAX) {
+            // FIFO: 오래된 것 버림
+            activeCaptureSession.captures.shift();
+          }
+          broadcastToSidePanel({
+            type: 'CAPTURE_SESSION_STATUS',
+            active: true,
+            tabId: activeCaptureSession.tabId,
+            count: activeCaptureSession.captures.length,
+          });
+        }
 
         // 로그인 요청 감지 시 auth profile 즉시 자동 생성
         if (captured.method === 'POST' && /\/(login|auth|token|signin|oauth|session)/i.test(captured.url)) {
@@ -193,6 +250,51 @@ chrome.runtime.onMessage.addListener(
         }
 
         sendResponse({ ok: true });
+        break;
+      }
+
+      // ── User Capture Session ──
+      case 'START_CAPTURE_SESSION': {
+        (async () => {
+          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          const tabId = tabs[0]?.id;
+          if (!tabId) {
+            sendResponse({ ok: false, error: 'No active tab' });
+            return;
+          }
+          activeCaptureSession = { tabId, startedAt: Date.now(), captures: [] };
+          // content script가 아직 hook 주입 안 됐다면 주입 (ELEMENT_PICKER_STOP과 동일한 진입점 재사용).
+          // 부수효과로 capturedApisByTab[tabId]가 리셋되지만 session 버퍼는 별도라 영향 없음.
+          await handlePickerHookInject(tabId).catch(() => {});
+          broadcastToSidePanel({
+            type: 'CAPTURE_SESSION_STATUS',
+            active: true,
+            tabId,
+            count: 0,
+          });
+          sendResponse({ ok: true, tabId });
+        })();
+        return true;
+      }
+
+      case 'STOP_CAPTURE_SESSION': {
+        if (!activeCaptureSession) {
+          sendResponse({ ok: false, error: 'No active session' });
+          break;
+        }
+        const session = activeCaptureSession;
+        activeCaptureSession = null;
+        broadcastToSidePanel({
+          type: 'CAPTURE_SESSION_STATUS',
+          active: false,
+        });
+        broadcastToSidePanel({
+          type: 'CAPTURE_SESSION_RESULT',
+          apis: session.captures,
+          tabId: session.tabId,
+          durationMs: Date.now() - session.startedAt,
+        });
+        sendResponse({ ok: true, count: session.captures.length });
         break;
       }
 
@@ -354,6 +456,154 @@ async function sendToContentScript(message: ExtensionMessage) {
   } else {
     console.warn('[XGEN SW] sendToContentScript: no active tab found');
   }
+}
+
+/**
+ * PAGE_COMMAND 전용 디스패치 — 네비게이션 생존주기 처리 포함.
+ *
+ * 클릭 등의 DOM 조작이 전체 페이지 네비게이션(window.location 변경)을 유발할 수 있다.
+ * 이 경우 content script가 소멸하면서 결과 메시지가 유실되고 백엔드 bridge가 타임아웃된다.
+ *
+ * 해결: sendMessage 실패(채널 끊김) 시 네비게이션 완료를 대기하고,
+ * 새 페이지의 context를 추출하여 백엔드에 성공 결과로 전달한다.
+ */
+async function dispatchPageCommand(
+  requestId: string,
+  action: string,
+  params: Record<string, unknown>,
+): Promise<void> {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tabs.length === 0 || !tabs[0].id) {
+    await postCommandResultToBackend(requestId, {
+      success: false, action, error: 'No active tab found',
+    });
+    return;
+  }
+
+  const tabId = tabs[0].id;
+  const urlBefore = tabs[0].url || '';
+
+  try {
+    // content script가 살아있으면 정상 실행 → PAGE_COMMAND_RESULT로 결과 전달됨
+    await chrome.tabs.sendMessage(tabId, {
+      type: 'PAGE_COMMAND',
+      requestId,
+      action,
+      params,
+    } as ExtensionMessage);
+    // sendMessage resolved = content script가 sendResponse() 호출 = 정상 완료.
+    // 결과는 content script가 별도 PAGE_COMMAND_RESULT 메시지로 이미 전송함.
+  } catch (err) {
+    // ── content script 소멸 — 대부분 페이지 네비게이션 때문 ──
+    console.log(
+      `[XGEN SW] PAGE_COMMAND delivery failed (action=${action}), ` +
+      `waiting for navigation: ${err}`,
+    );
+
+    try {
+      const newContext = await waitForNavigationContext(tabId, urlBefore);
+      await postCommandResultToBackend(requestId, {
+        success: true,
+        action,
+        pageContext: newContext,
+      });
+      console.log(`[XGEN SW] Navigation handled: posted new page context to backend`);
+    } catch (navErr) {
+      // 네비게이션도 없고 content script도 죽은 경우 — 진짜 실패
+      await postCommandResultToBackend(requestId, {
+        success: false,
+        action,
+        error: `Content script disconnected, no navigation detected: ${navErr}`,
+      });
+    }
+  }
+}
+
+/**
+ * 페이지 네비게이션 완료를 대기하고 새 페이지의 context를 추출한다.
+ * 이미 네비게이션이 진행 중일 수 있으므로, onCompleted 리스너 + 폴링을 병행한다.
+ */
+function waitForNavigationContext(
+  tabId: number,
+  urlBefore: string,
+  timeoutMs: number = 10000,
+): Promise<PageContext | null> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      chrome.webNavigation.onCompleted.removeListener(onNavCompleted);
+      clearTimeout(timer);
+    };
+
+    const extractAndResolve = async () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+
+      // content script 초기화 대기 — manifest의 content_scripts 주입에 시간이 필요
+      await new Promise((r) => setTimeout(r, 800));
+
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const ctx = await chrome.tabs.sendMessage(tabId, {
+            type: 'GET_PAGE_CONTEXT',
+          });
+          if (ctx) {
+            resolve(ctx as PageContext);
+            return;
+          }
+        } catch {
+          // content script 아직 준비 안 됨 — 재시도
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+
+      // 3회 시도 실패 — 기본 context 생성
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        resolve({
+          pageType: 'unknown',
+          url: tab.url || '',
+          title: tab.title || '',
+          elements: '',
+          snapshotId: '',
+          data: {},
+          availableActions: [],
+          timestamp: Date.now(),
+        } as PageContext);
+      } catch {
+        resolve(null);
+      }
+    };
+
+    const onNavCompleted = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
+      if (details.tabId !== tabId || details.frameId !== 0) return;
+      console.log(`[XGEN SW] Navigation completed: ${details.url}`);
+      extractAndResolve();
+    };
+
+    chrome.webNavigation.onCompleted.addListener(onNavCompleted);
+
+    // 타임아웃 — 네비게이션이 없거나 너무 느린 경우
+    const timer = setTimeout(() => {
+      if (settled) return;
+      // 타임아웃이지만 URL이 바뀌었을 수 있음 (onCompleted 놓침)
+      chrome.tabs.get(tabId).then((tab) => {
+        if (tab.url && tab.url !== urlBefore) {
+          extractAndResolve();
+        } else {
+          settled = true;
+          cleanup();
+          reject(new Error(`Navigation timeout (${timeoutMs}ms), URL unchanged`));
+        }
+      }).catch(() => {
+        settled = true;
+        cleanup();
+        reject(new Error('Tab not found'));
+      });
+    }, timeoutMs);
+  });
 }
 
 async function postCommandResultToBackend(
@@ -977,6 +1227,19 @@ async function handlePickerHookInject(tabId: number) {
 chrome.tabs.onRemoved.addListener((tabId) => {
   hookedTabs.delete(tabId);
   capturedApisByTab.delete(tabId);
+  aiDrivingTabIds.delete(tabId);
+  if (activeCaptureSession?.tabId === tabId) {
+    // 세션 중인 탭이 닫혔으면 그 시점까지의 캡처를 사이드패널로 보내고 세션 종료
+    const session = activeCaptureSession;
+    activeCaptureSession = null;
+    broadcastToSidePanel({ type: 'CAPTURE_SESSION_STATUS', active: false });
+    broadcastToSidePanel({
+      type: 'CAPTURE_SESSION_RESULT',
+      apis: session.captures,
+      tabId: session.tabId,
+      durationMs: Date.now() - session.startedAt,
+    });
+  }
 });
 
 // ── 페이지 네비게이션 감지: 후킹된 탭에서 페이지 이동 시 자동 재주입 + 기록 ──

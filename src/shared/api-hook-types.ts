@@ -13,6 +13,10 @@ export interface CapturedApi {
   responseBody: string | null;
   contentType: string;
   duration: number; // ms
+  // 'ai': AI agent의 page_command/canvas_command 디스패치 시점에 캡처됨 (자동 탐색)
+  // 'user': 그 외 — 사용자 직접 클릭 등으로 발생
+  // SW의 API_CAPTURED 핸들러에서 채움. content script는 이 필드를 모름.
+  origin?: 'ai' | 'user';
 }
 
 // ── XGEN Tool 정의 (saveTool API 스키마) ──

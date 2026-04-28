@@ -82,6 +82,89 @@ export async function* streamChat(
   }
 }
 
+// ── Tool Collections ──
+
+export interface FromTraceTool {
+  method: string;
+  templatedPath: string;
+  pathParams: string[];
+  queryParamKeys: string[];
+  requestBodySample?: unknown;
+  responseSample?: unknown;
+  label: string;
+  sampleCount: number;
+}
+
+export interface FromTraceEdge {
+  fromToolId: string;
+  toToolId: string;
+  confidence: number;
+  sampleSharedValue?: string;
+}
+
+export interface FromTraceRequest {
+  host: string;
+  tools: FromTraceTool[];
+  edges: FromTraceEdge[];
+  name?: string;
+  authProfileId?: string;
+}
+
+export interface FromTraceConflict {
+  status: 409;
+  collectionId: string;
+  name: string;
+  message: string;
+}
+
+export interface FromTraceSuccess {
+  status: 201;
+  collection: Record<string, unknown>;
+}
+
+export type FromTraceResult = FromTraceSuccess | FromTraceConflict;
+
+export async function createCollectionFromTrace(
+  serverUrl: string,
+  token: string,
+  payload: FromTraceRequest,
+): Promise<FromTraceResult> {
+  const url = `${serverUrl}/api/tools/api-collections/from-trace`;
+  const body: Record<string, unknown> = {
+    host: payload.host,
+    tools: payload.tools,
+    edges: payload.edges,
+  };
+  if (payload.name) body.name = payload.name;
+  if (payload.authProfileId) body.auth_profile_id = payload.authProfileId;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (response.status === 409) {
+    const detail = await response.json().catch(() => ({}));
+    const d = detail?.detail ?? detail;
+    return {
+      status: 409,
+      collectionId: d?.collection_id ?? '',
+      name: d?.name ?? '',
+      message: d?.message ?? d?.hint ?? `Conflict: ${response.statusText}`,
+    };
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => response.statusText);
+    throw new Error(`Collection create failed: ${response.status} ${text}`);
+  }
+  const json = await response.json();
+  return { status: 201, collection: json };
+}
+
 // ── PathFinder ──
 
 export async function resolveSite(

@@ -162,4 +162,9 @@ export type ExtensionMessage =
   // ── Element Picker ──
   | { type: 'ELEMENT_PICKER_START' }
   | { type: 'ELEMENT_PICKER_STOP' }
-  | { type: 'ELEMENT_PICKER_RESULT'; apis: import('./api-hook-types').CapturedApi[]; elementInfo: { tag: string; text: string; url: string } };
+  | { type: 'ELEMENT_PICKER_RESULT'; apis: import('./api-hook-types').CapturedApi[]; elementInfo: { tag: string; text: string; url: string } }
+  // ── Capture Session (사용자 클릭 캡처 누적용; AI 자동 탐색은 제외) ──
+  | { type: 'START_CAPTURE_SESSION' }
+  | { type: 'STOP_CAPTURE_SESSION' }
+  | { type: 'CAPTURE_SESSION_STATUS'; active: boolean; tabId?: number; count?: number }
+  | { type: 'CAPTURE_SESSION_RESULT'; apis: import('./api-hook-types').CapturedApi[]; tabId: number; durationMs: number };

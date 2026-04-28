@@ -1,10 +1,12 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useChat } from './hooks/useChat';
+import { useCaptureSession } from './hooks/useCaptureSession';
 import { ChatMessage } from './components/ChatMessage';
 import { InputArea } from './components/InputArea';
 import { SettingsBar } from './components/SettingsBar';
 import { PlanQuestionPopup } from './components/PlanQuestionPopup';
 import { useElementPicker, PickerResultPanel } from './components/ElementPickerButton';
+import { SessionResultPanel } from './components/SessionResultPanel';
 import type { ExtensionMessage, PageContext } from '../shared/types';
 
 function extractHost(u: string | undefined): string | null {
@@ -23,6 +25,7 @@ export function App() {
     greetProactive,
   } = useChat();
   const picker = useElementPicker();
+  const captureSession = useCaptureSession();
   const [authCapturing, setAuthCapturing] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [pageContext, setPageContext] = useState<PageContext | null>(null);
@@ -133,6 +136,31 @@ export function App() {
             </svg>
           </button>
 
+          {/* 캡처 세션 토글 (🔴 시작 / ⏹ 종료) */}
+          <button
+            onClick={() => (captureSession.active ? captureSession.stop() : captureSession.start())}
+            className={`p-1 rounded transition-colors ${
+              captureSession.active
+                ? 'text-red-600 bg-red-100'
+                : 'text-gray-400 hover:text-gray-600'
+            }`}
+            title={
+              captureSession.active
+                ? `캡처 종료 (현재 ${captureSession.count}건)`
+                : '캡처 세션 시작 — 사용자 클릭 캡처를 끝까지 모음'
+            }
+          >
+            {captureSession.active ? (
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12" rx="1" />
+              </svg>
+            ) : (
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="12" cy="12" r="6" />
+              </svg>
+            )}
+          </button>
+
           {/* 인증 프로필 생성 */}
           <button
             onClick={() => {
@@ -191,6 +219,24 @@ export function App() {
           registerApi={picker.registerApi}
           closeResult={picker.closeResult}
         />
+      )}
+
+      {/* Capture Session 결과 패널 (세션 종료 후) */}
+      {captureSession.result && (
+        <SessionResultPanel
+          result={captureSession.result}
+          onDismiss={captureSession.dismissResult}
+        />
+      )}
+
+      {/* Capture Session 진행 중 인디케이터 */}
+      {captureSession.active && (
+        <div className="border-b border-red-200 bg-red-50 px-3 py-1.5 flex items-center justify-between">
+          <span className="text-[11px] text-red-700 flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+            캡처 중 — 페이지 액션 수행 후 ⏹ 누르면 정리된 목록을 보여드려요. ({captureSession.count}건)
+          </span>
+        </div>
       )}
 
       {/* Messages */}
