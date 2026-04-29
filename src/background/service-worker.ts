@@ -776,10 +776,86 @@ async function handleApiHookAction(
             return {
               success: false,
               action,
-              error: `이 API는 인증이 필요합니다. 해당 사이트에서 로그인해주세요. API hook이 활성 상태에서 로그인하면 자동으로 인증 프로필이 생성됩니다. 로그인 후 다시 등록을 시도해주세요.`,
+              error: `이 API는 인증이 필요하지만 로그인 요청이 캡처되지 않았습니다. ` +
+                `start_api_hook이 켜진 상태에서 로그인이 수행되어야 인증 프로필이 자동 생성됩니다. ` +
+                `해결 방법: (1) start_api_hook이 켜져 있는지 확인 후, (2) 로그아웃 → 재로그인으로 토큰을 재발급받은 다음, (3) register_tool을 다시 시도하세요.`,
             };
           }
           authProfileId = matchResult || undefined;
+        }
+
+        // ── 캡처된 원본 request body로 static_body/api_body 보정 ──
+        // 전략: 원본 body 전체를 static_body에 주입 → 런타임에서 AI 파라미터가 있으면 덮어쓰고,
+        // 없으면 원본 값으로 호출되므로 "body 빈 채로 나가서 500" 문제를 원천 차단.
+        // api_body는 AI 스키마를 그대로 두되, JSON Schema 형식(properties/required)로 래핑한다.
+        let aiApiBody = (toolData.api_body as Record<string, unknown>) || {};
+        let aiStaticBody = (toolData.static_body as Record<string, unknown>) || {};
+        let aiBodyType = (toolData.body_type as string) || 'application/json';
+
+        try {
+          const targetUrl = toolData.api_url as string;
+          const targetMethod = ((toolData.api_method as string) || 'GET').toUpperCase();
+          const stripQuery = (u: string) => u.split('?')[0].split('#')[0];
+          const targetBase = stripQuery(targetUrl);
+
+          // 모든 탭 캡처에서 url(쿼리 제외) + method 매칭, 가장 최근 것
+          let matched: CapturedApi | undefined;
+          for (const [, apis] of capturedApisByTab) {
+            for (const a of apis) {
+              if (a.method.toUpperCase() === targetMethod && stripQuery(a.url) === targetBase) {
+                if (!matched || a.timestamp > matched.timestamp) matched = a;
+              }
+            }
+          }
+
+          if (matched?.requestBody) {
+            const ct = (matched.contentType || '').toLowerCase();
+            if (ct.includes('application/json') || matched.requestBody.trim().startsWith('{')) {
+              try {
+                const original = JSON.parse(matched.requestBody) as Record<string, unknown>;
+                if (original && typeof original === 'object' && !Array.isArray(original)) {
+                  // 1) static_body = 원본 전체 (AI static_body보다 우선)
+                  aiStaticBody = { ...aiStaticBody, ...original };
+
+                  // 2) api_body 정규화: AI가 flat하게 만들든 JSON Schema로 만들든 다 처리
+                  //    - 이미 properties 키가 있으면 그대로 (JSON Schema)
+                  //    - 아니면 flat 형식으로 보고 properties로 래핑
+                  //    - 원본에 없는 AI 상상 필드는 제거
+                  const hasProperties = 'properties' in aiApiBody &&
+                    typeof (aiApiBody as any).properties === 'object';
+
+                  if (hasProperties) {
+                    const props = (aiApiBody as any).properties as Record<string, unknown>;
+                    const cleanedProps: Record<string, unknown> = {};
+                    for (const [k, v] of Object.entries(props)) {
+                      if (k in original) cleanedProps[k] = v;
+                    }
+                    aiApiBody = { ...aiApiBody, properties: cleanedProps };
+                  } else {
+                    // flat → JSON Schema로 래핑 (기존 엔트리가 {type, description} 형태라고 가정)
+                    const cleanedProps: Record<string, unknown> = {};
+                    for (const [k, v] of Object.entries(aiApiBody)) {
+                      if (k in original) cleanedProps[k] = v;
+                    }
+                    aiApiBody = { type: 'object', properties: cleanedProps, required: [] };
+                  }
+
+                  aiBodyType = 'application/json';
+                  console.log(`[XGEN SW] register_tool: body normalized. ` +
+                    `static_body keys=${Object.keys(aiStaticBody).join(',')}, ` +
+                    `api_body.properties keys=${Object.keys((aiApiBody as any).properties || {}).join(',')}`);
+                }
+              } catch (e) {
+                console.warn('[XGEN SW] register_tool: captured JSON body parse failed, keeping AI values', e);
+              }
+            } else {
+              console.log(`[XGEN SW] register_tool: non-JSON captured body (contentType=${ct}), keeping AI values`);
+            }
+          } else {
+            console.log(`[XGEN SW] register_tool: no captured match for ${targetMethod} ${targetBase}, keeping AI values`);
+          }
+        } catch (e) {
+          console.warn('[XGEN SW] register_tool: body normalization error, keeping AI values', e);
         }
 
         // tool 저장 요청
@@ -792,9 +868,9 @@ async function handleApiHookAction(
             api_url: toolData.api_url as string,
             api_method: (toolData.api_method as string) || 'GET',
             api_header: (toolData.api_header as Record<string, string>) || {},
-            api_body: (toolData.api_body as Record<string, unknown>) || {},
-            static_body: (toolData.static_body as Record<string, unknown>) || {},
-            body_type: (toolData.body_type as string) || 'application/json',
+            api_body: aiApiBody,
+            static_body: aiStaticBody,
+            body_type: aiBodyType,
             api_timeout: (toolData.api_timeout as number) || 30,
             is_query_string: (toolData.is_query_string as boolean) || false,
             response_filter: (toolData.response_filter as boolean) || false,
@@ -902,6 +978,35 @@ async function autoMatchAuthProfile(
 
     const capturedLogin = findCapturedLoginForDomain(apiDomain);
     if (!capturedLogin) {
+      // 2-a) autoCreateAuthProfileFromCapture는 API_CAPTURED 시점에 fire-and-forget으로 실행됨.
+      //      레이스로 인해 첫 조회에서 프로필이 아직 안 만들어졌을 수 있으므로
+      //      짧게 한 번 대기 후 서버 프로필 목록을 재조회하여 구제한다.
+      await new Promise(r => setTimeout(r, 500));
+      try {
+        const retryResp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
+        if (retryResp.ok) {
+          const retryProfiles = await retryResp.json() as Array<{
+            service_id: string; name: string; status: string;
+          }>;
+          const domainParts = apiDomain.replace('www.', '').split('.');
+          const domainKey = domainParts[0];
+          const matched = retryProfiles.find((p) =>
+            p.status === 'active' && (
+              p.service_id.toLowerCase().includes(domainKey) ||
+              p.name.toLowerCase().includes(domainKey)
+            )
+          );
+          if (matched) {
+            console.log(`[XGEN SW] Auto-matched auth profile on retry: ${matched.service_id} for ${apiDomain}`);
+            return matched.service_id;
+          }
+        }
+      } catch (e) {
+        console.warn('[XGEN SW] retry profile fetch failed:', e);
+      }
+
       const capturedAuth = findCapturedAuthForDomain(apiDomain);
       if (capturedAuth) {
         // Authorization 헤더 있지만 로그인 미캡처 → 로그인 필요
