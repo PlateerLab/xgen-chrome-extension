@@ -14,6 +14,8 @@ export interface ProductDraft {
   currency?: string;
   thumbnailUrl?: string;
   imageUrls?: string[];
+  /** 상품 상세 본문(기술서)에서 추출한 long 이미지 URL들 — 갤러리 표시용. */
+  detailImageUrls?: string[];
   description?: string;
   detailHtml?: string;
   brand?: string;

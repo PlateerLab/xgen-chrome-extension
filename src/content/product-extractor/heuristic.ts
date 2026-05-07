@@ -20,15 +20,36 @@ function pickFirst<T>(...values: (T | undefined | null | '')[]): T | undefined {
   return undefined;
 }
 
+/** 문자열에서 첫 번째 합리적인 숫자 추출 — 콤마/소수점 그룹 단위 매칭.
+ *  버그: 이전 구현은 "10% 23,940원 26,600" 같은 텍스트를 통째로 concat해서 ₩102억 같은 잘못된 값 산출. */
 function toNumber(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string') {
-    const cleaned = value.replace(/[^\d.]/g, '');
-    if (!cleaned) return undefined;
-    const n = parseFloat(cleaned);
-    return Number.isFinite(n) ? n : undefined;
+  if (typeof value !== 'string') return undefined;
+  const m = /(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)/.exec(value);
+  if (!m) return undefined;
+  const n = parseFloat(m[1].replace(/,/g, ''));
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** 텍스트에서 가격 후보 모두 추출. ₩/원 마커 우선, 그 다음 콤마 그룹. */
+function extractPriceCandidates(text: string): number[] {
+  const out: number[] = [];
+  // 1차: 콤마 그룹 (예: "23,940원", "₩23,940")
+  const re1 = /(?:₩\s*)?(\d{1,3}(?:,\d{3})+)\s*원?/g;
+  let m: RegExpExecArray | null;
+  while ((m = re1.exec(text)) !== null) {
+    const n = parseInt(m[1].replace(/,/g, ''), 10);
+    if (n >= 100 && n <= 100_000_000) out.push(n);
   }
-  return undefined;
+  if (out.length > 0) return out;
+  // 2차: 콤마 없는 ₩ 또는 "원" 옆 숫자 (예: "₩9900")
+  const re2 = /(?:₩\s*|원\s*)(\d{3,8})|\b(\d{3,8})\s*원/g;
+  while ((m = re2.exec(text)) !== null) {
+    const numStr = m[1] || m[2];
+    const n = parseInt(numStr, 10);
+    if (n >= 100 && n <= 100_000_000) out.push(n);
+  }
+  return out;
 }
 
 function absoluteUrl(url: string | undefined): string | undefined {
@@ -170,13 +191,105 @@ function fromMicrodata(): RawCandidate | null {
   };
 }
 
+/** 페이지의 모든 가격 element를 수집 후 점수화 — 최고점 element의 최저 가격 채택.
+ *  점수 시그널: (1) 메인 컨테이너 안 (2) 큰 폰트 (3) 상단 영역 (4) sale/final/discount 클래스 (5) 보이는 영역. */
+function pickMainPrice(): number | undefined {
+  // 메인 상품 정보 컨테이너 후보 — 매칭되면 거기서만 찾기, 아니면 전체.
+  const mainContainerSelectors = [
+    '[class*="product-info" i]',
+    '[class*="productInfo" i]',
+    '[class*="goods-info" i]',
+    '[class*="goodsInfo" i]',
+    '[class*="prd-info" i]',
+    '[class*="prdInfo" i]',
+    '[class*="product-price" i]',
+    '[class*="productPrice" i]',
+    '[class*="product_price" i]',
+    'main',
+    '[role="main"]',
+  ];
+  let root: Element = document.body;
+  for (const sel of mainContainerSelectors) {
+    const found = document.querySelector(sel);
+    if (found && found.textContent && found.textContent.length > 50) {
+      root = found;
+      break;
+    }
+  }
+
+  const priceEls = Array.from(
+    root.querySelectorAll<HTMLElement>(
+      '[class*="price" i], [id*="price" i], [class*="amount" i], [class*="cost" i], strong, em, span, h2, h3',
+    ),
+  );
+
+  type Candidate = { price: number; score: number };
+  const cands: Candidate[] = [];
+
+  for (const el of priceEls) {
+    const text = el.textContent || '';
+    if (text.length > 200) continue; // 큰 컨테이너는 자식이 잡힘
+    const prices = extractPriceCandidates(text);
+    if (prices.length === 0) continue;
+
+    const cls = (el.className?.toString?.() || '').toLowerCase();
+    const id = (el.id || '').toLowerCase();
+    const sig = `${cls} ${id}`;
+
+    let score = 0;
+
+    // 클래스/ID 시그널
+    if (/\b(sale|final|discount|payment|sell|current-price|currentprice)\b/.test(sig)) score += 50;
+    if (/(price|amount|cost)/.test(sig)) score += 10;
+    // 부정 시그널
+    if (/regular|original|strike|del|cross|orgn|normal|before/.test(sig)) score -= 40;
+    if (/coupon|benefit|hyetaek|membership|reward|point/.test(sig)) score -= 30;
+    if (/recommend|related|other|suggest|together/.test(sig)) score -= 50;
+
+    // 폰트 크기
+    let fontSize = 0;
+    try {
+      fontSize = parseFloat(window.getComputedStyle(el).fontSize) || 0;
+    } catch {
+      /* ignore */
+    }
+    if (fontSize >= 24) score += 40;
+    else if (fontSize >= 20) score += 25;
+    else if (fontSize >= 16) score += 10;
+    else if (fontSize > 0 && fontSize < 12) score -= 20;
+
+    // 위치: 화면 상단(접지 위)에 가까울수록 가산
+    let rect: DOMRect;
+    try {
+      rect = el.getBoundingClientRect();
+    } catch {
+      continue;
+    }
+    if (rect.width === 0 || rect.height === 0) continue;
+    const top = rect.top + window.scrollY;
+    if (top < 1200) score += 25;
+    else if (top < 2400) score += 10;
+    else if (top > 5000) score -= 20;
+
+    // 텍스트 자체에 취소선/del 표기
+    if (el.tagName === 'DEL' || el.tagName === 'S') score -= 50;
+
+    // 한 element 안 최저값 (정상가>할인가 순 표시 케이스 대응)
+    const price = Math.min(...prices);
+    cands.push({ price, score });
+  }
+
+  if (cands.length === 0) return undefined;
+  cands.sort((a, b) => b.score - a.score);
+  return cands[0].price;
+}
+
 // 마지막 수단 — DOM 휴리스틱
 function fromDomFallback(): RawCandidate {
   const title = document.querySelector('h1')?.textContent?.trim() || document.title;
-  // 가격: 숫자 + ₩/원/KRW 패턴
-  const priceText = Array.from(document.querySelectorAll<HTMLElement>('[class*="price" i], [id*="price" i]'))
-    .map((el) => el.textContent || '')
-    .find((t) => /[₩원]|\d{3,}/.test(t));
+
+  const priceCandidate = pickMainPrice();
+
   // 첫 큰 이미지
   const img = Array.from(document.querySelectorAll<HTMLImageElement>('img'))
     .filter((i) => (i.naturalWidth || 0) >= 200 || (i.width >= 200))
@@ -184,8 +297,8 @@ function fromDomFallback(): RawCandidate {
 
   return {
     title: title?.slice(0, 200),
-    price: toNumber(priceText),
-    currency: priceText && /원|₩|KRW/i.test(priceText) ? 'KRW' : undefined,
+    price: priceCandidate,
+    currency: priceCandidate !== undefined ? 'KRW' : undefined,
     thumbnailUrl: img ? absoluteUrl(img.src) : undefined,
   };
 }
@@ -203,6 +316,81 @@ function mergeCandidates(...sources: (RawCandidate | null)[]): RawCandidate {
     }
   }
   return result;
+}
+
+/** 상품 상세 본문(기술서) 영역의 long 이미지들 추출.
+ *  쿠팡/네이버스마트스토어/11번가 등 사이트별 흔한 컨테이너 셀렉터 시도. */
+function extractDetailImageUrls(maxImages = 30): string[] {
+  // 후보 컨테이너 — 사이트별 다양함. 가장 먼저 매칭되는 거 사용.
+  const containerSelectors = [
+    // 쿠팡
+    '#productDetail',
+    '.product-detail',
+    '.prod-description',
+    // 네이버 스마트스토어
+    '#INTRODUCE',
+    '.se-main-container',
+    // 11번가
+    '.itm_intro',
+    '#tabDetailInfo',
+    // 일반
+    '[class*="detail-content" i]',
+    '[class*="prdDetail" i]',
+    '[class*="goods-detail" i]',
+    '[id*="detailContent" i]',
+    '[id*="productDescription" i]',
+  ];
+
+  let container: Element | null = null;
+  for (const sel of containerSelectors) {
+    const found = document.querySelector(sel);
+    if (found) {
+      container = found;
+      break;
+    }
+  }
+  if (!container) return [];
+
+  const seen = new Set<string>();
+  const collected: string[] = [];
+
+  // <img> 태그 (lazy load 속성 포함)
+  const imgs = container.querySelectorAll<HTMLImageElement>('img');
+  for (const img of imgs) {
+    const raw = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy');
+    if (!raw) continue;
+    const url = absoluteUrl(raw);
+    if (!url || seen.has(url)) continue;
+
+    // 크기 필터: 명시 width/height 또는 자연 크기
+    const w = img.naturalWidth || img.width || parseInt(img.getAttribute('width') || '0', 10);
+    const h = img.naturalHeight || img.height || parseInt(img.getAttribute('height') || '0', 10);
+    // 작은 아이콘 제외 (50x50 등)
+    if ((w > 0 && w < 200) && (h > 0 && h < 200)) continue;
+
+    seen.add(url);
+    collected.push(url);
+    if (collected.length >= maxImages) break;
+  }
+
+  // background-image 인라인 스타일 (크기 큰 div)
+  if (collected.length < maxImages) {
+    const bgEls = container.querySelectorAll<HTMLElement>('[style*="background-image" i]');
+    for (const el of bgEls) {
+      const style = el.getAttribute('style') || '';
+      const m = /background-image\s*:\s*url\(\s*['"]?([^'")]+)['"]?\s*\)/i.exec(style);
+      if (!m) continue;
+      const url = absoluteUrl(m[1]);
+      if (!url || seen.has(url)) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 200 || rect.height < 100) continue;
+      seen.add(url);
+      collected.push(url);
+      if (collected.length >= maxImages) break;
+    }
+  }
+
+  return collected;
 }
 
 /** AI 보강 입력용 — 페이지의 의미있는 텍스트만 추려서 cap. */
@@ -247,6 +435,8 @@ export function extractHeuristic(): ProductDraft {
     sourceHost = '';
   }
 
+  const detailImageUrls = extractDetailImageUrls();
+
   return {
     id: crypto.randomUUID(),
     sourceUrl,
@@ -256,6 +446,7 @@ export function extractHeuristic(): ProductDraft {
     currency: merged.currency,
     thumbnailUrl: merged.thumbnailUrl,
     imageUrls: merged.imageUrls,
+    detailImageUrls: detailImageUrls.length > 0 ? detailImageUrls : undefined,
     description: merged.description,
     brand: merged.brand,
     modelName: merged.modelName,
