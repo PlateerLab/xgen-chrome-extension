@@ -3,6 +3,8 @@ import { extractAndSendToken, watchTokenChanges } from './token-extractor';
 import { injectCursorOverride } from './cursor-override';
 import { startPicker, stopPicker } from './element-picker';
 import { showOverlay, hideOverlay, updateCount } from './floating-overlay';
+import { extractHeuristic, buildPageSnippet } from './product-extractor/heuristic';
+import { isBoAutofillHost, bootBoAutofill } from './bo-autofill';
 import type { ExtensionMessage } from '../shared/types';
 
 // Initialize token extraction
@@ -17,7 +19,7 @@ pageAgent.start();
 injectCursorOverride();
 
 // Element Picker / Floating Overlay 메시지 처리
-chrome.runtime.onMessage.addListener((message: ExtensionMessage) => {
+chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
   switch (message.type) {
     case 'ELEMENT_PICKER_START':
       startPicker();
@@ -39,7 +41,21 @@ chrome.runtime.onMessage.addListener((message: ExtensionMessage) => {
         updateCount(message.count);
       }
       break;
+    case 'PRODUCT_CAPTURE_REQUEST':
+      try {
+        const draft = extractHeuristic();
+        const pageSnippet = buildPageSnippet();
+        sendResponse({ type: 'PRODUCT_CAPTURE_RESPONSE', ok: true, draft, pageSnippet } satisfies ExtensionMessage);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        sendResponse({ type: 'PRODUCT_CAPTURE_RESPONSE', ok: false, error: message } satisfies ExtensionMessage);
+      }
+      return true;
   }
 });
+
+if (isBoAutofillHost()) {
+  bootBoAutofill();
+}
 
 console.log('[XGEN Extension] Content script loaded');

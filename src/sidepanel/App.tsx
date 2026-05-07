@@ -7,6 +7,9 @@ import { SettingsBar } from './components/SettingsBar';
 import { PlanQuestionPopup } from './components/PlanQuestionPopup';
 import { useElementPicker, PickerResultPanel } from './components/ElementPickerButton';
 import { SessionResultPanel } from './components/SessionResultPanel';
+import { MenuDrawer } from './components/MenuDrawer';
+import { ProductInbox } from './components/ProductInbox';
+import type { SidePanelView } from './menu/items';
 import type { ExtensionMessage, PageContext } from '../shared/types';
 
 function extractHost(u: string | undefined): string | null {
@@ -27,6 +30,8 @@ export function App() {
   const picker = useElementPicker();
   const captureSession = useCaptureSession();
   const [authCapturing, setAuthCapturing] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [view, setView] = useState<SidePanelView>('chat');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [pageContext, setPageContext] = useState<PageContext | null>(null);
   const greetedHostsRef = useRef<Set<string>>(new Set());
@@ -117,6 +122,20 @@ export function App() {
       {/* Toolbar — 한 줄 */}
       <div className="border-b border-gray-200">
         <div className="flex items-center px-2 py-1 gap-1">
+          {/* 햄버거 — 사이드 메뉴 */}
+          <button
+            onClick={() => setDrawerOpen(true)}
+            className="p-1 rounded text-gray-400 hover:text-gray-600 transition-colors"
+            title="메뉴 열기"
+            aria-label="메뉴 열기"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
+
           {/* Element Picker 아이콘 */}
           <button
             onClick={picker.togglePicker}
@@ -210,6 +229,17 @@ export function App() {
         </div>
       </div>
 
+      {/* 사이드 메뉴 드로어 */}
+      <MenuDrawer
+        open={drawerOpen}
+        onSelect={(item) => setView(item.view)}
+        onClose={() => setDrawerOpen(false)}
+      />
+
+      {view === 'inbox' && <ProductInbox onBack={() => setView('chat')} />}
+
+      {view === 'chat' && (
+      <>
       {/* Picker 결과 패널 (있을 때만) */}
       {picker.result && (
         <PickerResultPanel
@@ -291,6 +321,8 @@ export function App() {
         onStop={stopStream}
         isStreaming={isStreaming}
       />
+      </>
+      )}
     </div>
   );
 }

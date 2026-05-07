@@ -227,4 +227,28 @@ export type ExtensionMessage =
   // content → SW: 사용자가 overlay의 정지 버튼 누름.
   | { type: 'SHOW_FLOATING_OVERLAY' }
   | { type: 'HIDE_FLOATING_OVERLAY' }
-  | { type: 'STOP_FLOATING_CAPTURE' };
+  | { type: 'STOP_FLOATING_CAPTURE' }
+  // ── Product Capture (sidepanel → content): 현재 페이지에서 ProductDraft 후보 + 페이지 스니펫 추출 ──
+  // AI 보강(streamChat)은 MV3 SW의 SSE 스트리밍 제약 때문에 sidepanel에서 직접 수행한다.
+  | { type: 'PRODUCT_CAPTURE_REQUEST' }
+  | {
+      type: 'PRODUCT_CAPTURE_RESPONSE';
+      ok: boolean;
+      draft?: import('./product/types').ProductDraft;
+      pageSnippet?: string;
+      error?: string;
+    }
+  // ── Product Upload (sidepanel → BO content script): BO 상품등록 폼 자동 채움. ──
+  | { type: 'PRODUCT_UPLOAD_REQUEST'; draft: import('./product/types').ProductDraft }
+  | {
+      type: 'PRODUCT_UPLOAD_RESPONSE';
+      ok: boolean;
+      filledCount?: number;
+      filledLabels?: string[];
+      missingLabels?: string[];
+      joditFound?: boolean;
+      joditMethod?: string;
+      joditInjected?: boolean;
+      joditInjectMethod?: string;
+      error?: string;
+    };
