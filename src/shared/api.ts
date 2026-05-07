@@ -163,6 +163,9 @@ export interface FromTraceEdge {
 
 export interface FromTraceRequest {
   host: string;
+  /** Collection.domain_patterns — 호스트 매칭용. 단일 host 면 [host], multi-host
+   *  (login./cart./www. 등) 면 [`*.<base>`, base] 같은 wildcard 가 들어옴. */
+  domainPatterns?: string[];
   tools: FromTraceTool[];
   edges: FromTraceEdge[];
   name?: string;
@@ -196,6 +199,7 @@ export async function createCollectionFromTrace(
   };
   if (payload.name) body.name = payload.name;
   if (payload.authProfileId) body.auth_profile_id = payload.authProfileId;
+  if (payload.domainPatterns?.length) body.domain_patterns = payload.domainPatterns;
 
   const response = await fetch(url, {
     method: 'POST',

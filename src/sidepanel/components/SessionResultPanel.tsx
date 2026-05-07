@@ -73,7 +73,11 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
   const [registerState, setRegisterState] = useState<RegisterState>({ status: 'idle' });
 
   const handleRegister = async () => {
-    if (!analysis.primaryHost) {
+    // collectionHost = 단일 host 캡처면 그 host (fo.x2bee.com), multi-host 캡처
+    // (login./cart./www. 같이 분리된 사이트) 면 eTLD+1 (coupang.com).
+    // primaryHost 는 fallback (analysis 가 분리 못 했을 때) — UI 라벨에도 쓰임.
+    const registerHost = analysis.collectionHost ?? analysis.primaryHost;
+    if (!registerHost) {
       setRegisterState({ status: 'error', message: 'host를 식별할 수 없어 등록할 수 없습니다.' });
       return;
     }
@@ -94,11 +98,13 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
       // 캡처 도중 자동 등록된 인증 프로필을 collection 등록 시 같이 넘긴다 — 그래야
       // 백엔드가 collection.auth_profile_id를 통해 모든 tool row에 자동 propagate.
       // 이게 빠지면 collection은 만들어져도 tool들의 auth_profile_id가 비어 호출 시 401.
+      // host 검색은 사용자가 실제로 본 sub-host(login.* 등) 기준 — 그래야 캡처
+      // 시점에 자동 등록된 auth_profile 과 매칭됨.
       let authProfileId: string | undefined;
       try {
         const lookup = await chrome.runtime.sendMessage({
           type: 'LOOKUP_AUTH_PROFILE_FOR_HOST',
-          host: analysis.primaryHost,
+          host: analysis.primaryHost ?? registerHost,
         } satisfies ExtensionMessage);
         if (lookup?.ok && typeof lookup.authProfileId === 'string') {
           authProfileId = lookup.authProfileId;
@@ -108,7 +114,8 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
       }
 
       const res = await createCollectionFromTrace(config.serverUrl, config.authToken, {
-        host: analysis.primaryHost,
+        host: registerHost,
+        domainPatterns: analysis.domainPatterns,
         tools: selectedTools.map((t) => ({
           method: t.method,
           templatedPath: t.templatedPath,

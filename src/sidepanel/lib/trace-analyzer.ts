@@ -1,6 +1,7 @@
 // 캡처 트레이스 → "도구 + 추정 엣지" 분석기.
 // Phase 2: 시간순 + 값 흐름만 사용 (클릭 매핑은 Phase 3+에서 통합).
 
+import { getDomain } from 'tldts';
 import type { CapturedApi } from '../../shared/api-hook-types';
 
 // ── 출력 타입 ──
@@ -38,7 +39,14 @@ export interface DroppedReason {
 }
 
 export interface TraceAnalysis {
+  /** 캡처에 가장 많이 등장한 host (UI 표시용 — "어디서 잡혔어요" 라벨). */
   primaryHost: string | null;
+  /** Collection 등록 시 사용할 host. 단일 host 캡처면 그 host, 여러 sub-host
+   *  (login./cart./www. 등) 면 eTLD+1 (e.g. ``coupang.com``). */
+  collectionHost: string | null;
+  /** Collection.domain_patterns — 백엔드 host 매칭용. 단일 host 면 [host],
+   *  multi-host 면 [`*.<base>`, base] 의 wildcard 패턴. */
+  domainPatterns: string[];
   tools: AnalyzedTool[];
   edges: AnalyzedEdge[];
   authCandidates: CapturedApi[];
@@ -464,13 +472,48 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
   stage = stage.filter((c) => tryParseUrl(c.url) !== null);
   addDrop('URL 파싱 실패', beforeUrlFilter - stage.length);
 
-  // 3. 가장 많이 등장한 host를 primary로 선정
+  // 3. 가장 많이 등장한 host를 primary로 선정 (UI 라벨용)
   const hostCount = new Map<string, number>();
   for (const c of stage) {
     const h = tryParseUrl(c.url)!.host;
     hostCount.set(h, (hostCount.get(h) ?? 0) + 1);
   }
   const primaryHost = [...hostCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+
+  // 3-b. Collection 등록 host + domain_patterns 결정.
+  // 캡처가 여러 sub-host (e.g. login.coupang.com / cart.coupang.com / www.coupang.com)
+  // 에 걸쳐 있으면 eTLD+1 (coupang.com) 으로 그룹화해야 cross-host drop 으로 호출이
+  // 누락 안 됨. 11st.co.kr 같은 multi-segment TLD 도 tldts.getDomain 이 정확 처리.
+  // 단일 host 캡처(x2bee 처럼 fo.x2bee.com 만)는 변경 영향 없게 그대로 둠.
+  const distinctHosts = new Set<string>();
+  for (const c of stage) distinctHosts.add(tryParseUrl(c.url)!.host);
+
+  let collectionHost: string | null = null;
+  let domainPatterns: string[] = [];
+  let baseDomainForFilter: string | null = null;  // multi-host 모드에서만 set
+
+  if (distinctHosts.size === 1) {
+    collectionHost = primaryHost;
+    domainPatterns = primaryHost ? [primaryHost] : [];
+  } else if (distinctHosts.size > 1) {
+    // 캡처된 host 들의 eTLD+1 누적 — 가장 빈번한 base 가 collection root
+    const domainHits = new Map<string, number>();
+    for (const c of stage) {
+      const h = tryParseUrl(c.url)!.host;
+      const rd = getDomain(h);
+      if (rd) domainHits.set(rd, (domainHits.get(rd) ?? 0) + 1);
+    }
+    const top = [...domainHits.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+    if (top) {
+      collectionHost = top;
+      domainPatterns = [`*.${top}`, top];
+      baseDomainForFilter = top;
+    } else {
+      // tldts 가 base 추출 실패 (raw IP 등) — 안전하게 단일 host 모드로 폴백
+      collectionHost = primaryHost;
+      domainPatterns = primaryHost ? [primaryHost] : [];
+    }
+  }
 
   // 4. 인증 호출 분리 (먼저 빼냄 — 아래 노이즈 필터에 안 걸리게)
   const authCandidates: CapturedApi[] = [];
@@ -488,11 +531,16 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
   stage = stage.filter((c) => !isAnalyticsCall(tryParseUrl(c.url)!));
   addDrop('analytics/tracking', beforeAnalytics - stage.length);
 
-  // 6. cross-host drop (primary host 외)
-  if (primaryHost) {
+  // 6. cross-domain drop — multi-host 모드면 eTLD+1 매칭, 단일 host 모드면 host 일치
+  if (collectionHost) {
     const beforeCross = stage.length;
-    stage = stage.filter((c) => tryParseUrl(c.url)!.host === primaryHost);
-    addDrop(`다른 호스트 (primary=${primaryHost} 아님)`, beforeCross - stage.length);
+    if (baseDomainForFilter) {
+      stage = stage.filter((c) => getDomain(tryParseUrl(c.url)!.host) === baseDomainForFilter);
+      addDrop(`다른 도메인 (base=${baseDomainForFilter} 아님)`, beforeCross - stage.length);
+    } else {
+      stage = stage.filter((c) => tryParseUrl(c.url)!.host === collectionHost);
+      addDrop(`다른 호스트 (host=${collectionHost} 아님)`, beforeCross - stage.length);
+    }
   }
 
   // 7. 4xx/5xx drop
@@ -624,6 +672,8 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
 
   return {
     primaryHost,
+    collectionHost,
+    domainPatterns,
     tools: mergedTools,
     edges,
     authCandidates,
