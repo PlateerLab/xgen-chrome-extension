@@ -2,8 +2,9 @@ import type { ProductDraft } from '../../shared/product/types';
 
 interface ProductCardProps {
   product: ProductDraft;
+  selected: boolean;
+  onToggleSelect: (id: string) => void;
   onRemove: (id: string) => void;
-  onUpload?: (id: string) => void;
 }
 
 function formatPrice(price?: number, currency?: string): string | null {
@@ -24,14 +25,36 @@ function formatRelativeTime(ts: number): string {
   return `${day}일 전`;
 }
 
-export function ProductCard({ product, onRemove, onUpload }: ProductCardProps) {
+export function ProductCard({ product, selected, onToggleSelect, onRemove }: ProductCardProps) {
   const priceText = formatPrice(product.price, product.currency);
   const isEnriching = product.status === 'enriching';
   const isFailed = product.status === 'failed';
-  const canUpload = !!onUpload && !isEnriching;
 
   return (
-    <article className="flex gap-2 p-2 border border-gray-200 rounded-md bg-white hover:border-violet-300 transition-colors">
+    <article
+      onClick={() => !isEnriching && onToggleSelect(product.id)}
+      className={`flex gap-2 p-2 rounded-md transition-all cursor-pointer border ${
+        selected
+          ? 'border-violet-500 bg-violet-50/50 ring-1 ring-violet-300'
+          : 'border-gray-200 bg-white hover:border-gray-300'
+      } ${isEnriching ? 'opacity-70 cursor-wait' : ''}`}
+    >
+      {/* 선택 체크박스 */}
+      <div className="flex-shrink-0 pt-0.5">
+        <span
+          className={`inline-flex w-4 h-4 rounded border items-center justify-center ${
+            selected ? 'bg-violet-600 border-violet-600' : 'bg-white border-gray-300'
+          }`}
+          aria-hidden="true"
+        >
+          {selected && (
+            <svg className="w-3 h-3 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          )}
+        </span>
+      </div>
+
       <div className="flex-shrink-0 w-12 h-12 rounded bg-gray-100 overflow-hidden">
         {product.thumbnailUrl ? (
           <img
@@ -44,9 +67,7 @@ export function ProductCard({ product, onRemove, onUpload }: ProductCardProps) {
             }}
           />
         ) : (
-          <div className="w-full h-full flex items-center justify-center text-gray-300 text-[10px]">
-            no img
-          </div>
+          <div className="w-full h-full flex items-center justify-center text-gray-300 text-[10px]">no img</div>
         )}
       </div>
 
@@ -56,7 +77,10 @@ export function ProductCard({ product, onRemove, onUpload }: ProductCardProps) {
             {product.title || '(제목 없음)'}
           </h3>
           <button
-            onClick={() => onRemove(product.id)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove(product.id);
+            }}
             className="flex-shrink-0 text-gray-300 hover:text-red-500 leading-none p-0.5"
             title="삭제"
             aria-label="상품 삭제"
@@ -80,22 +104,6 @@ export function ProductCard({ product, onRemove, onUpload }: ProductCardProps) {
         </div>
         {product.sourceHost && (
           <div className="mt-0.5 text-[10px] text-gray-400 truncate">{product.sourceHost}</div>
-        )}
-        {canUpload && (
-          <div className="mt-1.5">
-            <button
-              onClick={() => onUpload?.(product.id)}
-              className="w-full text-[11px] font-medium text-violet-700 bg-violet-50 hover:bg-violet-100 transition-colors py-1 rounded inline-flex items-center justify-center gap-1"
-              title="이 상품을 BO 상품등록 페이지에 자동 채움"
-            >
-              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="17 8 12 3 7 8" />
-                <line x1="12" y1="3" x2="12" y2="15" />
-              </svg>
-              상품 업로드
-            </button>
-          </div>
         )}
       </div>
     </article>

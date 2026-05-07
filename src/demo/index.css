@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Pretendard', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 상세 본문 (Jodit 풍) HTML 스타일링 */
+.demo-detail-body h1,
+.demo-detail-body h2,
+.demo-detail-body h3 {
+  font-weight: 700;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  color: #0f172a;
+}
+.demo-detail-body h2 { font-size: 1.5rem; }
+.demo-detail-body h3 { font-size: 1.25rem; }
+.demo-detail-body p {
+  margin: 0.5rem 0 0.75rem;
+  line-height: 1.7;
+  color: #334155;
+}
+.demo-detail-body ul,
+.demo-detail-body ol {
+  margin: 0.5rem 0 0.75rem 1.25rem;
+  line-height: 1.7;
+  color: #334155;
+}
+.demo-detail-body li { margin: 0.2rem 0; }
+.demo-detail-body strong { color: #0f172a; }
+
+/* 스트리밍 깜빡 커서 */
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+.streaming-caret::after {
+  content: '▍';
+  display: inline-block;
+  margin-left: 2px;
+  color: #8b5cf6;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #e2e8f0 0%, #f1f5f9 50%, #e2e8f0 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+  border-radius: 6px;
+}

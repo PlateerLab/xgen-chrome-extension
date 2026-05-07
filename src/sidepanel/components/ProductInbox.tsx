@@ -14,38 +14,36 @@ type CaptureState =
   | { kind: 'capturing' }
   | { kind: 'error'; message: string };
 
-type UploadToast =
-  | { kind: 'success'; message: string }
+type AnalyzeToast =
+  | { kind: 'info'; message: string }
   | { kind: 'error'; message: string };
 
-const BO_AUTOFILL_HINT = 'bo.x2bee.com 상품등록 페이지를 활성 탭으로 두고 다시 시도하세요.';
+const MAX_COMPARE = 3;
 
 export function ProductInbox({ onBack }: ProductInboxProps) {
   const [products, setProducts] = useState<ProductDraft[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [capture, setCapture] = useState<CaptureState>({ kind: 'idle' });
-  const [uploadToast, setUploadToast] = useState<UploadToast | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [analyzeToast, setAnalyzeToast] = useState<AnalyzeToast | null>(null);
   const enrichingRef = useRef<Map<string, AbortController>>(new Map());
-  const uploadToastTimerRef = useRef<number | null>(null);
+  const analyzeToastTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
-      if (uploadToastTimerRef.current) {
-        clearTimeout(uploadToastTimerRef.current);
-      }
+      if (analyzeToastTimerRef.current) clearTimeout(analyzeToastTimerRef.current);
     };
   }, []);
 
-  const showUploadToast = (toast: UploadToast) => {
-    setUploadToast(toast);
-    if (uploadToastTimerRef.current) clearTimeout(uploadToastTimerRef.current);
-    uploadToastTimerRef.current = window.setTimeout(() => setUploadToast(null), 5000);
+  const showAnalyzeToast = (toast: AnalyzeToast) => {
+    setAnalyzeToast(toast);
+    if (analyzeToastTimerRef.current) clearTimeout(analyzeToastTimerRef.current);
+    analyzeToastTimerRef.current = window.setTimeout(() => setAnalyzeToast(null), 4000);
   };
 
   useEffect(() => {
     const map = enrichingRef.current;
     return () => {
-      // 컴포넌트 언마운트 시 진행 중인 enrich 모두 abort
       map.forEach((ctrl) => ctrl.abort());
       map.clear();
     };
@@ -57,66 +55,35 @@ export function ProductInbox({ onBack }: ProductInboxProps) {
         setProducts(items);
         setLoaded(true);
       })
-      .catch((err) => {
-        console.warn('[ProductInbox] listProducts failed:', err);
-        setLoaded(true);
+      .catch(() => setLoaded(true));
+    return subscribeProducts((next) => {
+      setProducts(next);
+      // 사라진 상품의 선택 해제
+      setSelectedIds((prev) => {
+        const ids = new Set(next.map((p) => p.id));
+        const filtered = new Set([...prev].filter((id) => ids.has(id)));
+        return filtered.size === prev.size ? prev : filtered;
       });
-    return subscribeProducts(setProducts);
+    });
   }, []);
 
-  const handleUpload = async (id: string) => {
-    const product = products.find((p) => p.id === id);
-    if (!product) return;
-    try {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      const tab = tabs[0];
-      if (!tab?.id || !tab.url) {
-        showUploadToast({ kind: 'error', message: '활성 탭을 찾을 수 없습니다.' });
-        return;
+  const handleToggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        if (next.size >= MAX_COMPARE) {
+          showAnalyzeToast({ kind: 'error', message: `최대 ${MAX_COMPARE}개까지 비교 가능합니다.` });
+          return prev;
+        }
+        next.add(id);
       }
-      let host = '';
-      try {
-        host = new URL(tab.url).hostname;
-      } catch {}
-      if (host !== 'bo.x2bee.com') {
-        showUploadToast({ kind: 'error', message: BO_AUTOFILL_HINT });
-        return;
-      }
-
-      const response = (await chrome.tabs.sendMessage(tab.id, {
-        type: 'PRODUCT_UPLOAD_REQUEST',
-        draft: product,
-      } satisfies ExtensionMessage)) as ExtensionMessage | undefined;
-
-      if (!response || response.type !== 'PRODUCT_UPLOAD_RESPONSE') {
-        showUploadToast({ kind: 'error', message: '응답을 받지 못했습니다.' });
-        return;
-      }
-      if (!response.ok) {
-        showUploadToast({ kind: 'error', message: response.error || '업로드 실패' });
-        return;
-      }
-
-      const filledN = response.filledCount ?? 0;
-      const missing = response.missingLabels ?? [];
-      const missingPart = missing.length > 0 ? ` · 미발견: ${missing.join(', ')}` : '';
-      const detailMsg = response.joditInjected
-        ? `상세 주입 OK(${response.joditInjectMethod})`
-        : response.joditFound
-        ? '상세 주입 실패'
-        : 'Jodit 미발견';
-      showUploadToast({
-        kind: 'success',
-        message: `필드 ${filledN}개${missingPart} · ${detailMsg}`,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const friendly = /Receiving end does not exist|Could not establish connection/i.test(msg)
-        ? BO_AUTOFILL_HINT
-        : msg;
-      showUploadToast({ kind: 'error', message: friendly });
-    }
+      return next;
+    });
   };
+
+  const handleClearSelection = () => setSelectedIds(new Set());
 
   const handleRemove = (id: string) => {
     const ctrl = enrichingRef.current.get(id);
@@ -124,7 +91,33 @@ export function ProductInbox({ onBack }: ProductInboxProps) {
       ctrl.abort();
       enrichingRef.current.delete(id);
     }
-    removeProduct(id).catch((err) => console.warn('[ProductInbox] remove failed:', err));
+    removeProduct(id).catch(() => {});
+  };
+
+  const handleAnalyze = async () => {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    const valid = ids.filter((id) => products.find((p) => p.id === id)?.status !== 'enriching');
+    if (valid.length === 0) {
+      showAnalyzeToast({ kind: 'error', message: 'AI 보강이 끝난 후 다시 시도하세요.' });
+      return;
+    }
+
+    const url =
+      valid.length === 1
+        ? chrome.runtime.getURL(`src/demo/index.html?id=${encodeURIComponent(valid[0])}`)
+        : chrome.runtime.getURL(`src/demo/index.html?ids=${valid.map(encodeURIComponent).join(',')}`);
+
+    try {
+      await chrome.tabs.create({ url });
+      showAnalyzeToast({
+        kind: 'info',
+        message: valid.length === 1 ? 'AI 분석 페이지를 열었습니다.' : `${valid.length}개 비교 분석을 시작합니다.`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showAnalyzeToast({ kind: 'error', message: `탭 열기 실패: ${msg}` });
+    }
   };
 
   const startEnrich = async (draft: ProductDraft, pageSnippet: string) => {
@@ -134,7 +127,6 @@ export function ProductInbox({ onBack }: ProductInboxProps) {
       | { type: 'CHAT_CONFIG'; serverUrl: string; authToken: string; provider: string; model: string }
       | undefined;
     if (!config?.serverUrl || !config.authToken) {
-      console.warn('[ProductInbox] enrich skipped — config 부재');
       await updateProduct(draft.id, { status: 'failed', aiNotes: 'XGEN 로그인이 필요합니다.' });
       return;
     }
@@ -154,7 +146,6 @@ export function ProductInbox({ onBack }: ProductInboxProps) {
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn('[ProductInbox] enrich failed:', msg);
       await updateProduct(draft.id, { status: 'failed', aiNotes: msg });
     } finally {
       enrichingRef.current.delete(draft.id);
@@ -191,11 +182,9 @@ export function ProductInbox({ onBack }: ProductInboxProps) {
       const enrichingDraft: ProductDraft = { ...response.draft, status: 'enriching' };
       await addProduct(enrichingDraft);
       setCapture({ kind: 'idle' });
-      // fire-and-forget — 사이드패널 닫힘/언마운트로만 abort
       void startEnrich(enrichingDraft, response.pageSnippet || '');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // tabs.sendMessage가 receiver 없을 때 던지는 에러 케이스 안내
       const friendly = /Receiving end does not exist|Could not establish connection/i.test(msg)
         ? '페이지에 콘텐츠 스크립트가 로드되지 않았습니다. 페이지를 새로고침 후 다시 시도하세요.'
         : msg;
@@ -203,8 +192,10 @@ export function ProductInbox({ onBack }: ProductInboxProps) {
     }
   };
 
+  const selectedCount = selectedIds.size;
+
   return (
-    <div className="flex flex-col flex-1 min-h-0">
+    <div className="flex flex-col flex-1 min-h-0 relative">
       <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-200">
         <button
           onClick={onBack}
@@ -217,7 +208,7 @@ export function ProductInbox({ onBack }: ProductInboxProps) {
           </svg>
           채팅으로
         </button>
-        <span className="text-sm font-medium text-gray-700 ml-1">📦 상품 수집함</span>
+        <span className="text-sm font-medium text-gray-700 ml-1">상품 수집함</span>
         {products.length > 0 && (
           <span className="ml-auto text-[11px] text-gray-400">{products.length}개</span>
         )}
@@ -227,7 +218,7 @@ export function ProductInbox({ onBack }: ProductInboxProps) {
         <button
           onClick={handleCapture}
           disabled={capture.kind === 'capturing'}
-          className="w-full text-xs font-medium text-white bg-violet-600 hover:bg-violet-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors py-1.5 rounded flex items-center justify-center gap-1.5"
+          className="w-full text-xs font-medium text-white bg-gray-900 hover:bg-gray-800 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors py-1.5 rounded flex items-center justify-center gap-1.5"
         >
           {capture.kind === 'capturing' ? (
             <>
@@ -235,7 +226,7 @@ export function ProductInbox({ onBack }: ProductInboxProps) {
                 <circle cx="12" cy="12" r="10" opacity="0.25" />
                 <path d="M22 12a10 10 0 0 1-10 10" strokeLinecap="round" />
               </svg>
-              추출 중...
+              추출 중
             </>
           ) : (
             <>
@@ -250,6 +241,18 @@ export function ProductInbox({ onBack }: ProductInboxProps) {
           <p className="mt-1 text-[11px] text-red-600">{capture.message}</p>
         )}
       </div>
+
+      {analyzeToast && (
+        <div
+          className={`px-3 py-1.5 text-[11px] border-b ${
+            analyzeToast.kind === 'info'
+              ? 'bg-violet-50 border-violet-200 text-violet-800'
+              : 'bg-amber-50 border-amber-200 text-amber-800'
+          }`}
+        >
+          {analyzeToast.message}
+        </div>
+      )}
 
       {loaded && products.length === 0 && (
         <div className="flex-1 flex flex-col items-center justify-center px-4 text-center text-gray-400 text-sm gap-3">
@@ -268,28 +271,48 @@ export function ProductInbox({ onBack }: ProductInboxProps) {
         </div>
       )}
 
-      {uploadToast && (
-        <div
-          className={`px-3 py-1.5 text-[11px] border-b ${
-            uploadToast.kind === 'success'
-              ? 'bg-violet-50 border-violet-200 text-violet-800'
-              : 'bg-amber-50 border-amber-200 text-amber-800'
-          }`}
-        >
-          {uploadToast.message}
-        </div>
+      {products.length > 0 && (
+        <>
+          <div className="px-3 py-1.5 border-b border-gray-100 text-[11px] text-gray-500">
+            {selectedCount === 0
+              ? '카드를 눌러 분석할 상품을 선택하세요. 2~3개를 고르면 비교 분석.'
+              : selectedCount === 1
+              ? '1개 선택 — AI 분석'
+              : `${selectedCount}개 선택 — AI 비교 분석`}
+          </div>
+          <div className={`flex-1 overflow-y-auto px-2 py-2 flex flex-col gap-1.5 ${selectedCount > 0 ? 'pb-16' : ''}`}>
+            {products.map((product) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                selected={selectedIds.has(product.id)}
+                onToggleSelect={handleToggleSelect}
+                onRemove={handleRemove}
+              />
+            ))}
+          </div>
+        </>
       )}
 
-      {products.length > 0 && (
-        <div className="flex-1 overflow-y-auto px-2 py-2 flex flex-col gap-1.5">
-          {products.map((product) => (
-            <ProductCard
-              key={product.id}
-              product={product}
-              onRemove={handleRemove}
-              onUpload={handleUpload}
-            />
-          ))}
+      {/* 하단 액션 바 — 선택된 게 있을 때 */}
+      {selectedCount > 0 && (
+        <div className="absolute bottom-0 left-0 right-0 border-t border-gray-200 bg-white/95 backdrop-blur px-3 py-2 flex items-center gap-2 shadow-lg">
+          <button
+            onClick={handleClearSelection}
+            className="text-[11px] text-gray-500 hover:text-gray-700 px-2 py-1"
+          >
+            취소
+          </button>
+          <button
+            onClick={handleAnalyze}
+            className="flex-1 text-xs font-semibold text-white bg-gradient-to-r from-violet-700 to-indigo-700 hover:from-violet-800 hover:to-indigo-800 transition-colors py-2 rounded inline-flex items-center justify-center gap-1.5 shadow-sm"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 11l3 3L22 4" />
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+            </svg>
+            {selectedCount === 1 ? 'AI 분석' : `AI 비교 분석 · ${selectedCount}개`}
+          </button>
         </div>
       )}
     </div>
