@@ -9,6 +9,7 @@ import type {
   PageContext,
   SSEEvent,
 } from '../shared/types';
+import { getDomain } from 'tldts';
 import type { CapturedApi } from '../shared/api-hook-types';
 import { mainWorldHookFunction, mainWorldUnhookFunction } from '../content/api-hook/main-world-hook';
 import { apiHookRelayFunction } from '../content/api-hook/relay';
@@ -1484,6 +1485,98 @@ function buildAuthProfileFromLogin(
 }
 
 /**
+ * Cookie 기반 사이트의 로그인 호출 후보 검출. tokenFields 없는 cookie 사이트
+ * (쿠팡 등) 가 응답 body 에 토큰을 안 주는 케이스 — buildCookieAuthProfile 의 입력.
+ * findCapturedLoginForDomain 과 다르게 토큰 검사 / payload 파싱 강제 안 함.
+ */
+function findCookieLoginCandidate(
+  domain: string,
+): { url: string; method: string; headers: Record<string, string>; payload: Record<string, unknown> } | null {
+  const loginUrlPatterns = /\/(login|auth|token|signin|oauth|session)/i;
+  const stripped = domain.replace('www.', '');
+  for (const [, apis] of capturedApisByTab) {
+    for (const api of apis) {
+      if (api.method !== 'POST') continue;
+      try {
+        if (!new URL(api.url).hostname.includes(stripped)) continue;
+      } catch { continue; }
+      if (!loginUrlPatterns.test(api.url)) continue;
+      let payload: Record<string, unknown> = {};
+      if (api.requestBody) {
+        try { payload = JSON.parse(api.requestBody); } catch { /* form-encoded 등 — 빈 dict 로 */ }
+      }
+      const headers: Record<string, string> = {};
+      const ct = api.requestHeaders['content-type'] || api.requestHeaders['Content-Type'];
+      if (ct) headers['Content-Type'] = ct;
+      return { url: api.url, method: api.method, headers, payload };
+    }
+  }
+  return null;
+}
+
+/**
+ * Cookie 기반 인증 프로필 생성 — bearer 와 동일한 정공법.
+ *
+ * session-station 이 만료 시 ``login_config`` (캡처된 자격증명 payload 포함)
+ * 으로 재로그인 → 응답 Set-Cookie 에서 ``source: 'cookie'`` 로 동적 추출 →
+ * 다음 호출의 Cookie 헤더로 ``target: 'header'`` 주입. 즉 fixed 박지 않고
+ * bearer 와 같은 자동 갱신 메커니즘.
+ *
+ * 한계: CSRF token / CAPTCHA / 2FA / SSO 가 끼는 사이트는 캡처된 payload
+ * 재사용만으론 재로그인 실패할 수 있음. 그땐 사용자가 사이트 재로그인 후
+ * 캡처 한 번 더 돌리면 새 프로필 교체.
+ *
+ * 쿠키 필터: ``httpOnly: true`` 만 선택 — 진짜 세션은 보통 HttpOnly,
+ * 광고/추적/봇감지는 대부분 non-HttpOnly. 이 한 줄로 PCID/MARKETID/_ga 같은
+ * 노이즈는 자연스럽게 제외된다 (Akamai bm_* / _abck 는 HttpOnly 라 통과).
+ */
+function buildCookieAuthProfile(
+  serviceId: string,
+  domain: string,
+  login: { url: string; method: string; headers: Record<string, string>; payload: Record<string, unknown> },
+  cookies: chrome.cookies.Cookie[],
+): Record<string, unknown> | null {
+  const sessionCookies = cookies.filter(
+    (c) => c.httpOnly && c.value && c.value.length >= 8,
+  );
+  if (!sessionCookies.length) return null;
+
+  // session-station 이 login_config 호출 후 응답 cookies 에서 이름으로 추출.
+  // bearer 의 source: 'body' + key_path 와 같은 패턴 — 매 갱신마다 fresh 값.
+  const extractionRules = sessionCookies.map((c) => ({
+    name: c.name,
+    source: 'cookie',
+    key_path: c.name,
+  }));
+  // 각 쿠키 별도 rule — auth_service.build_headers_from_instructions 가 동일 키
+  // (Cookie) 를 ``; `` 로 합쳐 한 헤더로 만들어준다.
+  const injectionRules = sessionCookies.map((c) => ({
+    source_field: c.name,
+    target: 'header',
+    key: 'Cookie',
+    value_template: `${c.name}={${c.name}}`,
+    required: false,
+  }));
+  return {
+    service_id: serviceId,
+    name: `${domain} (자동 생성, cookie)`,
+    description: '캡처된 로그인 호출로 자동 생성. 토큰 만료 시 session-station 이 자동 재로그인.',
+    auth_type: 'cookie',
+    login_config: {
+      url: login.url,
+      method: login.method,
+      headers: login.headers,
+      payload: login.payload,
+      timeout: 30,
+    },
+    extraction_rules: extractionRules,
+    injection_rules: injectionRules,
+    ttl: 3600,
+    refresh_before_expire: 300,
+  };
+}
+
+/**
  * 캡처된 API 데이터에서 특정 도메인의 인증 헤더를 찾는다. (fallback)
  */
 function findCapturedAuthForDomain(domain: string): { type: string; key: string; value: string } | null {
@@ -1583,12 +1676,30 @@ async function autoCreateAuthProfileFromCapture(loginUrl: string) {
       }
     }
 
-    // 로그인 캡처 찾기
-    const capturedLogin = findCapturedLoginForDomain(apiDomain);
-    if (!capturedLogin) return;
-
-    const serviceId = apiDomain.replace('www.', '').replace(/\./g, '_');
-    const profileData = buildAuthProfileFromLogin(serviceId, apiDomain, capturedLogin);
+    // 1순위: 응답 body 에 토큰 (access_token 등) 있는 bearer 흐름 — apiDomain (sub-host
+    //        포함) 그대로 service_id. 기존 fo_x2bee_com 같은 케이스 호환.
+    // 2순위: 토큰 없는 cookie 기반 로그인 (쿠팡 등) — chrome.cookies API 로 세션 쿠키
+    //        직접 가져와 fixed extraction + Cookie 헤더 injection 으로 등록. service_id 는
+    //        eTLD+1 (coupang_com) 으로 통일 — multi-host 컬렉션과 매칭되게.
+    //        자격증명 자동화는 못 해서 만료 시 재캡처 필요 (description 에 안내).
+    let profileData: Record<string, unknown> | null = null;
+    let serviceId: string;
+    const tokenLogin = findCapturedLoginForDomain(apiDomain);
+    if (tokenLogin) {
+      serviceId = apiDomain.replace('www.', '').replace(/\./g, '_');
+      profileData = buildAuthProfileFromLogin(serviceId, apiDomain, tokenLogin) as Record<string, unknown>;
+    } else {
+      const cookieLogin = findCookieLoginCandidate(apiDomain);
+      if (!cookieLogin) return;
+      // sub-host 의 쿠키만 보면 부모 도메인 (.coupang.com) 에 떨어진 세션 쿠키를 놓침 →
+      // base domain 으로 검색하면 해당 site 의 모든 sub 쿠키 다 잡힌다.
+      const baseDomain = getDomain(apiDomain) || apiDomain;
+      const cookies = await chrome.cookies.getAll({ domain: baseDomain }).catch(() => []);
+      if (!cookies.length) return;
+      serviceId = baseDomain.replace(/\./g, '_');
+      profileData = buildCookieAuthProfile(serviceId, baseDomain, cookieLogin, cookies);
+      if (!profileData) return;
+    }
 
     const createResp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
       method: 'POST',
