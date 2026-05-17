@@ -1,13 +1,21 @@
 import { useState, useEffect, useCallback } from 'react';
 import { STORAGE_KEYS, API_PROVIDERS_ENDPOINT } from '../../shared/constants';
 
+/** /providers 의 models 원소 — 구 백엔드는 문자열, 신 백엔드(chat mode)는 {id,name,description} 객체. */
+type ModelInfo = string | { id: string; name?: string; description?: string };
+
 interface ProviderInfo {
   provider: string;
   name: string;
-  models: string[];
+  models: ModelInfo[];
   default_model: string;
   available: boolean;
 }
+
+/** ModelInfo → 모델 ID 문자열 (저장·전송용). */
+const modelId = (m: ModelInfo): string => (typeof m === 'string' ? m : m.id);
+/** ModelInfo → 드롭다운 표시 라벨. */
+const modelLabel = (m: ModelInfo): string => (typeof m === 'string' ? m : m.name || m.id);
 
 export function SettingsBar() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -166,9 +174,10 @@ export function SettingsBar() {
                 onChange={(e) => handleModelChange(e.target.value)}
                 className="w-full text-xs rounded border border-gray-200 bg-white text-gray-700 px-2 py-1.5 focus:outline-none focus:border-gray-400"
               >
-                {currentProvider.models.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
+                {currentProvider.models.map((m) => {
+                  const id = modelId(m);
+                  return <option key={id} value={id}>{modelLabel(m)}</option>;
+                })}
               </select>
             ) : (
               <input
