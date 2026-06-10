@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const distDir = path.join(repoRoot, 'dist');
+const SIDEPANEL_CHAT_COMMAND_REQUEST_ID = 'verify-sidepanel-chat-command';
 
 function loadPlaywright() {
   const searchPaths = [
@@ -65,8 +66,8 @@ async function waitForPageContext(extensionPage, predicate, label) {
   assert.fail(`${label}: page context not ready: ${JSON.stringify(lastResponse)}`);
 }
 
-function findElementIndex(context, pattern, label) {
-  const elements = String(context?.elements || '');
+function findElementIndexInText(elementsText, pattern, label) {
+  const elements = String(elementsText || '');
   const chunks = [];
   const chunkPattern = /\[(\d+)\]([^\n]*(?:\n(?!\[\d+\])[^\n]*)*)/g;
   let match;
@@ -80,6 +81,10 @@ function findElementIndex(context, pattern, label) {
     `${label}: matching element not found. Pattern=${pattern}; elements=${elements}`,
   );
   return found.index;
+}
+
+function findElementIndex(context, pattern, label) {
+  return findElementIndexInText(context?.elements || '', pattern, label);
 }
 
 async function sendPageCommand(extensionPage, action, params) {
@@ -115,6 +120,7 @@ function waitForCommandResult(commandResults, requestId, label) {
 
 function startFixtureServer() {
   const commandResults = [];
+  const chatRequests = [];
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url?.startsWith('/api/ai-chat/command-result/')) {
       const requestId = decodeURIComponent(req.url.split('/').pop() || '');
@@ -132,6 +138,53 @@ function startFixtureServer() {
         }
         commandResults.push({ requestId, headers: req.headers, body });
         res.writeHead(204);
+        res.end();
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/ai-chat/stream') {
+      let rawBody = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => {
+        rawBody += chunk;
+      });
+      req.on('end', () => {
+        let body;
+        try {
+          body = JSON.parse(rawBody || '{}');
+        } catch {
+          body = {};
+        }
+        chatRequests.push(body);
+
+        const inputIndex = findElementIndexInText(
+          body?.page_context?.elements || '',
+          /<input[^>]*(Search term|search-input)/i,
+          'sidepanel SSE page_command input',
+        );
+
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        const writeEvent = (event) => {
+          res.write(`data: ${JSON.stringify(event)}\n\n`);
+        };
+
+        writeEvent({ type: 'token', content: 'UI bridge start. ' });
+        writeEvent({
+          type: 'page_command',
+          requestId: SIDEPANEL_CHAT_COMMAND_REQUEST_ID,
+          action: 'input_text',
+          params: {
+            index: inputIndex,
+            text: 'from-sidepanel',
+          },
+        });
+        writeEvent({ type: 'token', content: 'UI bridge done.' });
+        writeEvent({ type: 'done' });
         res.end();
       });
       return;
@@ -228,6 +281,7 @@ function startFixtureServer() {
         server,
         url: `http://127.0.0.1:${address.port}/`,
         commandResults,
+        chatRequests,
       });
     });
   });
@@ -392,6 +446,52 @@ async function verifyRelayCommandBridge(extensionPage, targetPage, commandResult
   assert.match(callback.body.pageContext?.elements || '', /Search term/);
 }
 
+async function submitSidepanelMessage(extensionPage, targetPage, message) {
+  const input = extensionPage.locator('textarea[placeholder="메시지 입력..."]');
+  await input.fill(message);
+  await extensionPage.waitForFunction(() => {
+    const button = document.querySelector('button[title="전송"]');
+    return button && !button.disabled;
+  });
+
+  await targetPage.bringToFront();
+  await extensionPage.evaluate(() => {
+    const button = document.querySelector('button[title="전송"]');
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new Error('sidepanel send button not found');
+    }
+    button.click();
+  });
+}
+
+async function verifySidepanelChatRelay(extensionPage, targetPage, commandResults, chatRequests) {
+  await targetPage.bringToFront();
+  const context = await waitForPageContext(
+    extensionPage,
+    (ctx) => /Search term/.test(ctx.elements || ''),
+    'Sidepanel chat relay context',
+  );
+  assert.match(context.url || '', /\/workspace\/details$/);
+
+  await submitSidepanelMessage(extensionPage, targetPage, 'sidepanel bridge check');
+
+  await targetPage.waitForFunction(() => document.querySelector('#search-input')?.value === 'from-sidepanel');
+  const callback = await waitForCommandResult(
+    commandResults,
+    SIDEPANEL_CHAT_COMMAND_REQUEST_ID,
+    'Sidepanel chat relay',
+  );
+  assert.equal(callback.headers.authorization, 'Bearer verify-token');
+  assert.equal(callback.body.success, true, `sidepanel command callback should report success: ${JSON.stringify(callback.body)}`);
+  assert.equal(callback.body.action, 'input_text');
+
+  const lastChatRequest = chatRequests.at(-1);
+  assert.equal(lastChatRequest?.messages?.[0]?.content, 'sidepanel bridge check');
+  assert.match(lastChatRequest?.page_context?.elements || '', /Search term/);
+
+  await extensionPage.waitForFunction(() => document.body.innerText.includes('UI bridge done.'));
+}
+
 async function main() {
   if (!existsSync(path.join(distDir, 'manifest.json'))) {
     throw new Error('dist/manifest.json not found. Run `npm run build` before runtime verification.');
@@ -404,7 +504,7 @@ async function main() {
     );
   }
   const userDataDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-runtime-'));
-  const { server, url, commandResults } = await startFixtureServer();
+  const { server, url, commandResults, chatRequests } = await startFixtureServer();
   let context;
 
   try {
@@ -446,6 +546,7 @@ async function main() {
     await targetPage.goto(url);
     await verifyPageAgent(extensionPage, targetPage);
     await verifyRelayCommandBridge(extensionPage, targetPage, commandResults);
+    await verifySidepanelChatRelay(extensionPage, targetPage, commandResults, chatRequests);
     await wait(2_200);
 
     const firstApis = await runCaptureSession(extensionPage, targetPage, async () => {
@@ -501,6 +602,7 @@ async function main() {
       `PathFinder runtime verification passed: extension loaded (${extensionId})`,
       'PageAgent context and commands verified',
       'page_command relay callback verified',
+      'sidepanel chat relay verified',
       `fetch/xhr captured ${firstApis.length} API request(s)`,
       `navigation reinjection captured ${secondApis.length} API request(s)`,
     ].join('; '));
