@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react';
 import type { SessionResult } from '../hooks/useCaptureSession';
 import { analyzeTrace, type AnalyzedTool, type AnalyzedEdge } from '../lib/trace-analyzer';
 import { buildTraceRegistrationPayload } from '../lib/trace-registration';
-import { createCollectionFromTrace } from '../../shared/api';
+import { createCollectionFromTrace, mergeCollectionFromTrace } from '../../shared/api';
+import type { FromTraceRequest } from '../../shared/api';
 import type { ExtensionMessage } from '../../shared/types';
 
 interface Props {
@@ -13,10 +14,16 @@ interface Props {
 
 type RegisterState =
   | { status: 'idle' }
-  | { status: 'loading' }
+  | { status: 'loading'; action: 'create' | 'merge' }
   | { status: 'success'; collectionId: string; toolCount: number }
   | { status: 'conflict'; collectionId: string; message: string }
   | { status: 'error'; message: string };
+
+interface RegistrationContext {
+  serverUrl: string;
+  authToken: string;
+  payload: FromTraceRequest;
+}
 
 function methodColor(m: string): string {
   return m === 'GET' ? 'text-blue-600'
@@ -78,40 +85,54 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
   const [showDropped, setShowDropped] = useState(false);
   const [registerState, setRegisterState] = useState<RegisterState>({ status: 'idle' });
 
-  const handleRegister = async () => {
+  const prepareRegistrationContext = async (): Promise<RegistrationContext> => {
     if (!analysis.primaryHost) {
-      setRegisterState({ status: 'error', message: 'host를 식별할 수 없어 등록할 수 없습니다.' });
-      return;
+      throw new Error('host를 식별할 수 없어 등록할 수 없습니다.');
     }
-    setRegisterState({ status: 'loading' });
+    const config = await chrome.runtime.sendMessage({
+      type: 'GET_CHAT_CONFIG',
+      ...tabTarget(targetTabId),
+    } satisfies ExtensionMessage);
+    if (!config?.serverUrl) {
+      throw new Error('XGEN 서버 URL이 설정되지 않았습니다.');
+    }
+    // 캡처 도중 자동 등록된 인증 프로필을 collection 등록 시 같이 넘긴다 — 그래야
+    // 백엔드가 collection.auth_profile_id를 통해 모든 tool row에 자동 propagate.
+    // 이게 빠지면 collection은 만들어져도 tool들의 auth_profile_id가 비어 호출 시 401.
+    let authProfileId: string | undefined;
     try {
-      const config = await chrome.runtime.sendMessage({
-        type: 'GET_CHAT_CONFIG',
+      const lookup = await chrome.runtime.sendMessage({
+        type: 'LOOKUP_AUTH_PROFILE_FOR_HOST',
+        host: analysis.primaryHost,
         ...tabTarget(targetTabId),
       } satisfies ExtensionMessage);
-      if (!config?.serverUrl) {
-        setRegisterState({ status: 'error', message: 'XGEN 서버 URL이 설정되지 않았습니다.' });
-        return;
+      if (lookup?.ok && typeof lookup.authProfileId === 'string') {
+        authProfileId = lookup.authProfileId;
       }
-      // 캡처 도중 자동 등록된 인증 프로필을 collection 등록 시 같이 넘긴다 — 그래야
-      // 백엔드가 collection.auth_profile_id를 통해 모든 tool row에 자동 propagate.
-      // 이게 빠지면 collection은 만들어져도 tool들의 auth_profile_id가 비어 호출 시 401.
-      let authProfileId: string | undefined;
-      try {
-        const lookup = await chrome.runtime.sendMessage({
-          type: 'LOOKUP_AUTH_PROFILE_FOR_HOST',
-          host: analysis.primaryHost,
-          ...tabTarget(targetTabId),
-        } satisfies ExtensionMessage);
-        if (lookup?.ok && typeof lookup.authProfileId === 'string') {
-          authProfileId = lookup.authProfileId;
-        }
-      } catch (err) {
-        console.warn('[SessionResultPanel] auth profile lookup failed:', err);
-      }
+    } catch (err) {
+      console.warn('[SessionResultPanel] auth profile lookup failed:', err);
+    }
 
-      const payload = buildTraceRegistrationPayload(analysis, selected, authProfileId);
-      const res = await createCollectionFromTrace(config.serverUrl, config.authToken, payload);
+    return {
+      serverUrl: config.serverUrl,
+      authToken: config.authToken ?? '',
+      payload: buildTraceRegistrationPayload(analysis, selected, authProfileId),
+    };
+  };
+
+  const setSuccess = (collection: Record<string, unknown>, fallbackToolCount: number) => {
+    setRegisterState({
+      status: 'success',
+      collectionId: String(collection.collection_id ?? ''),
+      toolCount: Number(collection.tool_count ?? fallbackToolCount),
+    });
+  };
+
+  const handleRegister = async () => {
+    setRegisterState({ status: 'loading', action: 'create' });
+    try {
+      const { serverUrl, authToken, payload } = await prepareRegistrationContext();
+      const res = await createCollectionFromTrace(serverUrl, authToken, payload);
       if (res.status === 409) {
         setRegisterState({
           status: 'conflict',
@@ -119,13 +140,24 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
           message: res.message,
         });
       } else {
-        const col = res.collection as Record<string, unknown>;
-        setRegisterState({
-          status: 'success',
-          collectionId: String(col.collection_id ?? ''),
-          toolCount: Number(col.tool_count ?? payload.tools.length),
-        });
+        setSuccess(res.collection, payload.tools.length);
       }
+    } catch (err) {
+      setRegisterState({
+        status: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const handleMerge = async () => {
+    if (registerState.status !== 'conflict' || !registerState.collectionId) return;
+    const collectionId = registerState.collectionId;
+    setRegisterState({ status: 'loading', action: 'merge' });
+    try {
+      const { serverUrl, authToken, payload } = await prepareRegistrationContext();
+      const res = await mergeCollectionFromTrace(serverUrl, authToken, collectionId, payload);
+      setSuccess(res.collection, payload.tools.length);
     } catch (err) {
       setRegisterState({
         status: 'error',
@@ -164,6 +196,9 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
   };
 
   const totalDropped = analysis.dropped.reduce((s, d) => s + d.count, 0);
+  const isLoading = registerState.status === 'loading';
+  const isMerging = isLoading && registerState.action === 'merge';
+  const isConflict = registerState.status === 'conflict';
 
   return (
     <div className="border-b border-gray-200 bg-gray-50 px-3 py-2">
@@ -268,7 +303,7 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
       {registerState.status === 'conflict' && (
         <div className="mt-2 px-2 py-1.5 bg-amber-50 border border-amber-200 rounded text-[11px] text-amber-700">
           이 host는 이미 <span className="font-mono">{registerState.collectionId}</span> 컬렉션으로 등록돼 있어요.
-          머지 기능(Phase 4)이 추가되기 전까지는 기존 컬렉션을 삭제 후 재등록해 주세요.
+          {' '}현재 선택한 도구를 기존 컬렉션에 병합할 수 있습니다.
         </div>
       )}
       {registerState.status === 'error' && (
@@ -288,17 +323,27 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
         >
           {registerState.status === 'success' ? '닫기' : '취소'}
         </button>
-        <button
-          disabled={
-            selected.size === 0 ||
-            registerState.status === 'loading' ||
-            registerState.status === 'success'
-          }
-          onClick={handleRegister}
-          className="text-[11px] px-2 py-1 bg-violet-500 text-white rounded hover:bg-violet-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
-        >
-          {registerState.status === 'loading' ? '등록 중...' : '컬렉션으로 등록'}
-        </button>
+        {isConflict || isMerging ? (
+          <button
+            disabled={selected.size === 0 || isLoading}
+            onClick={handleMerge}
+            className="text-[11px] px-2 py-1 bg-amber-500 text-white rounded hover:bg-amber-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
+          >
+            {isMerging ? '병합 중...' : '기존 컬렉션에 병합'}
+          </button>
+        ) : (
+          <button
+            disabled={
+              selected.size === 0 ||
+              isLoading ||
+              registerState.status === 'success'
+            }
+            onClick={handleRegister}
+            className="text-[11px] px-2 py-1 bg-violet-500 text-white rounded hover:bg-violet-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
+          >
+            {isLoading ? '등록 중...' : '컬렉션으로 등록'}
+          </button>
+        )}
       </div>
     </div>
   );

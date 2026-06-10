@@ -177,18 +177,13 @@ export interface FromTraceConflict {
 }
 
 export interface FromTraceSuccess {
-  status: 201;
+  status: 200 | 201;
   collection: Record<string, unknown>;
 }
 
 export type FromTraceResult = FromTraceSuccess | FromTraceConflict;
 
-export async function createCollectionFromTrace(
-  serverUrl: string,
-  token: string,
-  payload: FromTraceRequest,
-): Promise<FromTraceResult> {
-  const url = `${serverUrl}/api/tools/api-collections/from-trace`;
+function buildFromTraceBody(payload: FromTraceRequest): Record<string, unknown> {
   const body: Record<string, unknown> = {
     host: payload.host,
     tools: payload.tools,
@@ -196,6 +191,16 @@ export async function createCollectionFromTrace(
   };
   if (payload.name) body.name = payload.name;
   if (payload.authProfileId) body.auth_profile_id = payload.authProfileId;
+  return body;
+}
+
+export async function createCollectionFromTrace(
+  serverUrl: string,
+  token: string,
+  payload: FromTraceRequest,
+): Promise<FromTraceResult> {
+  const url = `${serverUrl}/api/tools/api-collections/from-trace`;
+  const body = buildFromTraceBody(payload);
 
   const response = await fetch(url, {
     method: 'POST',
@@ -222,6 +227,31 @@ export async function createCollectionFromTrace(
   }
   const json = await response.json();
   return { status: 201, collection: json };
+}
+
+export async function mergeCollectionFromTrace(
+  serverUrl: string,
+  token: string,
+  collectionId: string,
+  payload: FromTraceRequest,
+): Promise<FromTraceSuccess> {
+  const encodedCollectionId = encodeURIComponent(collectionId);
+  const url = `${serverUrl}/api/tools/api-collections/${encodedCollectionId}/from-trace/merge`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(buildFromTraceBody(payload)),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => response.statusText);
+    throw new Error(`Collection merge failed: ${response.status} ${text}`);
+  }
+  const json = await response.json();
+  return { status: 200, collection: json };
 }
 
 // ── PathFinder ──

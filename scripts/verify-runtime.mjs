@@ -142,6 +142,8 @@ function startFixtureServer() {
   const commandResults = [];
   const chatRequests = [];
   const registrationRequests = [];
+  const mergeRequests = [];
+  const registrationMode = { conflictNext: false };
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url?.startsWith('/api/ai-chat/command-result/')) {
       const requestId = decodeURIComponent(req.url.split('/').pop() || '');
@@ -172,6 +174,32 @@ function startFixtureServer() {
       return;
     }
 
+    const mergeMatch = req.url?.match(/^\/api\/tools\/api-collections\/([^/]+)\/from-trace\/merge$/);
+    if (req.method === 'POST' && mergeMatch) {
+      const collectionId = decodeURIComponent(mergeMatch[1]);
+      let rawBody = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => {
+        rawBody += chunk;
+      });
+      req.on('end', () => {
+        let body;
+        try {
+          body = JSON.parse(rawBody || '{}');
+        } catch {
+          body = {};
+        }
+        mergeRequests.push({ collectionId, headers: req.headers, body });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          collection_id: collectionId,
+          name: 'Fixture Trace Collection',
+          tool_count: Array.isArray(body.tools) ? body.tools.length : 0,
+        }));
+      });
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/api/tools/api-collections/from-trace') {
       let rawBody = '';
       req.setEncoding('utf8');
@@ -186,6 +214,18 @@ function startFixtureServer() {
           body = {};
         }
         registrationRequests.push({ headers: req.headers, body });
+        if (registrationMode.conflictNext) {
+          registrationMode.conflictNext = false;
+          res.writeHead(409, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            detail: {
+              collection_id: 'col_fixture_trace',
+              name: 'Fixture Trace Collection',
+              message: `Collection for host '${body.host}' already exists`,
+            },
+          }));
+          return;
+        }
         res.writeHead(201, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
           collection_id: 'col_fixture_trace',
@@ -360,6 +400,8 @@ function startFixtureServer() {
         commandResults,
         chatRequests,
         registrationRequests,
+        mergeRequests,
+        registrationMode,
       });
     });
   });
@@ -685,6 +727,53 @@ async function verifySessionResultRegistration(extensionPage, targetPage, regist
   );
 }
 
+async function verifySessionResultMergeConflict(
+  extensionPage,
+  targetPage,
+  registrationMode,
+  registrationRequests,
+  mergeRequests,
+) {
+  const registrationStart = registrationRequests.length;
+  const mergeStart = mergeRequests.length;
+  registrationMode.conflictNext = true;
+
+  await extensionPage.waitForFunction(() => document.body.innerText.includes('컬렉션으로 등록'));
+  await clickSidepanelButton(extensionPage, targetPage, 'Session result conflict', /컬렉션으로 등록/);
+  await extensionPage.waitForFunction(() => document.body.innerText.includes('기존 컬렉션에 병합'));
+
+  const conflictRequest = await waitForItem(
+    registrationRequests,
+    (entry, index) => index >= registrationStart
+      && entry.body?.host
+      && entry.body?.auth_profile_id === '127_local_profile',
+    'Session result conflict request',
+  );
+  assert.equal(conflictRequest.headers.authorization, 'Bearer verify-token');
+  assert.ok(
+    conflictRequest.body.tools.some((tool) => tool.method === 'GET' && tool.templatedPath === '/api/goods/v1/detail'),
+    `conflict request should include detail tool: ${JSON.stringify(conflictRequest.body.tools)}`,
+  );
+
+  await clickSidepanelButton(extensionPage, targetPage, 'Session result merge', /기존 컬렉션에 병합/);
+  await extensionPage.waitForFunction(() => document.body.innerText.includes('컬렉션 등록 완료'));
+
+  const mergeRequest = await waitForItem(
+    mergeRequests,
+    (entry, index) => index >= mergeStart
+      && entry.collectionId === 'col_fixture_trace'
+      && entry.body?.auth_profile_id === '127_local_profile',
+    'Session result merge request',
+  );
+  assert.equal(mergeRequest.headers.authorization, 'Bearer verify-token');
+  assert.match(mergeRequest.body.host, /^127\.0\.0\.1:\d+$/);
+  assert.ok(Array.isArray(mergeRequest.body.tools), `merge tools should be an array: ${JSON.stringify(mergeRequest.body)}`);
+  assert.ok(
+    mergeRequest.body.tools.some((tool) => tool.method === 'GET' && tool.templatedPath === '/api/goods/v1/detail'),
+    `merge should include detail tool: ${JSON.stringify(mergeRequest.body.tools)}`,
+  );
+}
+
 async function main() {
   if (!existsSync(path.join(distDir, 'manifest.json'))) {
     throw new Error('dist/manifest.json not found. Run `npm run build` before runtime verification.');
@@ -697,7 +786,15 @@ async function main() {
     );
   }
   const userDataDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-runtime-'));
-  const { server, url, commandResults, chatRequests, registrationRequests } = await startFixtureServer();
+  const {
+    server,
+    url,
+    commandResults,
+    chatRequests,
+    registrationRequests,
+    mergeRequests,
+    registrationMode,
+  } = await startFixtureServer();
   let context;
 
   try {
@@ -776,6 +873,23 @@ async function main() {
     assert.match(memberApi.requestBody || '', /includeGrade/);
     assert.ok(!firstApis.some((api) => api.url.includes('/fragment')), 'HTML fetch should be ignored');
 
+    const mergeApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
+      await targetPage.evaluate(async () => {
+        const detail = await fetch('/api/goods/v1/detail?goodsNo=987654&siteNo=1000');
+        if (!detail.ok) throw new Error(`fixture detail fetch failed: ${detail.status}`);
+        await detail.json();
+      });
+    }, 'registration conflict merge capture', distractorPage);
+    await verifySessionResultMergeConflict(
+      extensionPage,
+      targetPage,
+      registrationMode,
+      registrationRequests,
+      mergeRequests,
+    );
+    const mergeDetailApi = findApi(mergeApis, 'GET', '/api/goods/v1/detail?goodsNo=987654&siteNo=1000');
+    assert.ok(mergeDetailApi, `captured merge detail API not found in ${JSON.stringify(mergeApis)}`);
+
     const secondApis = await runCaptureSession(extensionPage, targetPage, async () => {
       await targetPage.goto(`${url}after-navigation`);
       await targetPage.waitForLoadState('domcontentloaded');
@@ -801,6 +915,7 @@ async function main() {
       'page_command relay callback verified',
       'sidepanel chat relay verified',
       'capture result registration verified',
+      'capture result merge conflict verified',
       `fetch/xhr captured ${firstApis.length} API request(s)`,
       `navigation reinjection captured ${secondApis.length} API request(s)`,
     ].join('; '));
