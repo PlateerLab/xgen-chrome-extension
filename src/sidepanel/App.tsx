@@ -158,13 +158,18 @@ export function App() {
           {/* 캡처 세션 토글 (🔴 시작 / ⏹ 종료) */}
           <button
             onClick={() => (captureSession.active ? captureSession.stop() : captureSession.start())}
+            disabled={captureSession.pending}
             className={`p-1 rounded transition-colors ${
               captureSession.active
                 ? 'text-red-600 bg-red-100'
-                : 'text-gray-400 hover:text-gray-600'
+                : captureSession.pending
+                  ? 'text-gray-300 cursor-wait'
+                  : 'text-gray-400 hover:text-gray-600'
             }`}
             title={
-              captureSession.active
+              captureSession.pending
+                ? '캡처 세션 준비 중'
+                : captureSession.active
                 ? `캡처 종료 (현재 ${captureSession.count}건)`
                 : '캡처 세션 시작 — 사용자 클릭 캡처를 끝까지 모음'
             }
@@ -266,6 +271,20 @@ export function App() {
             <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
             캡처 중 — 페이지 액션 수행 후 ⏹ 누르면 정리된 목록을 보여드려요. ({captureSession.count}건)
           </span>
+        </div>
+      )}
+
+      {captureSession.error && (
+        <div className="border-b border-red-200 bg-red-50 px-3 py-1.5 flex items-center gap-2">
+          <span className="text-[11px] text-red-700 flex-1">
+            캡처 오류: {captureSession.error}
+          </span>
+          <button
+            onClick={captureSession.dismissError}
+            className="text-[10px] text-red-500 hover:text-red-700"
+          >
+            닫기
+          </button>
         </div>
       )}
 

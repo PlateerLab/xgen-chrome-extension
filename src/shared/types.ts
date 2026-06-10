@@ -212,7 +212,7 @@ export type ExtensionMessage =
   // ── Capture Session (사용자 클릭 캡처 누적용; AI 자동 탐색은 제외) ──
   | { type: 'START_CAPTURE_SESSION' }
   | { type: 'STOP_CAPTURE_SESSION' }
-  | { type: 'CAPTURE_SESSION_STATUS'; active: boolean; tabId?: number; count?: number }
+  | { type: 'CAPTURE_SESSION_STATUS'; active: boolean; tabId?: number; count?: number; error?: string }
   | { type: 'CAPTURE_SESSION_RESULT'; apis: import('./api-hook-types').CapturedApi[]; tabId: number; durationMs: number }
   /** sidepanel이 stop 이후에 처음 열렸을 때 SW에 캐시된 마지막 결과를 직접 가져오기 위한 query. */
   | { type: 'GET_CAPTURE_RESULT' }

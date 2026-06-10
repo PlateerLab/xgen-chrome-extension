@@ -63,6 +63,62 @@ let cachedCaptureResult: {
   durationMs: number;
 } | null = null;
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isInjectableTabUrl(url?: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+async function injectApiHookIntoTab(tabId: number): Promise<void> {
+  const tab = await chrome.tabs.get(tabId);
+  if (!isInjectableTabUrl(tab.url)) {
+    throw new Error('API 캡처는 http/https 페이지에서만 사용할 수 있습니다.');
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: apiHookRelayFunction,
+    world: 'ISOLATED' as any,
+  });
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: mainWorldHookFunction,
+    world: 'MAIN' as any,
+  });
+  hookedTabs.add(tabId);
+}
+
+function completeCaptureSession(session: CaptureSession, options: { openPanel: boolean } = { openPanel: true }): void {
+  const durationMs = Date.now() - session.startedAt;
+  if (options.openPanel) {
+    chrome.sidePanel.open({ tabId: session.tabId }).catch((err) => {
+      console.warn('[XGEN SW] sidePanel.open on stop failed:', err);
+    });
+  }
+
+  cachedCaptureResult = {
+    apis: session.captures,
+    tabId: session.tabId,
+    durationMs,
+  };
+
+  broadcastCaptureStatus({ active: false, tabId: session.tabId });
+  broadcastToSidePanel({
+    type: 'CAPTURE_SESSION_RESULT',
+    apis: session.captures,
+    tabId: session.tabId,
+    durationMs,
+  });
+}
+
 // ── Side Panel open on icon click ──
 
 chrome.sidePanel
@@ -300,18 +356,24 @@ chrome.runtime.onMessage.addListener(
       // ── User Capture Session ──
       case 'START_CAPTURE_SESSION': {
         (async () => {
-          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-          const tabId = tabs[0]?.id;
-          if (!tabId) {
-            sendResponse({ ok: false, error: 'No active tab' });
-            return;
+          try {
+            const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+            const tabId = tabs[0]?.id;
+            if (!tabId) {
+              sendResponse({ ok: false, error: 'No active tab' });
+              return;
+            }
+            await handlePickerHookInject(tabId);
+            activeCaptureSession = { tabId, startedAt: Date.now(), captures: [] };
+            broadcastCaptureStatus({ active: true, tabId, count: 0 });
+            sendResponse({ ok: true, tabId });
+          } catch (err) {
+            const message = errorMessage(err);
+            activeCaptureSession = null;
+            console.warn('[XGEN SW] START_CAPTURE_SESSION failed:', err);
+            broadcastCaptureStatus({ active: false, error: message });
+            sendResponse({ ok: false, error: message });
           }
-          activeCaptureSession = { tabId, startedAt: Date.now(), captures: [] };
-          // content script가 아직 hook 주입 안 됐다면 주입 (ELEMENT_PICKER_STOP과 동일한 진입점 재사용).
-          // 부수효과로 capturedApisByTab[tabId]가 리셋되지만 session 버퍼는 별도라 영향 없음.
-          await handlePickerHookInject(tabId).catch(() => {});
-          broadcastCaptureStatus({ active: true, tabId, count: 0 });
-          sendResponse({ ok: true, tabId });
         })();
         return true;
       }
@@ -324,31 +386,7 @@ chrome.runtime.onMessage.addListener(
         }
         const session = activeCaptureSession;
         activeCaptureSession = null;
-
-        // 1. 사이드패널 즉시 열기 (await 전에) — overlay 클릭으로 전달된 user gesture가
-        //    살아있는 동안 호출해야 한다. await/setOptions 끼면 gesture 끊겨서 무음 실패.
-        chrome.sidePanel.open({ tabId: session.tabId }).catch((err) => {
-          console.warn('[XGEN SW] sidePanel.open on stop failed:', err);
-        });
-
-        // 2. 결과 캐시 — sidepanel이 mount되기 전에 broadcast가 끝나는 race를 막기 위해.
-        //    sidepanel 첫 mount 시 GET_CAPTURE_RESULT로 직접 query.
-        cachedCaptureResult = {
-          apis: session.captures,
-          tabId: session.tabId,
-          durationMs: Date.now() - session.startedAt,
-        };
-
-        // 3. STATUS 브로드캐스트 — sidepanel + 캡처 탭(overlay 자동 hide).
-        broadcastCaptureStatus({ active: false, tabId: session.tabId });
-        // 4. 이미 열려있던 sidepanel을 위해 결과 브로드캐스트 (놓쳐도 cachedCaptureResult가 안전망).
-        broadcastToSidePanel({
-          type: 'CAPTURE_SESSION_RESULT',
-          apis: session.captures,
-          tabId: session.tabId,
-          durationMs: Date.now() - session.startedAt,
-        });
-
+        completeCaptureSession(session, { openPanel: true });
         sendResponse({ ok: true, count: session.captures.length });
         break;
       }
@@ -437,7 +475,9 @@ chrome.runtime.onMessage.addListener(
         const tabId3 = sender.tab?.id;
         if (tabId3) {
           // content script에서 보낸 경우 (요소 클릭 후) → hook inject
-          handlePickerHookInject(tabId3).then(() => sendResponse({ ok: true }));
+          handlePickerHookInject(tabId3)
+            .then(() => sendResponse({ ok: true }))
+            .catch((err) => sendResponse({ ok: false, error: errorMessage(err) }));
           return true;
         }
         // sidepanel에서 보낸 경우 (취소 버튼) → content script에 stop 전달
@@ -759,6 +799,7 @@ function broadcastCaptureStatus(payload: {
   active: boolean;
   tabId?: number;
   count?: number;
+  error?: string;
 }) {
   const msg: ExtensionMessage = { type: 'CAPTURE_SESSION_STATUS', ...payload };
   broadcastToSidePanel(msg);
@@ -819,14 +860,20 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   // Start 단계에서는 사이드패널을 열지 않는다 — 페이지 시야 확보가 우선.
   // 사이드패널은 정지 시(STOP_FLOATING_CAPTURE 핸들러)에 열어서 결과 리스트를 보여준다.
 
-  // 캡처 세션 시작 — 기존 START_CAPTURE_SESSION 로직과 동일.
-  activeCaptureSession = { tabId: tab.id, startedAt: Date.now(), captures: [] };
-  await handlePickerHookInject(tab.id).catch(() => {});
+  try {
+    await handlePickerHookInject(tab.id);
+    activeCaptureSession = { tabId: tab.id, startedAt: Date.now(), captures: [] };
 
-  // overlay 표시 — content script가 안 떠있는 탭(확장 reload 후 기존 탭)에서도 동작하도록
-  // tabs.sendMessage 실패하면 scripting.executeScript로 직접 주입.
-  await showFloatingOverlayOnTab(tab.id);
-  broadcastCaptureStatus({ active: true, tabId: tab.id, count: 0 });
+    // overlay 표시 — content script가 안 떠있는 탭(확장 reload 후 기존 탭)에서도 동작하도록
+    // tabs.sendMessage 실패하면 scripting.executeScript로 직접 주입.
+    await showFloatingOverlayOnTab(tab.id);
+    broadcastCaptureStatus({ active: true, tabId: tab.id, count: 0 });
+  } catch (err) {
+    const message = errorMessage(err);
+    activeCaptureSession = null;
+    console.warn('[XGEN SW] context capture start failed:', err);
+    broadcastCaptureStatus({ active: false, tabId: tab.id, error: message });
+  }
 });
 
 /**
@@ -967,19 +1014,7 @@ async function handleApiHookAction(
           return { success: true, action, result: 'API hook already active' };
         }
 
-        // relay (isolated world) + MAIN world hook 주입
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          func: apiHookRelayFunction,
-          world: 'ISOLATED' as any,
-        });
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          func: mainWorldHookFunction,
-          world: 'MAIN' as any,
-        });
-
-        hookedTabs.add(tabId);
+        await injectApiHookIntoTab(tabId);
         capturedApisByTab.set(tabId, []);
         return { success: true, action, result: 'API hook started. All fetch/XHR requests on this page will be captured.' };
       }
@@ -1611,22 +1646,8 @@ async function autoCreateAuthProfileFromCapture(loginUrl: string) {
 
 // ── Element Picker: hook inject ──
 async function handlePickerHookInject(tabId: number) {
-  if (!hookedTabs.has(tabId)) {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: apiHookRelayFunction,
-      world: 'ISOLATED' as any,
-    }).catch(() => {});
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: mainWorldHookFunction,
-      world: 'MAIN' as any,
-    }).catch(() => {});
-    hookedTabs.add(tabId);
-    capturedApisByTab.set(tabId, []);
-  } else {
-    capturedApisByTab.set(tabId, []);
-  }
+  await injectApiHookIntoTab(tabId);
+  capturedApisByTab.set(tabId, []);
 }
 
 // ── 탭 닫힘 시 정리 ──
@@ -1639,13 +1660,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     // 탭이 이미 사라졌으니 tabs.sendMessage는 fail하지만 broadcastCaptureStatus가 catch.
     const session = activeCaptureSession;
     activeCaptureSession = null;
-    broadcastCaptureStatus({ active: false, tabId: session.tabId });
-    broadcastToSidePanel({
-      type: 'CAPTURE_SESSION_RESULT',
-      apis: session.captures,
-      tabId: session.tabId,
-      durationMs: Date.now() - session.startedAt,
-    });
+    completeCaptureSession(session, { openPanel: false });
   }
 });
 
@@ -1678,18 +1693,10 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
 
   // hook 자동 재주입 (페이지 이동으로 이전 hook 소멸)
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: apiHookRelayFunction,
-      world: 'ISOLATED' as any,
-    });
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: mainWorldHookFunction,
-      world: 'MAIN' as any,
-    });
+    await injectApiHookIntoTab(tabId);
     console.log(`[XGEN SW] API hook re-injected after navigation: ${details.url}`);
   } catch (err) {
+    hookedTabs.delete(tabId);
     console.warn('[XGEN SW] Failed to re-inject hook:', err);
   }
 });

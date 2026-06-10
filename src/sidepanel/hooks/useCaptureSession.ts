@@ -10,16 +10,21 @@ export interface SessionResult {
 
 export interface CaptureSessionState {
   active: boolean;
+  pending: boolean;
   count: number;
+  error: string | null;
   result: SessionResult | null;
   start: () => void;
   stop: () => void;
   dismissResult: () => void;
+  dismissError: () => void;
 }
 
 export function useCaptureSession(): CaptureSessionState {
   const [active, setActive] = useState(false);
+  const [pending, setPending] = useState(false);
   const [count, setCount] = useState(0);
+  const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SessionResult | null>(null);
 
   useEffect(() => {
@@ -27,9 +32,17 @@ export function useCaptureSession(): CaptureSessionState {
       if (message.type === 'CAPTURE_SESSION_STATUS') {
         setActive(message.active);
         setCount(message.count ?? 0);
+        setPending(false);
+        if (message.error) {
+          setError(message.error);
+        } else if (message.active) {
+          setError(null);
+        }
       } else if (message.type === 'CAPTURE_SESSION_RESULT') {
         setActive(false);
+        setPending(false);
         setCount(0);
+        setError(null);
         setResult({
           apis: message.apis,
           tabId: message.tabId,
@@ -47,7 +60,9 @@ export function useCaptureSession(): CaptureSessionState {
       .then((resp: { ok?: boolean; result?: SessionResult | null } | undefined) => {
         if (resp?.result) {
           setActive(false);
+          setPending(false);
           setCount(0);
+          setError(null);
           setResult(resp.result);
         }
       })
@@ -58,18 +73,43 @@ export function useCaptureSession(): CaptureSessionState {
 
   const start = useCallback(() => {
     setResult(null);
+    setError(null);
+    setPending(true);
     chrome.runtime
       .sendMessage({ type: 'START_CAPTURE_SESSION' } satisfies ExtensionMessage)
-      .catch(() => {});
+      .then((resp: { ok?: boolean; error?: string } | undefined) => {
+        if (resp?.ok === false) {
+          setActive(false);
+          setCount(0);
+          setError(resp.error || '캡처 세션을 시작하지 못했습니다.');
+        }
+      })
+      .catch((err) => {
+        setActive(false);
+        setCount(0);
+        setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => setPending(false));
   }, []);
 
   const stop = useCallback(() => {
+    setError(null);
+    setPending(true);
     chrome.runtime
       .sendMessage({ type: 'STOP_CAPTURE_SESSION' } satisfies ExtensionMessage)
-      .catch(() => {});
+      .then((resp: { ok?: boolean; error?: string } | undefined) => {
+        if (resp?.ok === false) {
+          setError(resp.error || '캡처 세션을 종료하지 못했습니다.');
+        }
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => setPending(false));
   }, []);
 
   const dismissResult = useCallback(() => setResult(null), []);
+  const dismissError = useCallback(() => setError(null), []);
 
-  return { active, count, result, start, stop, dismissResult };
+  return { active, pending, count, error, result, start, stop, dismissResult, dismissError };
 }
