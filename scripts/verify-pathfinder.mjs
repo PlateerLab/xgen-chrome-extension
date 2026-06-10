@@ -361,6 +361,97 @@ function testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayloa
   );
 }
 
+function testTraceRegistrationPayloadHardening(analyzeTrace, buildTraceRegistrationPayload) {
+  const largeDescription = 'x'.repeat(35_000);
+  const analysis = analyzeTrace([
+    captured({
+      id: 'sensitive-search',
+      timestamp: 1,
+      method: 'POST',
+      url: 'https://bo.x2bee.com/api/goods/v1/search?keyword=jeju&accessToken=token-query-secret',
+      requestBody: {
+        keyword: 'jeju',
+        password: 'plain-password',
+        nested: {
+          authorization: 'Bearer token-body-secret',
+          keep: 'visible',
+        },
+      },
+      responseBody: {
+        rows: Array.from({ length: 35 }, (_, idx) => ({
+          goodsNo: `G${idx}`,
+          name: `상품-${idx}`,
+          refreshToken: `refresh-token-${idx}`,
+        })),
+        description: largeDescription,
+      },
+    }),
+  ]);
+
+  const payload = buildTraceRegistrationPayload(
+    analysis,
+    analysis.tools.map((tool) => tool.id),
+    'bo_x2bee_com',
+  );
+  const tool = payload.tools[0];
+  const serialized = JSON.stringify(payload);
+
+  assert.equal(payload.tools.length, 1);
+  assert.ok(tool.sampleMeta?.redacted, `sampleMeta should mark redaction: ${JSON.stringify(tool.sampleMeta)}`);
+  assert.ok(tool.sampleMeta?.truncated, `sampleMeta should mark truncation: ${JSON.stringify(tool.sampleMeta)}`);
+  assert.equal(tool.sampleMeta?.droppedQueryKeyCount, 1);
+  assert.deepEqual(tool.queryParamKeys, ['keyword']);
+  assert.equal(tool.querySample.keyword, 'jeju');
+  assert.ok(!serialized.includes('token-query-secret'), 'query token should be removed from payload');
+  assert.ok(!serialized.includes('plain-password'), 'password should be redacted from payload');
+  assert.ok(!serialized.includes('token-body-secret'), 'authorization value should be redacted from payload');
+  assert.ok(!serialized.includes('refresh-token-0'), 'response token should be redacted from payload');
+  assert.ok(serialized.includes('[REDACTED]'), 'redaction marker should remain for operator visibility');
+  assert.ok(serialized.length < 25_000, `payload should be bounded, got ${serialized.length}`);
+}
+
+function testTraceRegistrationPayloadCaps(buildTraceRegistrationPayload) {
+  const tools = Array.from({ length: 60 }, (_, idx) => ({
+    id: `GET:bo.x2bee.com/api/goods/v1/item/${idx}`,
+    method: 'GET',
+    host: 'bo.x2bee.com',
+    templatedPath: `/api/goods/v1/item/${idx}`,
+    rawPaths: [`/api/goods/v1/item/${idx}`],
+    sampleCount: 1,
+    pathParams: [],
+    queryParamKeys: ['keyword'],
+    querySample: { keyword: `item-${idx}` },
+    responseSample: { goodsNo: `${idx}` },
+    label: `상품 ${idx}`,
+    isLowPriority: false,
+  }));
+  const edges = Array.from({ length: 220 }, (_, idx) => ({
+    fromToolId: tools[idx % 50].id,
+    toToolId: tools[(idx + 1) % 50].id,
+    source: 'observed',
+    confidence: 1,
+    sampleSharedValue: `shared-${idx}`,
+  }));
+
+  const payload = buildTraceRegistrationPayload(
+    {
+      primaryHost: 'bo.x2bee.com',
+      tools,
+      edges,
+      authCandidates: [],
+      dropped: [],
+      totalRaw: tools.length,
+      keptRaw: tools.length,
+    },
+    tools.map((tool) => tool.id),
+  );
+
+  assert.equal(payload.tools.length, 50);
+  assert.equal(payload.edges.length, 200);
+  const includedIds = new Set(tools.slice(0, 50).map((tool) => tool.id));
+  assert.ok(payload.edges.every((edge) => includedIds.has(edge.fromToolId) && includedIds.has(edge.toToolId)));
+}
+
 async function withMockFetch(handler, fn) {
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -446,6 +537,8 @@ async function main() {
     testPostBodySample(analyzeTrace);
     testObservedEdges(analyzeTrace);
     testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayload);
+    testTraceRegistrationPayloadHardening(analyzeTrace, buildTraceRegistrationPayload);
+    testTraceRegistrationPayloadCaps(buildTraceRegistrationPayload);
     await testCreateCollectionFromTrace(createCollectionFromTrace);
   } finally {
     await cleanup();

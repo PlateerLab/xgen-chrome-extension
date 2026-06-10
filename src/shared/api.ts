@@ -152,6 +152,11 @@ export interface FromTraceTool {
   responseSample?: unknown;
   label: string;
   sampleCount: number;
+  sampleMeta?: {
+    redacted?: boolean;
+    truncated?: boolean;
+    droppedQueryKeyCount?: number;
+  };
 }
 
 export interface FromTraceEdge {
