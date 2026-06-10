@@ -118,9 +118,30 @@ function waitForCommandResult(commandResults, requestId, label) {
   });
 }
 
+function waitForItem(items, predicate, label, timeoutMs = 5_000) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`${label}: item not received`));
+    }, timeoutMs);
+
+    const poll = () => {
+      const found = items.find(predicate);
+      if (found) {
+        clearTimeout(timeout);
+        resolve(found);
+        return;
+      }
+      setTimeout(poll, 100);
+    };
+
+    poll();
+  });
+}
+
 function startFixtureServer() {
   const commandResults = [];
   const chatRequests = [];
+  const registrationRequests = [];
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url?.startsWith('/api/ai-chat/command-result/')) {
       const requestId = decodeURIComponent(req.url.split('/').pop() || '');
@@ -139,6 +160,38 @@ function startFixtureServer() {
         commandResults.push({ requestId, headers: req.headers, body });
         res.writeHead(204);
         res.end();
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/api/session-station/v1/auth-profiles') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify([
+        { service_id: '127_local_profile', name: '127 local profile', status: 'active' },
+      ]));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/tools/api-collections/from-trace') {
+      let rawBody = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => {
+        rawBody += chunk;
+      });
+      req.on('end', () => {
+        let body;
+        try {
+          body = JSON.parse(rawBody || '{}');
+        } catch {
+          body = {};
+        }
+        registrationRequests.push({ headers: req.headers, body });
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          collection_id: 'col_fixture_trace',
+          name: 'Fixture Trace Collection',
+          tool_count: Array.isArray(body.tools) ? body.tools.length : 0,
+        }));
       });
       return;
     }
@@ -282,6 +335,7 @@ function startFixtureServer() {
         url: `http://127.0.0.1:${address.port}/`,
         commandResults,
         chatRequests,
+        registrationRequests,
       });
     });
   });
@@ -319,6 +373,39 @@ async function runCaptureSession(extensionPage, targetPage, action, label) {
   assert.equal(cached?.ok, true, `${label}: GET_CAPTURE_RESULT failed: ${JSON.stringify(cached)}`);
   const apis = cached?.result?.apis || [];
   assert.equal(apis.length, stop.count, `${label}: cached result count mismatch`);
+  return apis;
+}
+
+async function clickSidepanelButton(extensionPage, targetPage, label, matcher) {
+  await targetPage.bringToFront();
+  await extensionPage.evaluate(({ label, matcherSource }) => {
+    const matcher = new RegExp(matcherSource);
+    const button = Array.from(document.querySelectorAll('button')).find((candidate) => {
+      const text = candidate.textContent || '';
+      const title = candidate.getAttribute('title') || '';
+      return matcher.test(text) || matcher.test(title);
+    });
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new Error(`${label}: button not found`);
+    }
+    button.click();
+  }, { label, matcherSource: matcher.source });
+}
+
+async function runCaptureSessionViaSidepanel(extensionPage, targetPage, action, label) {
+  await clickSidepanelButton(extensionPage, targetPage, `${label}: start`, /캡처 세션 시작/);
+  await extensionPage.waitForFunction(() => document.body.innerText.includes('캡처 중'));
+
+  await action();
+  await wait(300);
+
+  await clickSidepanelButton(extensionPage, targetPage, `${label}: stop`, /캡처 종료/);
+  await extensionPage.waitForFunction(() => document.body.innerText.includes('캡처 분석'));
+
+  const cached = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
+  assert.equal(cached?.ok, true, `${label}: GET_CAPTURE_RESULT failed: ${JSON.stringify(cached)}`);
+  const apis = cached?.result?.apis || [];
+  assert.ok(apis.length >= 1, `${label}: expected at least one captured API, got ${apis.length}`);
   return apis;
 }
 
@@ -492,6 +579,32 @@ async function verifySidepanelChatRelay(extensionPage, targetPage, commandResult
   await extensionPage.waitForFunction(() => document.body.innerText.includes('UI bridge done.'));
 }
 
+async function verifySessionResultRegistration(extensionPage, targetPage, registrationRequests) {
+  await extensionPage.waitForFunction(() => document.body.innerText.includes('컬렉션으로 등록'));
+  await clickSidepanelButton(extensionPage, targetPage, 'Session result registration', /컬렉션으로 등록/);
+  await extensionPage.waitForFunction(() => document.body.innerText.includes('컬렉션 등록 완료'));
+
+  const request = await waitForItem(
+    registrationRequests,
+    (entry) => entry.body?.host && entry.body?.auth_profile_id === '127_local_profile',
+    'Session result registration request',
+  );
+
+  assert.equal(request.headers.authorization, 'Bearer verify-token');
+  assert.match(request.body.host, /^127\.0\.0\.1:\d+$/);
+  assert.equal(request.body.auth_profile_id, '127_local_profile');
+  assert.ok(Array.isArray(request.body.tools), `registration tools should be an array: ${JSON.stringify(request.body)}`);
+  assert.ok(request.body.tools.length >= 2, `registration should include captured tools: ${JSON.stringify(request.body.tools)}`);
+  assert.ok(
+    request.body.tools.some((tool) => tool.method === 'GET' && tool.templatedPath === '/api/goods/v1/search'),
+    `registration should include search tool: ${JSON.stringify(request.body.tools)}`,
+  );
+  assert.ok(
+    request.body.tools.some((tool) => tool.method === 'POST' && tool.templatedPath === '/api/member/v1/me'),
+    `registration should include member tool: ${JSON.stringify(request.body.tools)}`,
+  );
+}
+
 async function main() {
   if (!existsSync(path.join(distDir, 'manifest.json'))) {
     throw new Error('dist/manifest.json not found. Run `npm run build` before runtime verification.');
@@ -504,7 +617,7 @@ async function main() {
     );
   }
   const userDataDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-runtime-'));
-  const { server, url, commandResults, chatRequests } = await startFixtureServer();
+  const { server, url, commandResults, chatRequests, registrationRequests } = await startFixtureServer();
   let context;
 
   try {
@@ -549,7 +662,7 @@ async function main() {
     await verifySidepanelChatRelay(extensionPage, targetPage, commandResults, chatRequests);
     await wait(2_200);
 
-    const firstApis = await runCaptureSession(extensionPage, targetPage, async () => {
+    const firstApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
       await targetPage.evaluate(async () => {
         const search = await fetch('/api/goods/v1/search?keyword=jeju');
         if (!search.ok) throw new Error(`fixture fetch failed: ${search.status}`);
@@ -569,6 +682,7 @@ async function main() {
         });
       });
     }, 'fetch+xhr capture');
+    await verifySessionResultRegistration(extensionPage, targetPage, registrationRequests);
 
     const searchApi = findApi(firstApis, 'GET', '/api/goods/v1/search?keyword=jeju');
     assert.ok(searchApi, `captured search API not found in ${JSON.stringify(firstApis)}`);
@@ -603,6 +717,7 @@ async function main() {
       'PageAgent context and commands verified',
       'page_command relay callback verified',
       'sidepanel chat relay verified',
+      'capture result registration verified',
       `fetch/xhr captured ${firstApis.length} API request(s)`,
       `navigation reinjection captured ${secondApis.length} API request(s)`,
     ].join('; '));
