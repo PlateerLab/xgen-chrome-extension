@@ -464,29 +464,31 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
   stage = stage.filter((c) => tryParseUrl(c.url) !== null);
   addDrop('URL 파싱 실패', beforeUrlFilter - stage.length);
 
-  // 3. 가장 많이 등장한 host를 primary로 선정
-  const hostCount = new Map<string, number>();
+  // 3. analytics drop — primary host 계산 전에 제거해야 tracking 호출이 많은 페이지에서
+  // 실제 업무 API host가 cross-host로 오분류되지 않는다.
+  const beforeAnalytics = stage.length;
+  stage = stage.filter((c) => !isAnalyticsCall(tryParseUrl(c.url)!));
+  addDrop('analytics/tracking', beforeAnalytics - stage.length);
+
+  // 4. 인증 호출 분리. primary host는 인증 호출을 제외한 업무 API 후보에서 먼저 고른다.
+  const authCandidates: CapturedApi[] = [];
+  const nonAuthStage: CapturedApi[] = [];
   for (const c of stage) {
+    const u = tryParseUrl(c.url)!;
+    if (isAuthCall(c, u)) authCandidates.push(c);
+    else nonAuthStage.push(c);
+  }
+
+  // 5. 가장 많이 등장한 host를 primary로 선정
+  const hostCount = new Map<string, number>();
+  const primaryHostCandidates = nonAuthStage.length > 0 ? nonAuthStage : stage;
+  for (const c of primaryHostCandidates) {
     const h = tryParseUrl(c.url)!.host;
     hostCount.set(h, (hostCount.get(h) ?? 0) + 1);
   }
   const primaryHost = [...hostCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
 
-  // 4. 인증 호출 분리 (먼저 빼냄 — 아래 노이즈 필터에 안 걸리게)
-  const authCandidates: CapturedApi[] = [];
-  stage = stage.filter((c) => {
-    const u = tryParseUrl(c.url)!;
-    if (isAuthCall(c, u)) {
-      authCandidates.push(c);
-      return false;
-    }
-    return true;
-  });
-
-  // 5. analytics drop
-  const beforeAnalytics = stage.length;
-  stage = stage.filter((c) => !isAnalyticsCall(tryParseUrl(c.url)!));
-  addDrop('analytics/tracking', beforeAnalytics - stage.length);
+  stage = nonAuthStage;
 
   // 6. cross-host drop (primary host 외)
   if (primaryHost) {

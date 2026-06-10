@@ -117,6 +117,59 @@ function testTraceFiltering(analyzeTrace) {
   assert.equal(analysis.tools[0].querySample.langCd, 'ko');
 }
 
+function testAnalyticsHeavyCaptureKeepsPrimaryApiHost(analyzeTrace) {
+  const noisyAnalytics = Array.from({ length: 5 }, (_, idx) => captured({
+    id: `analytics-${idx}`,
+    timestamp: idx + 1,
+    url: `https://www.google-analytics.com/collect?v=${idx}`,
+    responseBody: {},
+  }));
+  const analysis = analyzeTrace([
+    ...noisyAnalytics,
+    captured({
+      id: 'goods',
+      timestamp: 10,
+      url: 'https://bo.x2bee.com/api/goods/v1/search?keyword=jeju',
+      responseBody: { rows: [{ goodsNo: '987654' }] },
+    }),
+  ]);
+
+  assert.equal(analysis.primaryHost, 'bo.x2bee.com');
+  assert.equal(analysis.tools.length, 1);
+  assert.equal(analysis.tools[0].templatedPath, '/api/goods/v1/search');
+  assert.equal(analysis.dropped.find((d) => d.reason === 'analytics/tracking')?.count, 5);
+}
+
+function testAuthHostDoesNotStealPrimaryHost(analyzeTrace) {
+  const analysis = analyzeTrace([
+    captured({
+      id: 'auth-1',
+      timestamp: 1,
+      method: 'POST',
+      url: 'https://auth.x2bee.com/oauth/token',
+      responseBody: { access_token: 'token-11111' },
+    }),
+    captured({
+      id: 'auth-2',
+      timestamp: 2,
+      method: 'POST',
+      url: 'https://auth.x2bee.com/session/refresh',
+      responseBody: { access_token: 'token-22222' },
+    }),
+    captured({
+      id: 'orders',
+      timestamp: 3,
+      url: 'https://bo.x2bee.com/api/order/v1/orders?siteNo=1000',
+      responseBody: { rows: [{ orderNo: '202606100001' }] },
+    }),
+  ]);
+
+  assert.equal(analysis.primaryHost, 'bo.x2bee.com');
+  assert.equal(analysis.authCandidates.length, 2);
+  assert.equal(analysis.tools.length, 1);
+  assert.equal(analysis.tools[0].templatedPath, '/api/order/v1/orders');
+}
+
 function testPathTemplating(analyzeTrace) {
   const analysis = analyzeTrace([
     captured({
@@ -140,6 +193,51 @@ function testPathTemplating(analyzeTrace) {
   assert.deepEqual(tool.pathParams, ['id']);
   assert.equal(tool.sampleCount, 2);
   assert.deepEqual(new Set(tool.queryParamKeys), new Set(['siteNo', 'langCd']));
+}
+
+function testPollingIsCollapsed(analyzeTrace) {
+  const analysis = analyzeTrace([
+    captured({
+      id: 'poll-1',
+      timestamp: 1_000,
+      url: 'https://bo.x2bee.com/api/notification/v1/count',
+      responseBody: { count: 1 },
+    }),
+    captured({
+      id: 'poll-2',
+      timestamp: 2_000,
+      url: 'https://bo.x2bee.com/api/notification/v1/count',
+      responseBody: { count: 1 },
+    }),
+    captured({
+      id: 'poll-3',
+      timestamp: 3_000,
+      url: 'https://bo.x2bee.com/api/notification/v1/count',
+      responseBody: { count: 1 },
+    }),
+  ]);
+
+  assert.equal(analysis.tools.length, 1);
+  assert.equal(analysis.tools[0].sampleCount, 1);
+  assert.equal(analysis.dropped.find((d) => d.reason.includes('폴링 패턴'))?.count, 2);
+}
+
+function testPostBodySample(analyzeTrace) {
+  const analysis = analyzeTrace([
+    captured({
+      id: 'create-order',
+      timestamp: 1,
+      method: 'POST',
+      url: 'https://bo.x2bee.com/api/order/v1/orders?siteNo=1000',
+      requestBody: JSON.stringify({ goodsNo: '987654', quantity: 2 }),
+      responseBody: { orderNo: '202606100001' },
+    }),
+  ]);
+
+  assert.equal(analysis.tools.length, 1);
+  assert.equal(analysis.tools[0].method, 'POST');
+  assert.deepEqual(analysis.tools[0].requestBodySample, { goodsNo: '987654', quantity: 2 });
+  assert.equal(analysis.tools[0].querySample.siteNo, '1000');
 }
 
 function testObservedEdges(analyzeTrace) {
@@ -169,7 +267,11 @@ async function main() {
   const { analyzeTrace, cleanup } = await loadTraceAnalyzer();
   try {
     testTraceFiltering(analyzeTrace);
+    testAnalyticsHeavyCaptureKeepsPrimaryApiHost(analyzeTrace);
+    testAuthHostDoesNotStealPrimaryHost(analyzeTrace);
     testPathTemplating(analyzeTrace);
+    testPollingIsCollapsed(analyzeTrace);
+    testPostBodySample(analyzeTrace);
     testObservedEdges(analyzeTrace);
   } finally {
     await cleanup();

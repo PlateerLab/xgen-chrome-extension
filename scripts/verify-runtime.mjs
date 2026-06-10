@@ -37,6 +37,31 @@ function startFixtureServer() {
       return;
     }
 
+    if (req.url?.startsWith('/api/goods/v1/detail')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        goodsNo: '987654',
+        goodsName: '제주 상품',
+        stockQty: 5,
+      }));
+      return;
+    }
+
+    if (req.url?.startsWith('/api/member/v1/me')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        memberNo: 'M202606100001',
+        grade: 'VIP',
+      }));
+      return;
+    }
+
+    if (req.url?.startsWith('/fragment')) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end('<section>not an api response</section>');
+      return;
+    }
+
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(`<!doctype html>
 <html>
@@ -71,6 +96,29 @@ async function findExtensionIdFromPreferences(userDataDir) {
     }
   }
   return '';
+}
+
+async function runCaptureSession(extensionPage, targetPage, action, label) {
+  await targetPage.bringToFront();
+  const start = await sendExtensionMessage(extensionPage, { type: 'START_CAPTURE_SESSION' });
+  assert.equal(start?.ok, true, `${label}: START_CAPTURE_SESSION failed: ${JSON.stringify(start)}`);
+
+  await action();
+
+  await targetPage.bringToFront();
+  const stop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
+  assert.equal(stop?.ok, true, `${label}: STOP_CAPTURE_SESSION failed: ${JSON.stringify(stop)}`);
+  assert.ok(stop.count >= 1, `${label}: expected at least one captured API, got ${stop.count}`);
+
+  const cached = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
+  assert.equal(cached?.ok, true, `${label}: GET_CAPTURE_RESULT failed: ${JSON.stringify(cached)}`);
+  const apis = cached?.result?.apis || [];
+  assert.equal(apis.length, stop.count, `${label}: cached result count mismatch`);
+  return apis;
+}
+
+function findApi(apis, method, pathPart) {
+  return apis.find((api) => api.method === method && api.url.includes(pathPart));
 }
 
 async function main() {
@@ -125,32 +173,61 @@ async function main() {
 
     const targetPage = await context.newPage();
     await targetPage.goto(url);
-    await targetPage.bringToFront();
 
-    const start = await sendExtensionMessage(extensionPage, { type: 'START_CAPTURE_SESSION' });
-    assert.equal(start?.ok, true, `START_CAPTURE_SESSION failed: ${JSON.stringify(start)}`);
+    const firstApis = await runCaptureSession(extensionPage, targetPage, async () => {
+      await targetPage.evaluate(async () => {
+        const search = await fetch('/api/goods/v1/search?keyword=jeju');
+        if (!search.ok) throw new Error(`fixture fetch failed: ${search.status}`);
+        await search.json();
 
-    await targetPage.evaluate(async () => {
-      const res = await fetch('/api/goods/v1/search?keyword=jeju');
-      if (!res.ok) throw new Error(`fixture fetch failed: ${res.status}`);
-      await res.json();
-    });
+        const html = await fetch('/fragment');
+        if (!html.ok) throw new Error(`fixture html fetch failed: ${html.status}`);
+        await html.text();
 
-    await targetPage.bringToFront();
-    const stop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
-    assert.equal(stop?.ok, true, `STOP_CAPTURE_SESSION failed: ${JSON.stringify(stop)}`);
-    assert.ok(stop.count >= 1, `expected at least one captured API, got ${stop.count}`);
+        await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', '/api/member/v1/me');
+          xhr.setRequestHeader('content-type', 'application/json');
+          xhr.onload = () => resolve(undefined);
+          xhr.onerror = () => reject(new Error('fixture xhr failed'));
+          xhr.send(JSON.stringify({ includeGrade: true }));
+        });
+      });
+    }, 'fetch+xhr capture');
 
-    const cached = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
-    assert.equal(cached?.ok, true, `GET_CAPTURE_RESULT failed: ${JSON.stringify(cached)}`);
-    const apis = cached?.result?.apis || [];
-    const searchApi = apis.find((api) =>
-      api.method === 'GET' && api.url.includes('/api/goods/v1/search?keyword=jeju'));
-    assert.ok(searchApi, `captured search API not found in ${JSON.stringify(apis)}`);
+    const searchApi = findApi(firstApis, 'GET', '/api/goods/v1/search?keyword=jeju');
+    assert.ok(searchApi, `captured search API not found in ${JSON.stringify(firstApis)}`);
     assert.equal(searchApi.responseStatus, 200);
     assert.match(searchApi.responseBody || '', /987654/);
+    const memberApi = findApi(firstApis, 'POST', '/api/member/v1/me');
+    assert.ok(memberApi, `captured XHR API not found in ${JSON.stringify(firstApis)}`);
+    assert.match(memberApi.requestBody || '', /includeGrade/);
+    assert.ok(!firstApis.some((api) => api.url.includes('/fragment')), 'HTML fetch should be ignored');
 
-    console.log(`PathFinder runtime verification passed: extension loaded (${extensionId}) and captured ${apis.length} API request(s).`);
+    const secondApis = await runCaptureSession(extensionPage, targetPage, async () => {
+      await targetPage.goto(`${url}after-navigation`);
+      await targetPage.waitForLoadState('domcontentloaded');
+      await targetPage.waitForTimeout(300);
+      await targetPage.evaluate(async () => {
+        const detail = await fetch('/api/goods/v1/detail?goodsNo=987654&siteNo=1000');
+        if (!detail.ok) throw new Error(`fixture detail fetch failed: ${detail.status}`);
+        await detail.json();
+      });
+    }, 'navigation reinjection');
+
+    const detailApi = findApi(secondApis, 'GET', '/api/goods/v1/detail?goodsNo=987654&siteNo=1000');
+    assert.ok(detailApi, `captured post-navigation API not found in ${JSON.stringify(secondApis)}`);
+    assert.equal(secondApis.length, 1, `navigation session should reset old captures: ${JSON.stringify(secondApis)}`);
+
+    const extraStop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
+    assert.equal(extraStop?.ok, false, `STOP_CAPTURE_SESSION without active session should fail: ${JSON.stringify(extraStop)}`);
+    assert.match(extraStop?.error || '', /No active session/);
+
+    console.log([
+      `PathFinder runtime verification passed: extension loaded (${extensionId})`,
+      `fetch/xhr captured ${firstApis.length} API request(s)`,
+      `navigation reinjection captured ${secondApis.length} API request(s)`,
+    ].join('; '));
   } finally {
     await context?.close().catch(() => {});
     await new Promise((resolve) => server.close(resolve));
