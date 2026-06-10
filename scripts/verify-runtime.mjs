@@ -27,6 +27,10 @@ function sendExtensionMessage(page, message) {
   }), message);
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function sendActiveTabMessage(page, message) {
   return page.evaluate((payload) => new Promise((resolve) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -55,7 +59,7 @@ async function waitForPageContext(extensionPage, predicate, label) {
     if (lastResponse && !lastResponse.__error && (!predicate || predicate(lastResponse))) {
       return lastResponse;
     }
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await wait(200);
   }
 
   assert.fail(`${label}: page context not ready: ${JSON.stringify(lastResponse)}`);
@@ -89,8 +93,50 @@ async function sendPageCommand(extensionPage, action, params) {
   return response;
 }
 
+function waitForCommandResult(commandResults, requestId, label) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`${label}: command result callback not received for ${requestId}`));
+    }, 5_000);
+
+    const poll = () => {
+      const found = commandResults.find((entry) => entry.requestId === requestId);
+      if (found) {
+        clearTimeout(timeout);
+        resolve(found);
+        return;
+      }
+      setTimeout(poll, 100);
+    };
+
+    poll();
+  });
+}
+
 function startFixtureServer() {
+  const commandResults = [];
   const server = createServer((req, res) => {
+    if (req.method === 'POST' && req.url?.startsWith('/api/ai-chat/command-result/')) {
+      const requestId = decodeURIComponent(req.url.split('/').pop() || '');
+      let rawBody = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => {
+        rawBody += chunk;
+      });
+      req.on('end', () => {
+        let body;
+        try {
+          body = JSON.parse(rawBody || '{}');
+        } catch {
+          body = rawBody;
+        }
+        commandResults.push({ requestId, headers: req.headers, body });
+        res.writeHead(204);
+        res.end();
+      });
+      return;
+    }
+
     if (req.url?.startsWith('/api/goods/v1/search')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
@@ -181,6 +227,7 @@ function startFixtureServer() {
       resolve({
         server,
         url: `http://127.0.0.1:${address.port}/`,
+        commandResults,
       });
     });
   });
@@ -303,6 +350,48 @@ async function verifyPageAgent(extensionPage, targetPage) {
   assert.equal(spaContext.title, 'PathFinder fixture - Details');
 }
 
+async function verifyRelayCommandBridge(extensionPage, targetPage, commandResults) {
+  await targetPage.bringToFront();
+  const origin = new URL(targetPage.url()).origin;
+  const tokenResult = await sendExtensionMessage(extensionPage, {
+    type: 'SET_TOKEN',
+    token: 'verify-token',
+    origin,
+  });
+  assert.equal(tokenResult?.ok, true, `SET_TOKEN should succeed before relay bridge: ${JSON.stringify(tokenResult)}`);
+
+  const context = await waitForPageContext(
+    extensionPage,
+    (ctx) => /Search term/.test(ctx.elements || ''),
+    'PageAgent relay bridge context',
+  );
+  const inputIndex = findElementIndex(context, /<input[^>]*(Search term|search-input)/i, 'PageAgent relay bridge input');
+
+  const requestId = `verify-page-command-${Date.now()}`;
+  const relayResult = await sendExtensionMessage(extensionPage, {
+    type: 'RELAY_COMMAND',
+    event: {
+      type: 'page_command',
+      requestId,
+      action: 'input_text',
+      params: {
+        index: inputIndex,
+        text: 'bridge',
+      },
+    },
+  });
+
+  assert.equal(relayResult?.ok, true, `RELAY_COMMAND should be accepted: ${JSON.stringify(relayResult)}`);
+  await targetPage.waitForFunction(() => document.querySelector('#search-input')?.value === 'bridge');
+
+  const callback = await waitForCommandResult(commandResults, requestId, 'PageAgent relay bridge');
+  assert.equal(callback.headers.authorization, 'Bearer verify-token');
+  assert.equal(callback.body.success, true, `command callback should report success: ${JSON.stringify(callback.body)}`);
+  assert.equal(callback.body.action, 'input_text');
+  assert.match(callback.body.pageContext?.url || '', /\/workspace\/details$/);
+  assert.match(callback.body.pageContext?.elements || '', /Search term/);
+}
+
 async function main() {
   if (!existsSync(path.join(distDir, 'manifest.json'))) {
     throw new Error('dist/manifest.json not found. Run `npm run build` before runtime verification.');
@@ -315,7 +404,7 @@ async function main() {
     );
   }
   const userDataDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-runtime-'));
-  const { server, url } = await startFixtureServer();
+  const { server, url, commandResults } = await startFixtureServer();
   let context;
 
   try {
@@ -356,6 +445,8 @@ async function main() {
     const targetPage = await context.newPage();
     await targetPage.goto(url);
     await verifyPageAgent(extensionPage, targetPage);
+    await verifyRelayCommandBridge(extensionPage, targetPage, commandResults);
+    await wait(2_200);
 
     const firstApis = await runCaptureSession(extensionPage, targetPage, async () => {
       await targetPage.evaluate(async () => {
@@ -409,6 +500,7 @@ async function main() {
     console.log([
       `PathFinder runtime verification passed: extension loaded (${extensionId})`,
       'PageAgent context and commands verified',
+      'page_command relay callback verified',
       `fetch/xhr captured ${firstApis.length} API request(s)`,
       `navigation reinjection captured ${secondApis.length} API request(s)`,
     ].join('; '));
