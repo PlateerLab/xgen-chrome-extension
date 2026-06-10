@@ -1,11 +1,24 @@
 import { PageController } from '@page-agent/page-controller';
 import type { PageHandler, PageContext, PageCommandResult } from '../types';
+import { computeSnapshotId } from '../dom-utils';
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
 };
+
+const SNAPSHOT_GUARDED_ACTIONS = new Set([
+  'click_element',
+  'input_text',
+  'select_option',
+  'scroll',
+]);
+
+function getProvidedSnapshotId(params: Record<string, unknown>): string {
+  const raw = params.snapshot_id ?? params.snapshotId;
+  return typeof raw === 'string' ? raw : '';
+}
 
 export class CanvasHandler implements PageHandler {
   readonly pageType = 'canvas' as const;
@@ -63,6 +76,7 @@ export class CanvasHandler implements PageHandler {
       url: state.url,
       title: state.title,
       elements: state.content,
+      snapshotId: computeSnapshotId(state.content ?? ''),
       data: {
         hasCanvas: !!document.querySelector('[data-testid="canvas"], [class*="Canvas_canvas"]'),
       },
@@ -108,6 +122,20 @@ export class CanvasHandler implements PageHandler {
     action: string,
     params: Record<string, unknown>,
   ): Promise<PageCommandResult> {
+    if (SNAPSHOT_GUARDED_ACTIONS.has(action)) {
+      const latestContext = await this.extractContext();
+      const expectedSnapshotId = latestContext.snapshotId ?? '';
+      const providedSnapshotId = getProvidedSnapshotId(params);
+      if (!providedSnapshotId || providedSnapshotId !== expectedSnapshotId) {
+        return {
+          success: false,
+          action,
+          error: `snapshot_id stale. 전달=${providedSnapshotId || '(누락)'}, 현재=${expectedSnapshotId}. 최신 page_context로 재시도하세요.`,
+          pageContext: latestContext,
+        };
+      }
+    }
+
     // DOM 조작 (page_command) — 버튼 클릭, 입력 등
     switch (action) {
       case 'click_element':
@@ -193,6 +221,7 @@ export class CanvasHandler implements PageHandler {
         url: state.url,
         title: state.title,
         elements: state.content,
+        snapshotId: computeSnapshotId(state.content ?? ''),
         data: {},
         availableActions: this.getAvailableActions(),
         timestamp: Date.now(),

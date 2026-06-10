@@ -241,6 +241,7 @@ function startFixtureServer() {
           params: {
             index: inputIndex,
             text: 'from-sidepanel',
+            snapshot_id: body?.page_context?.snapshotId || '',
           },
         });
         writeEvent({ type: 'token', content: 'UI bridge done.' });
@@ -469,32 +470,71 @@ async function verifyPageAgent(extensionPage, targetPage) {
   const inputResult = await sendPageCommand(extensionPage, 'input_text', {
     index: inputIndex,
     text: 'jeju',
+    snapshot_id: context.snapshotId,
   });
   assert.equal(inputResult.success, true, `input_text should succeed: ${JSON.stringify(inputResult)}`);
   await targetPage.waitForFunction(() => document.querySelector('#search-input')?.value === 'jeju');
 
+  const contextAfterInput = inputResult.pageContext || context;
   const clickResult = await sendPageCommand(extensionPage, 'click_element', {
     index: buttonIndex,
+    snapshot_id: contextAfterInput.snapshotId,
   });
   assert.equal(clickResult.success, true, `click_element should succeed: ${JSON.stringify(clickResult)}`);
   await targetPage.waitForFunction(() => document.body.dataset.clicked === 'true');
   assert.match(await targetPage.locator('#status').textContent(), /Searched: jeju/);
 
+  const contextAfterClick = clickResult.pageContext || contextAfterInput;
   const scrollBefore = await targetPage.evaluate(() => window.scrollY);
   const scrollResult = await sendPageCommand(extensionPage, 'scroll', {
     down: true,
     num_pages: 1,
+    snapshot_id: contextAfterClick.snapshotId,
   });
   assert.equal(scrollResult.success, true, `scroll should succeed: ${JSON.stringify(scrollResult)}`);
   await targetPage.waitForFunction((before) => window.scrollY > before, scrollBefore);
 
+  const contextAfterScroll = scrollResult.pageContext || contextAfterClick;
   const invalidResult = await sendPageCommand(extensionPage, 'click_element', {
     index: 99999,
+    snapshot_id: contextAfterScroll.snapshotId,
   });
   assert.equal(invalidResult.success, false, 'invalid element index should fail');
   assert.match(invalidResult.error || '', /99999|인덱스/);
 
   await targetPage.evaluate(() => window.scrollTo(0, 0));
+  await wait(300);
+  const staleContext = await waitForPageContext(
+    extensionPage,
+    (ctx) => /Search term/.test(ctx.elements || ''),
+    'PageAgent stale snapshot baseline',
+  );
+  const staleInputIndex = findElementIndex(staleContext, /<input[^>]*(Search term|search-input)/i, 'PageAgent stale input_text');
+  await targetPage.evaluate(() => {
+    const status = document.querySelector('#status');
+    if (status) status.textContent = 'Dynamic snapshot marker';
+  });
+  const staleResult = await sendPageCommand(extensionPage, 'input_text', {
+    index: staleInputIndex,
+    text: 'stale',
+    snapshot_id: staleContext.snapshotId,
+  });
+  assert.equal(staleResult.success, false, `stale snapshot should fail: ${JSON.stringify(staleResult)}`);
+  assert.match(staleResult.error || '', /snapshot_id stale/);
+  assert.ok(staleResult.pageContext?.snapshotId, `stale failure should include latest context: ${JSON.stringify(staleResult)}`);
+  assert.notEqual(staleResult.pageContext.snapshotId, staleContext.snapshotId);
+  assert.notEqual(await targetPage.locator('#search-input').inputValue(), 'stale');
+
+  const freshContext = staleResult.pageContext;
+  const freshInputIndex = findElementIndex(freshContext, /<input[^>]*(Search term|search-input)/i, 'PageAgent fresh input_text');
+  const freshResult = await sendPageCommand(extensionPage, 'input_text', {
+    index: freshInputIndex,
+    text: 'fresh',
+    snapshot_id: freshContext.snapshotId,
+  });
+  assert.equal(freshResult.success, true, `fresh snapshot retry should succeed: ${JSON.stringify(freshResult)}`);
+  await targetPage.waitForFunction(() => document.querySelector('#search-input')?.value === 'fresh');
+
   const contextBeforeDetails = await waitForPageContext(
     extensionPage,
     (ctx) => /Open details/.test(ctx.elements || ''),
@@ -503,6 +543,7 @@ async function verifyPageAgent(extensionPage, targetPage) {
   const detailsIndex = findElementIndex(contextBeforeDetails, /<button[^>]*(Open details|details-button)/i, 'PageAgent SPA click');
   const detailsResult = await sendPageCommand(extensionPage, 'click_element', {
     index: detailsIndex,
+    snapshot_id: contextBeforeDetails.snapshotId,
   });
   assert.equal(detailsResult.success, true, `SPA navigation click should succeed: ${JSON.stringify(detailsResult)}`);
 
@@ -551,6 +592,7 @@ async function verifyRelayCommandBridge(extensionPage, targetPage, commandResult
       params: {
         index: inputIndex,
         text: 'bridge',
+        snapshot_id: context.snapshotId,
       },
     },
   });
