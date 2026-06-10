@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { SessionResult } from '../hooks/useCaptureSession';
 import { analyzeTrace, type AnalyzedTool, type AnalyzedEdge } from '../lib/trace-analyzer';
+import { buildTraceRegistrationPayload } from '../lib/trace-registration';
 import { createCollectionFromTrace } from '../../shared/api';
 import type { ExtensionMessage } from '../../shared/types';
 
@@ -86,11 +87,6 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
         setRegisterState({ status: 'error', message: 'XGEN 서버 URL이 설정되지 않았습니다.' });
         return;
       }
-      const selectedTools = analysis.tools.filter((t) => selected.has(t.id));
-      const selectedEdges = analysis.edges.filter(
-        (e) => selected.has(e.fromToolId) && selected.has(e.toToolId),
-      );
-
       // 캡처 도중 자동 등록된 인증 프로필을 collection 등록 시 같이 넘긴다 — 그래야
       // 백엔드가 collection.auth_profile_id를 통해 모든 tool row에 자동 propagate.
       // 이게 빠지면 collection은 만들어져도 tool들의 auth_profile_id가 비어 호출 시 401.
@@ -107,27 +103,8 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
         console.warn('[SessionResultPanel] auth profile lookup failed:', err);
       }
 
-      const res = await createCollectionFromTrace(config.serverUrl, config.authToken, {
-        host: analysis.primaryHost,
-        tools: selectedTools.map((t) => ({
-          method: t.method,
-          templatedPath: t.templatedPath,
-          pathParams: t.pathParams,
-          queryParamKeys: t.queryParamKeys,
-          querySample: t.querySample,
-          requestBodySample: t.requestBodySample,
-          responseSample: t.responseSample,
-          label: t.label,
-          sampleCount: t.sampleCount,
-        })),
-        edges: selectedEdges.map((e) => ({
-          fromToolId: e.fromToolId,
-          toToolId: e.toToolId,
-          confidence: e.confidence,
-          sampleSharedValue: e.sampleSharedValue,
-        })),
-        ...(authProfileId ? { authProfileId } : {}),
-      });
+      const payload = buildTraceRegistrationPayload(analysis, selected, authProfileId);
+      const res = await createCollectionFromTrace(config.serverUrl, config.authToken, payload);
       if (res.status === 409) {
         setRegisterState({
           status: 'conflict',
@@ -139,7 +116,7 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
         setRegisterState({
           status: 'success',
           collectionId: String(col.collection_id ?? ''),
-          toolCount: Number(col.tool_count ?? selectedTools.length),
+          toolCount: Number(col.tool_count ?? payload.tools.length),
         });
       }
     } catch (err) {

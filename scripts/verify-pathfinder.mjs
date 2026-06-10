@@ -65,6 +65,64 @@ async function loadTraceAnalyzer() {
   };
 }
 
+async function loadTraceRegistration() {
+  const sourcePath = path.join(repoRoot, 'src/sidepanel/lib/trace-registration.ts');
+  const source = await readFile(sourcePath, 'utf8');
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+      jsx: ts.JsxEmit.ReactJSX,
+      verbatimModuleSyntax: true,
+    },
+    fileName: sourcePath,
+  });
+
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-registration-'));
+  const outputPath = path.join(tmpDir, 'trace-registration.mjs');
+  await writeFile(outputPath, compiled.outputText, 'utf8');
+  const mod = await import(pathToFileURL(outputPath).href);
+  return {
+    buildTraceRegistrationPayload: mod.buildTraceRegistrationPayload,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
+async function loadApiClient() {
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-api-'));
+
+  const constantsSourcePath = path.join(repoRoot, 'src/shared/constants.ts');
+  const constantsSource = await readFile(constantsSourcePath, 'utf8');
+  const constantsCompiled = ts.transpileModule(constantsSource, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+      verbatimModuleSyntax: true,
+    },
+    fileName: constantsSourcePath,
+  });
+  await writeFile(path.join(tmpDir, 'constants.mjs'), constantsCompiled.outputText, 'utf8');
+
+  const apiSourcePath = path.join(repoRoot, 'src/shared/api.ts');
+  const apiSource = await readFile(apiSourcePath, 'utf8');
+  const apiCompiled = ts.transpileModule(apiSource, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+      verbatimModuleSyntax: true,
+    },
+    fileName: apiSourcePath,
+  });
+  const apiOutput = apiCompiled.outputText.replace("from './constants'", "from './constants.mjs'");
+  await writeFile(path.join(tmpDir, 'api.mjs'), apiOutput, 'utf8');
+
+  const mod = await import(pathToFileURL(path.join(tmpDir, 'api.mjs')).href);
+  return {
+    createCollectionFromTrace: mod.createCollectionFromTrace,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
 function testTraceFiltering(analyzeTrace) {
   const analysis = analyzeTrace([
     captured({
@@ -263,8 +321,122 @@ function testObservedEdges(analyzeTrace) {
   assert.equal(analysis.edges[0].sampleSharedValue, '987654');
 }
 
+function testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayload) {
+  const analysis = analyzeTrace([
+    captured({
+      id: 'search',
+      timestamp: 1,
+      url: 'https://bo.x2bee.com/api/goods/v1/search?keyword=jeju&siteNo=1000',
+      responseBody: { rows: [{ goodsNo: '987654' }] },
+    }),
+    captured({
+      id: 'detail',
+      timestamp: 2,
+      url: 'https://bo.x2bee.com/api/goods/v1/detail?goodsNo=987654&siteNo=1000',
+      responseBody: { goodsNo: '987654', stockQty: 5 },
+    }),
+    captured({
+      id: 'member',
+      timestamp: 3,
+      url: 'https://bo.x2bee.com/api/member/v1/me',
+      responseBody: { memberNo: 'M202606100001' },
+    }),
+  ]);
+  const selected = analysis.tools
+    .filter((tool) => tool.templatedPath.includes('/goods/'))
+    .map((tool) => tool.id);
+  const payload = buildTraceRegistrationPayload(analysis, selected, 'bo_x2bee_com');
+
+  assert.equal(payload.host, 'bo.x2bee.com');
+  assert.equal(payload.authProfileId, 'bo_x2bee_com');
+  assert.equal(payload.tools.length, 2);
+  assert.equal(payload.edges.length, 1);
+  assert.ok(payload.tools.every((tool) => tool.templatedPath.includes('/goods/')));
+  assert.equal(payload.tools.find((tool) => tool.templatedPath.endsWith('/search'))?.querySample.keyword, 'jeju');
+  assert.equal(payload.edges[0].sampleSharedValue, '987654');
+
+  assert.throws(
+    () => buildTraceRegistrationPayload({ ...analysis, primaryHost: null }, selected),
+    /host를 식별/,
+  );
+}
+
+async function withMockFetch(handler, fn) {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    return handler(url, init);
+  };
+  try {
+    await fn(calls);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+async function testCreateCollectionFromTrace(createCollectionFromTrace) {
+  const payload = {
+    host: 'bo.x2bee.com',
+    authProfileId: 'bo_x2bee_com',
+    tools: [{
+      method: 'GET',
+      templatedPath: '/api/goods/v1/search',
+      pathParams: [],
+      queryParamKeys: ['keyword'],
+      querySample: { keyword: 'jeju' },
+      responseSample: { rows: [] },
+      label: '상품 검색',
+      sampleCount: 1,
+    }],
+    edges: [],
+  };
+
+  await withMockFetch(async (_url, _init) => new Response(JSON.stringify({
+    collection_id: 'bo_x2bee_com',
+    tool_count: 1,
+  }), { status: 201, headers: { 'content-type': 'application/json' } }), async (calls) => {
+    const result = await createCollectionFromTrace('https://xgen.x2bee.com', 'token-123', payload);
+    assert.equal(result.status, 201);
+    assert.equal(result.collection.collection_id, 'bo_x2bee_com');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://xgen.x2bee.com/api/tools/api-collections/from-trace');
+    assert.equal(calls[0].init.method, 'POST');
+    assert.equal(calls[0].init.headers.Authorization, 'Bearer token-123');
+    const body = JSON.parse(calls[0].init.body);
+    assert.equal(body.host, 'bo.x2bee.com');
+    assert.equal(body.auth_profile_id, 'bo_x2bee_com');
+    assert.equal(body.tools[0].querySample.keyword, 'jeju');
+  });
+
+  await withMockFetch(async () => new Response(JSON.stringify({
+    detail: {
+      collection_id: 'bo_x2bee_com',
+      name: 'BO',
+      hint: '이미 등록됨',
+    },
+  }), { status: 409, headers: { 'content-type': 'application/json' } }), async () => {
+    const result = await createCollectionFromTrace('https://xgen.x2bee.com', '', payload);
+    assert.equal(result.status, 409);
+    assert.equal(result.collectionId, 'bo_x2bee_com');
+    assert.equal(result.message, '이미 등록됨');
+  });
+
+  await withMockFetch(async () => new Response('broken', { status: 500, statusText: 'Internal Server Error' }), async () => {
+    await assert.rejects(
+      () => createCollectionFromTrace('https://xgen.x2bee.com', '', payload),
+      /Collection create failed: 500 broken/,
+    );
+  });
+}
+
 async function main() {
   const { analyzeTrace, cleanup } = await loadTraceAnalyzer();
+  const {
+    buildTraceRegistrationPayload,
+    cleanup: cleanupRegistration,
+  } = await loadTraceRegistration();
+  const { createCollectionFromTrace, cleanup: cleanupApi } = await loadApiClient();
   try {
     testTraceFiltering(analyzeTrace);
     testAnalyticsHeavyCaptureKeepsPrimaryApiHost(analyzeTrace);
@@ -273,11 +445,15 @@ async function main() {
     testPollingIsCollapsed(analyzeTrace);
     testPostBodySample(analyzeTrace);
     testObservedEdges(analyzeTrace);
+    testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayload);
+    await testCreateCollectionFromTrace(createCollectionFromTrace);
   } finally {
     await cleanup();
+    await cleanupRegistration();
+    await cleanupApi();
   }
 
-  console.log('PathFinder verification passed: trace filtering, templating, query samples, observed edges.');
+  console.log('PathFinder verification passed: trace analysis, registration payload, API client.');
 }
 
 main().catch((err) => {
