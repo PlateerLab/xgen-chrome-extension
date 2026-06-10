@@ -27,6 +27,68 @@ function sendExtensionMessage(page, message) {
   }), message);
 }
 
+function sendActiveTabMessage(page, message) {
+  return page.evaluate((payload) => new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tabId = tabs[0]?.id;
+      if (!tabId) {
+        resolve({ __error: 'No active tab found' });
+        return;
+      }
+
+      chrome.tabs.sendMessage(tabId, payload, (response) => {
+        const lastError = chrome.runtime.lastError?.message;
+        if (lastError) {
+          resolve({ __error: lastError });
+          return;
+        }
+        resolve(response);
+      });
+    });
+  }), message);
+}
+
+async function waitForPageContext(extensionPage, predicate, label) {
+  let lastResponse;
+  for (let attempt = 0; attempt < 25; attempt++) {
+    lastResponse = await sendActiveTabMessage(extensionPage, { type: 'GET_PAGE_CONTEXT' });
+    if (lastResponse && !lastResponse.__error && (!predicate || predicate(lastResponse))) {
+      return lastResponse;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  assert.fail(`${label}: page context not ready: ${JSON.stringify(lastResponse)}`);
+}
+
+function findElementIndex(context, pattern, label) {
+  const elements = String(context?.elements || '');
+  const chunks = [];
+  const chunkPattern = /\[(\d+)\]([^\n]*(?:\n(?!\[\d+\])[^\n]*)*)/g;
+  let match;
+  while ((match = chunkPattern.exec(elements)) !== null) {
+    chunks.push({ index: Number(match[1]), text: match[0] });
+  }
+
+  const found = chunks.find((chunk) => pattern.test(chunk.text));
+  assert.ok(
+    found,
+    `${label}: matching element not found. Pattern=${pattern}; elements=${elements}`,
+  );
+  return found.index;
+}
+
+async function sendPageCommand(extensionPage, action, params) {
+  const response = await sendActiveTabMessage(extensionPage, {
+    type: 'PAGE_COMMAND',
+    requestId: '',
+    action,
+    params,
+  });
+  assert.ok(response && !response.__error, `${action}: PAGE_COMMAND failed: ${JSON.stringify(response)}`);
+  return response;
+}
+
 function startFixtureServer() {
   const server = createServer((req, res) => {
     if (req.url?.startsWith('/api/goods/v1/search')) {
@@ -65,8 +127,50 @@ function startFixtureServer() {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(`<!doctype html>
 <html>
-  <head><title>PathFinder fixture</title></head>
-  <body><button id="search">search</button></body>
+  <head>
+    <title>PathFinder fixture</title>
+    <style>
+      body { min-height: 2200px; font-family: system-ui, sans-serif; }
+      main { max-width: 720px; margin: 40px auto; }
+      label, input, select, button { display: block; margin: 12px 0; }
+      #status { margin-top: 16px; padding: 12px; border: 1px solid #ccc; }
+      #bottom-marker { margin-top: 1600px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>XGEN Page Agent Fixture</h1>
+      <label for="search-input">Search term</label>
+      <input id="search-input" aria-label="Search term" placeholder="Search term" />
+      <label for="category-select">Category</label>
+      <select id="category-select" aria-label="Category">
+        <option value="">Choose</option>
+        <option value="goods">Goods</option>
+        <option value="members">Members</option>
+      </select>
+      <button id="search-button" aria-label="Run search">Run search</button>
+      <button id="details-button" aria-label="Open details">Open details</button>
+      <div id="status" role="status">Idle</div>
+      <button id="hidden-action" style="display:none">Hidden action</button>
+      <div id="bottom-marker">Bottom marker</div>
+    </main>
+    <script>
+      const input = document.querySelector('#search-input');
+      const status = document.querySelector('#status');
+      document.querySelector('#search-button').addEventListener('click', () => {
+        document.body.dataset.clicked = 'true';
+        status.textContent = 'Searched: ' + input.value;
+      });
+      document.querySelector('#category-select').addEventListener('change', (event) => {
+        document.body.dataset.category = event.target.value;
+      });
+      document.querySelector('#details-button').addEventListener('click', () => {
+        history.pushState({}, '', '/workspace/details');
+        document.title = 'PathFinder fixture - Details';
+        status.textContent = 'Details view ready';
+      });
+    </script>
+  </body>
 </html>`);
   });
 
@@ -121,6 +225,84 @@ function findApi(apis, method, pathPart) {
   return apis.find((api) => api.method === method && api.url.includes(pathPart));
 }
 
+async function verifyPageAgent(extensionPage, targetPage) {
+  await targetPage.bringToFront();
+  const context = await waitForPageContext(
+    extensionPage,
+    (ctx) => /Search term/.test(ctx.elements || '') && /Run search/.test(ctx.elements || ''),
+    'PageAgent initial context',
+  );
+
+  assert.equal(context.pageType, 'unknown');
+  assert.match(context.title, /PathFinder fixture/);
+  assert.ok(context.snapshotId, 'PageAgent context should include snapshotId');
+  assert.ok(context.availableActions?.includes('click_element'), 'PageAgent should expose click_element');
+  assert.ok(context.availableActions?.includes('input_text'), 'PageAgent should expose input_text');
+  assert.ok(context.availableActions?.includes('scroll'), 'PageAgent should expose scroll');
+
+  const serviceWorkerContext = await sendExtensionMessage(extensionPage, { type: 'GET_PAGE_CONTEXT' });
+  assert.ok(
+    /Search term/.test(serviceWorkerContext?.elements || ''),
+    `service worker should relay active tab page context: ${JSON.stringify(serviceWorkerContext)}`,
+  );
+
+  const chatConfig = await sendExtensionMessage(extensionPage, { type: 'GET_CHAT_CONFIG' });
+  assert.ok(
+    /Run search/.test(chatConfig?.pageContext?.elements || ''),
+    `chat config should include PageAgent context: ${JSON.stringify(chatConfig)}`,
+  );
+
+  const inputIndex = findElementIndex(context, /<input[^>]*(Search term|search-input)/i, 'PageAgent input_text');
+  const buttonIndex = findElementIndex(context, /<button[^>]*(Run search|search-button)/i, 'PageAgent click_element');
+
+  const inputResult = await sendPageCommand(extensionPage, 'input_text', {
+    index: inputIndex,
+    text: 'jeju',
+  });
+  assert.equal(inputResult.success, true, `input_text should succeed: ${JSON.stringify(inputResult)}`);
+  await targetPage.waitForFunction(() => document.querySelector('#search-input')?.value === 'jeju');
+
+  const clickResult = await sendPageCommand(extensionPage, 'click_element', {
+    index: buttonIndex,
+  });
+  assert.equal(clickResult.success, true, `click_element should succeed: ${JSON.stringify(clickResult)}`);
+  await targetPage.waitForFunction(() => document.body.dataset.clicked === 'true');
+  assert.match(await targetPage.locator('#status').textContent(), /Searched: jeju/);
+
+  const scrollBefore = await targetPage.evaluate(() => window.scrollY);
+  const scrollResult = await sendPageCommand(extensionPage, 'scroll', {
+    down: true,
+    num_pages: 1,
+  });
+  assert.equal(scrollResult.success, true, `scroll should succeed: ${JSON.stringify(scrollResult)}`);
+  await targetPage.waitForFunction((before) => window.scrollY > before, scrollBefore);
+
+  const invalidResult = await sendPageCommand(extensionPage, 'click_element', {
+    index: 99999,
+  });
+  assert.equal(invalidResult.success, false, 'invalid element index should fail');
+  assert.match(invalidResult.error || '', /99999|인덱스/);
+
+  await targetPage.evaluate(() => window.scrollTo(0, 0));
+  const contextBeforeDetails = await waitForPageContext(
+    extensionPage,
+    (ctx) => /Open details/.test(ctx.elements || ''),
+    'PageAgent context before SPA click',
+  );
+  const detailsIndex = findElementIndex(contextBeforeDetails, /<button[^>]*(Open details|details-button)/i, 'PageAgent SPA click');
+  const detailsResult = await sendPageCommand(extensionPage, 'click_element', {
+    index: detailsIndex,
+  });
+  assert.equal(detailsResult.success, true, `SPA navigation click should succeed: ${JSON.stringify(detailsResult)}`);
+
+  const spaContext = await waitForPageContext(
+    extensionPage,
+    (ctx) => /\/workspace\/details$/.test(ctx.url || '') && /Details view ready/.test(ctx.elements || ''),
+    'PageAgent SPA context',
+  );
+  assert.equal(spaContext.title, 'PathFinder fixture - Details');
+}
+
 async function main() {
   if (!existsSync(path.join(distDir, 'manifest.json'))) {
     throw new Error('dist/manifest.json not found. Run `npm run build` before runtime verification.');
@@ -173,6 +355,7 @@ async function main() {
 
     const targetPage = await context.newPage();
     await targetPage.goto(url);
+    await verifyPageAgent(extensionPage, targetPage);
 
     const firstApis = await runCaptureSession(extensionPage, targetPage, async () => {
       await targetPage.evaluate(async () => {
@@ -225,6 +408,7 @@ async function main() {
 
     console.log([
       `PathFinder runtime verification passed: extension loaded (${extensionId})`,
+      'PageAgent context and commands verified',
       `fetch/xhr captured ${firstApis.length} API request(s)`,
       `navigation reinjection captured ${secondApis.length} API request(s)`,
     ].join('; '));
