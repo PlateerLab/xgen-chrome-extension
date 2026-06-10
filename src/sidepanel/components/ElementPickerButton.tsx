@@ -7,7 +7,11 @@ interface PickerResult {
   elementInfo: { tag: string; text: string; url: string };
 }
 
-export function useElementPicker() {
+function tabTarget(tabId: number | null | undefined): { tabId?: number } {
+  return typeof tabId === 'number' ? { tabId } : {};
+}
+
+export function useElementPicker(targetTabId?: number | null) {
   const [picking, setPicking] = useState(false);
   const [result, setResult] = useState<PickerResult | null>(null);
   const [registered, setRegistered] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
@@ -30,14 +34,20 @@ export function useElementPicker() {
   const togglePicker = useCallback(() => {
     if (picking) {
       setPicking(false);
-      chrome.runtime.sendMessage({ type: 'ELEMENT_PICKER_STOP' } as ExtensionMessage);
+      chrome.runtime.sendMessage({
+        type: 'ELEMENT_PICKER_STOP',
+        ...tabTarget(targetTabId),
+      } satisfies ExtensionMessage);
     } else {
       setPicking(true);
       setResult(null);
       setRegistered('idle');
-      chrome.runtime.sendMessage({ type: 'ELEMENT_PICKER_START' } satisfies ExtensionMessage);
+      chrome.runtime.sendMessage({
+        type: 'ELEMENT_PICKER_START',
+        ...tabTarget(targetTabId),
+      } satisfies ExtensionMessage);
     }
-  }, [picking]);
+  }, [picking, targetTabId]);
 
   const registerApi = useCallback(async (api: CapturedApi) => {
     let pathname: string;
@@ -53,6 +63,7 @@ export function useElementPicker() {
         type: 'PAGE_COMMAND',
         requestId: crypto.randomUUID(),
         action: 'register_tool',
+        ...tabTarget(targetTabId),
         params: {
           function_name: toolName,
           api_url: api.url,
@@ -93,7 +104,7 @@ export function useElementPicker() {
       setRegistered('error');
       setRegisterError(err instanceof Error ? err.message : 'Unknown error');
     }
-  }, []);
+  }, [targetTabId]);
 
   const closeResult = useCallback(() => {
     setResult(null);

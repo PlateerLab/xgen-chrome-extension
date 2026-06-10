@@ -8,6 +8,7 @@ import type { ExtensionMessage } from '../../shared/types';
 interface Props {
   result: SessionResult;
   onDismiss: () => void;
+  targetTabId?: number | null;
 }
 
 type RegisterState =
@@ -65,7 +66,11 @@ function ToolRow({
   );
 }
 
-export function SessionResultPanel({ result, onDismiss }: Props) {
+function tabTarget(tabId: number | null | undefined): { tabId?: number } {
+  return typeof tabId === 'number' ? { tabId } : {};
+}
+
+export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
   const analysis = useMemo(() => analyzeTrace(result.apis), [result.apis]);
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(analysis.tools.filter((t) => !t.isLowPriority).map((t) => t.id)),
@@ -82,6 +87,7 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
     try {
       const config = await chrome.runtime.sendMessage({
         type: 'GET_CHAT_CONFIG',
+        ...tabTarget(targetTabId),
       } satisfies ExtensionMessage);
       if (!config?.serverUrl) {
         setRegisterState({ status: 'error', message: 'XGEN 서버 URL이 설정되지 않았습니다.' });
@@ -95,6 +101,7 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
         const lookup = await chrome.runtime.sendMessage({
           type: 'LOOKUP_AUTH_PROFILE_FOR_HOST',
           host: analysis.primaryHost,
+          ...tabTarget(targetTabId),
         } satisfies ExtensionMessage);
         if (lookup?.ok && typeof lookup.authProfileId === 'string') {
           authProfileId = lookup.authProfileId;

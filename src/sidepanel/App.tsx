@@ -22,13 +22,14 @@ function extractHost(u: string | undefined): string | null {
 }
 
 export function App() {
+  const [targetTabId, setTargetTabId] = useState<number | null>(null);
   const {
     messages, isStreaming, sendMessage, stopStream, clearMessages,
     planQuestions, submitQuestionAnswers, dismissQuestions,
     greetProactive, collectionId, runCollection,
-  } = useChat();
-  const picker = useElementPicker();
-  const captureSession = useCaptureSession();
+  } = useChat(targetTabId);
+  const picker = useElementPicker(targetTabId);
+  const captureSession = useCaptureSession(targetTabId);
   const [authCapturing, setAuthCapturing] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [view, setView] = useState<SidePanelView>('chat');
@@ -49,9 +50,13 @@ export function App() {
     (async () => {
       // 마운트 시점 active 탭 ID로 pin (chrome.tabs.query는 activeTab permission으로 가능)
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tabs[0]?.id) pinnedTabIdRef.current = tabs[0].id;
+      if (tabs[0]?.id) {
+        pinnedTabIdRef.current = tabs[0].id;
+        setTargetTabId(tabs[0].id);
+      }
       const config = await chrome.runtime.sendMessage({
         type: 'GET_CHAT_CONFIG',
+        ...(tabs[0]?.id ? { tabId: tabs[0].id } : {}),
       } satisfies ExtensionMessage);
       if (config?.pageContext) setPageContext(config.pageContext);
     })().catch(() => {});
@@ -65,6 +70,7 @@ export function App() {
         if (message.tabId !== pinned) return;
       } else if (message.tabId !== undefined) {
         pinnedTabIdRef.current = message.tabId;
+        setTargetTabId(message.tabId);
       }
       setPageContext(message.context);
     };
@@ -75,14 +81,19 @@ export function App() {
   const handleClear = useCallback(() => {
     clearMessages();
     pinnedTabIdRef.current = null;
+    setTargetTabId(null);
     greetedHostsRef.current = new Set();
     setPageContext(null);
     // 새 active 탭 기준으로 재pin + 재greet
     (async () => {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tabs[0]?.id) pinnedTabIdRef.current = tabs[0].id;
+      if (tabs[0]?.id) {
+        pinnedTabIdRef.current = tabs[0].id;
+        setTargetTabId(tabs[0].id);
+      }
       const config = await chrome.runtime.sendMessage({
         type: 'GET_CHAT_CONFIG',
+        ...(tabs[0]?.id ? { tabId: tabs[0].id } : {}),
       } satisfies ExtensionMessage);
       if (config?.pageContext) setPageContext(config.pageContext);
     })().catch(() => {});
@@ -102,6 +113,7 @@ export function App() {
     (async () => {
       const config = await chrome.runtime.sendMessage({
         type: 'GET_CHAT_CONFIG',
+        ...(targetTabId !== null ? { tabId: targetTabId } : {}),
       } satisfies ExtensionMessage);
       const xgenHost = extractHost(config?.serverUrl);
       console.log('[PathFinder] greet check:', { host, xgenHost, alreadyGreeted: greetedHostsRef.current.has(host) });
@@ -115,7 +127,7 @@ export function App() {
       console.log('[PathFinder] greeting:', pageContext.url);
       greetProactive(pageContext.url);
     })().catch((err) => console.warn('[PathFinder] greet trigger failed:', err));
-  }, [pageContext?.url, greetProactive]);
+  }, [pageContext?.url, greetProactive, targetTabId]);
 
   return (
     <div className="flex flex-col h-screen bg-white text-gray-800">
@@ -261,6 +273,7 @@ export function App() {
         <SessionResultPanel
           result={captureSession.result}
           onDismiss={captureSession.dismissResult}
+          targetTabId={targetTabId}
         />
       )}
 

@@ -20,7 +20,11 @@ export interface CaptureSessionState {
   dismissError: () => void;
 }
 
-export function useCaptureSession(): CaptureSessionState {
+function tabTarget(tabId: number | null | undefined): { tabId?: number } {
+  return typeof tabId === 'number' ? { tabId } : {};
+}
+
+export function useCaptureSession(targetTabId?: number | null): CaptureSessionState {
   const [active, setActive] = useState(false);
   const [pending, setPending] = useState(false);
   const [count, setCount] = useState(0);
@@ -76,7 +80,7 @@ export function useCaptureSession(): CaptureSessionState {
     setError(null);
     setPending(true);
     chrome.runtime
-      .sendMessage({ type: 'START_CAPTURE_SESSION' } satisfies ExtensionMessage)
+      .sendMessage({ type: 'START_CAPTURE_SESSION', ...tabTarget(targetTabId) } satisfies ExtensionMessage)
       .then((resp: { ok?: boolean; error?: string } | undefined) => {
         if (resp?.ok === false) {
           setActive(false);
@@ -90,7 +94,7 @@ export function useCaptureSession(): CaptureSessionState {
         setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => setPending(false));
-  }, []);
+  }, [targetTabId]);
 
   const stop = useCallback(() => {
     setError(null);

@@ -211,11 +211,18 @@ function startFixtureServer() {
         }
         chatRequests.push(body);
 
-        const inputIndex = findElementIndexInText(
-          body?.page_context?.elements || '',
-          /<input[^>]*(Search term|search-input)/i,
-          'sidepanel SSE page_command input',
-        );
+        let inputIndex;
+        try {
+          inputIndex = findElementIndexInText(
+            body?.page_context?.elements || '',
+            /<input[^>]*(Search term|search-input)/i,
+            'sidepanel SSE page_command input',
+          );
+        } catch (err) {
+          res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+          res.end(err instanceof Error ? err.message : String(err));
+          return;
+        }
 
         res.writeHead(200, {
           'content-type': 'text/event-stream; charset=utf-8',
@@ -273,6 +280,22 @@ function startFixtureServer() {
     if (req.url?.startsWith('/fragment')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end('<section>not an api response</section>');
+      return;
+    }
+
+    if (req.url?.startsWith('/distractor')) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html>
+<html>
+  <head><title>Distractor fixture</title></head>
+  <body>
+    <main>
+      <h1>Distractor Page</h1>
+      <input id="distractor-input" aria-label="Distractor input" placeholder="Distractor input" />
+      <button id="distractor-button">Distractor action</button>
+    </main>
+  </body>
+</html>`);
       return;
     }
 
@@ -392,14 +415,14 @@ async function clickSidepanelButton(extensionPage, targetPage, label, matcher) {
   }, { label, matcherSource: matcher.source });
 }
 
-async function runCaptureSessionViaSidepanel(extensionPage, targetPage, action, label) {
-  await clickSidepanelButton(extensionPage, targetPage, `${label}: start`, /캡처 세션 시작/);
+async function runCaptureSessionViaSidepanel(extensionPage, targetPage, action, label, activePageForControls = targetPage) {
+  await clickSidepanelButton(extensionPage, activePageForControls, `${label}: start`, /캡처 세션 시작/);
   await extensionPage.waitForFunction(() => document.body.innerText.includes('캡처 중'));
 
   await action();
   await wait(300);
 
-  await clickSidepanelButton(extensionPage, targetPage, `${label}: stop`, /캡처 종료/);
+  await clickSidepanelButton(extensionPage, activePageForControls, `${label}: stop`, /캡처 종료/);
   await extensionPage.waitForFunction(() => document.body.innerText.includes('캡처 분석'));
 
   const cached = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
@@ -491,6 +514,16 @@ async function verifyPageAgent(extensionPage, targetPage) {
   assert.equal(spaContext.title, 'PathFinder fixture - Details');
 }
 
+async function pinSidepanelToTarget(extensionPage, targetPage) {
+  await clickSidepanelButton(extensionPage, targetPage, 'Sidepanel target reset', /초기화/);
+  await waitForPageContext(
+    extensionPage,
+    (ctx) => /Search term/.test(ctx.elements || '') && /Run search/.test(ctx.elements || ''),
+    'Sidepanel pinned target context',
+  );
+  await wait(300);
+}
+
 async function verifyRelayCommandBridge(extensionPage, targetPage, commandResults) {
   await targetPage.bringToFront();
   const origin = new URL(targetPage.url()).origin;
@@ -533,7 +566,7 @@ async function verifyRelayCommandBridge(extensionPage, targetPage, commandResult
   assert.match(callback.body.pageContext?.elements || '', /Search term/);
 }
 
-async function submitSidepanelMessage(extensionPage, targetPage, message) {
+async function submitSidepanelMessage(extensionPage, activePageBeforeSubmit, message) {
   const input = extensionPage.locator('textarea[placeholder="메시지 입력..."]');
   await input.fill(message);
   await extensionPage.waitForFunction(() => {
@@ -541,7 +574,7 @@ async function submitSidepanelMessage(extensionPage, targetPage, message) {
     return button && !button.disabled;
   });
 
-  await targetPage.bringToFront();
+  await activePageBeforeSubmit.bringToFront();
   await extensionPage.evaluate(() => {
     const button = document.querySelector('button[title="전송"]');
     if (!(button instanceof HTMLButtonElement)) {
@@ -551,7 +584,7 @@ async function submitSidepanelMessage(extensionPage, targetPage, message) {
   });
 }
 
-async function verifySidepanelChatRelay(extensionPage, targetPage, commandResults, chatRequests) {
+async function verifySidepanelChatRelay(extensionPage, targetPage, distractorPage, commandResults, chatRequests) {
   await targetPage.bringToFront();
   const context = await waitForPageContext(
     extensionPage,
@@ -560,9 +593,14 @@ async function verifySidepanelChatRelay(extensionPage, targetPage, commandResult
   );
   assert.match(context.url || '', /\/workspace\/details$/);
 
-  await submitSidepanelMessage(extensionPage, targetPage, 'sidepanel bridge check');
+  await submitSidepanelMessage(extensionPage, distractorPage, 'sidepanel bridge check');
 
   await targetPage.waitForFunction(() => document.querySelector('#search-input')?.value === 'from-sidepanel');
+  assert.equal(
+    await distractorPage.locator('#distractor-input').inputValue(),
+    '',
+    'sidepanel page_command should not target the active distractor tab',
+  );
   const callback = await waitForCommandResult(
     commandResults,
     SIDEPANEL_CHAT_COMMAND_REQUEST_ID,
@@ -657,9 +695,12 @@ async function main() {
 
     const targetPage = await context.newPage();
     await targetPage.goto(url);
+    await pinSidepanelToTarget(extensionPage, targetPage);
+    const distractorPage = await context.newPage();
+    await distractorPage.goto(`${url}distractor`);
     await verifyPageAgent(extensionPage, targetPage);
     await verifyRelayCommandBridge(extensionPage, targetPage, commandResults);
-    await verifySidepanelChatRelay(extensionPage, targetPage, commandResults, chatRequests);
+    await verifySidepanelChatRelay(extensionPage, targetPage, distractorPage, commandResults, chatRequests);
     await wait(2_200);
 
     const firstApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
@@ -681,7 +722,7 @@ async function main() {
           xhr.send(JSON.stringify({ includeGrade: true }));
         });
       });
-    }, 'fetch+xhr capture');
+    }, 'fetch+xhr capture', distractorPage);
     await verifySessionResultRegistration(extensionPage, targetPage, registrationRequests);
 
     const searchApi = findApi(firstApis, 'GET', '/api/goods/v1/search?keyword=jeju');

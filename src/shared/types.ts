@@ -192,25 +192,25 @@ export type ExtensionMessage =
   | { type: 'STREAM_ERROR'; error: string }
   | { type: 'SET_TOKEN'; token: string; origin: string }
   | { type: 'SET_ORIGIN'; origin: string }
-  | { type: 'GET_PAGE_CONTEXT' }
+  | { type: 'GET_PAGE_CONTEXT'; tabId?: number }
   | { type: 'PAGE_CONTEXT_UPDATE'; context: PageContext; tabId?: number }
-  | { type: 'PAGE_COMMAND'; requestId: string; action: string; params: Record<string, unknown> }
+  | { type: 'PAGE_COMMAND'; requestId: string; action: string; params: Record<string, unknown>; tabId?: number }
   | { type: 'PAGE_COMMAND_RESULT'; requestId: string; result: PageCommandResult }
   | { type: 'CANVAS_COMMAND'; requestId: string; action: string; params: Record<string, unknown> }
   | { type: 'CANVAS_RESULT'; requestId: string; result: unknown }
   // ── API Hook (content script → service worker) ──
   | { type: 'API_CAPTURED'; data: import('./api-hook-types').CapturedApi }
   // ── SSE 직접 소비 (sidePanel ↔ SW) ──
-  | { type: 'GET_CHAT_CONFIG' }
+  | { type: 'GET_CHAT_CONFIG'; tabId?: number }
   | { type: 'CHAT_CONFIG'; serverUrl: string; authToken: string; provider: string; model: string; pageContext: PageContext | null }
-  | { type: 'RELAY_COMMAND'; event: SSEEvent }
+  | { type: 'RELAY_COMMAND'; event: SSEEvent; tabId?: number }
   | { type: 'COMMAND_RESULT'; requestId: string; result: unknown }
   // ── Element Picker ──
-  | { type: 'ELEMENT_PICKER_START' }
-  | { type: 'ELEMENT_PICKER_STOP' }
+  | { type: 'ELEMENT_PICKER_START'; tabId?: number }
+  | { type: 'ELEMENT_PICKER_STOP'; tabId?: number }
   | { type: 'ELEMENT_PICKER_RESULT'; apis: import('./api-hook-types').CapturedApi[]; elementInfo: { tag: string; text: string; url: string } }
   // ── Capture Session (사용자 클릭 캡처 누적용; AI 자동 탐색은 제외) ──
-  | { type: 'START_CAPTURE_SESSION' }
+  | { type: 'START_CAPTURE_SESSION'; tabId?: number }
   | { type: 'STOP_CAPTURE_SESSION' }
   | { type: 'CAPTURE_SESSION_STATUS'; active: boolean; tabId?: number; count?: number; error?: string }
   | { type: 'CAPTURE_SESSION_RESULT'; apis: import('./api-hook-types').CapturedApi[]; tabId: number; durationMs: number }
@@ -221,7 +221,7 @@ export type ExtensionMessage =
   | { type: 'GET_LIVE_COOKIES'; host: string }
   /** host 도메인에 매칭되는 인증 프로필의 service_id 조회. SessionResultPanel이 collection
    *  등록 시 auth_profile_id를 같이 넘기기 위해 사용. SW의 autoMatchAuthProfile 재사용. */
-  | { type: 'LOOKUP_AUTH_PROFILE_FOR_HOST'; host: string }
+  | { type: 'LOOKUP_AUTH_PROFILE_FOR_HOST'; host: string; tabId?: number }
   // ── Floating Overlay (우클릭 → API 스캔 진입점) ──
   // SW → content: 페이지 위 플로팅 "녹화중" UI 표시/숨김.
   // content → SW: 사용자가 overlay의 정지 버튼 누름.
