@@ -152,6 +152,18 @@ export interface FromTraceTool {
   responseSample?: unknown;
   label: string;
   sampleCount: number;
+  aiMetadata?: {
+    source?: string;
+    canonical_action?: string;
+    primary_resource?: string;
+    one_line_summary?: string;
+    when_to_use?: string;
+    keywords?: string[];
+    input_fields?: string[];
+    output_fields?: string[];
+    produces_semantics?: { semantic: string; field?: string; json_path?: string }[];
+    consumes_semantics?: { semantic: string; field: string; kind?: 'data' | 'context' }[];
+  };
   sampleMeta?: {
     redacted?: boolean;
     truncated?: boolean;

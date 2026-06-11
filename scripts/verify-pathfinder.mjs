@@ -352,7 +352,19 @@ function testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayloa
   assert.equal(payload.tools.length, 2);
   assert.equal(payload.edges.length, 1);
   assert.ok(payload.tools.every((tool) => tool.templatedPath.includes('/goods/')));
-  assert.equal(payload.tools.find((tool) => tool.templatedPath.endsWith('/search'))?.querySample.keyword, 'jeju');
+  const searchTool = payload.tools.find((tool) => tool.templatedPath.endsWith('/search'));
+  assert.equal(searchTool?.querySample.keyword, 'jeju');
+  assert.equal(searchTool?.aiMetadata?.source, 'pathfinder_trace');
+  assert.equal(searchTool?.aiMetadata?.canonical_action, 'search');
+  assert.equal(searchTool?.aiMetadata?.primary_resource, 'goods');
+  assert.ok(
+    searchTool?.aiMetadata?.consumes_semantics?.some((entry) => entry.field === 'keyword' && entry.semantic === 'search_keyword'),
+    `search metadata should include keyword consume semantics: ${JSON.stringify(searchTool?.aiMetadata)}`,
+  );
+  assert.ok(
+    searchTool?.aiMetadata?.produces_semantics?.some((entry) => entry.field === 'goodsNo' && entry.semantic === 'goods_no'),
+    `search metadata should include goodsNo produce semantics: ${JSON.stringify(searchTool?.aiMetadata)}`,
+  );
   assert.equal(payload.edges[0].sampleSharedValue, '987654');
 
   assert.throws(
@@ -479,6 +491,11 @@ async function testCreateCollectionFromTrace(createCollectionFromTrace) {
       responseSample: { rows: [] },
       label: '상품 검색',
       sampleCount: 1,
+      aiMetadata: {
+        source: 'pathfinder_trace',
+        canonical_action: 'search',
+        primary_resource: 'goods',
+      },
     }],
     edges: [],
   };
@@ -498,6 +515,7 @@ async function testCreateCollectionFromTrace(createCollectionFromTrace) {
     assert.equal(body.host, 'bo.x2bee.com');
     assert.equal(body.auth_profile_id, 'bo_x2bee_com');
     assert.equal(body.tools[0].querySample.keyword, 'jeju');
+    assert.equal(body.tools[0].aiMetadata?.canonical_action, payload.tools[0].aiMetadata?.canonical_action);
   });
 
   await withMockFetch(async () => new Response(JSON.stringify({

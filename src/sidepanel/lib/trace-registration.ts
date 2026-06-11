@@ -160,6 +160,9 @@ export function buildTraceRegistrationPayload(
       const responseSample = tool.responseSample == null
         ? undefined
         : sanitizeSample(tool.responseSample, stats);
+      const aiMetadata = tool.aiMetadata == null
+        ? undefined
+        : sanitizeSample(tool.aiMetadata, stats);
       const label = truncateString(tool.label, 200, stats);
       const sampleMeta = (stats.redacted || stats.truncated || stats.droppedQueryKeys.size > 0)
         ? {
@@ -179,6 +182,7 @@ export function buildTraceRegistrationPayload(
         ...(responseSample !== undefined ? { responseSample } : {}),
         label,
         sampleCount: tool.sampleCount,
+        ...(aiMetadata !== undefined ? { aiMetadata: aiMetadata as NonNullable<typeof tool.aiMetadata> } : {}),
         ...(sampleMeta ? { sampleMeta } : {}),
       };
     }),

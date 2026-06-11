@@ -22,6 +22,20 @@ export interface AnalyzedTool {
   responseSample?: unknown;                     // 첫 캡처 response (preview용)
   label: string;                                // 사람이 읽는 한국어
   isLowPriority: boolean;                       // 빈 ack 등
+  aiMetadata?: TraceToolAiMetadata;             // graph-tool-call 검색/plan용 의미 seed
+}
+
+export interface TraceToolAiMetadata {
+  source: 'pathfinder_trace';
+  canonical_action: 'search' | 'read' | 'create' | 'update' | 'delete' | 'action';
+  primary_resource: string;
+  one_line_summary: string;
+  when_to_use: string;
+  keywords: string[];
+  input_fields: string[];
+  output_fields: string[];
+  produces_semantics: { semantic: string; field: string; json_path: string }[];
+  consumes_semantics: { semantic: string; field: string; kind: 'data' | 'context' }[];
 }
 
 export interface AnalyzedEdge {
@@ -329,6 +343,175 @@ function describeTool(method: string, templatedPath: string): string {
   return `${readable} ${verb}`;
 }
 
+const ACTION_SEGMENTS = new Set([
+  'search', 'find', 'query', 'list', 'detail', 'info', 'count', 'summary',
+  'download', 'excel', 'create', 'add', 'save', 'register', 'update', 'modify',
+  'delete', 'remove', 'cancel', 'approve', 'reject', 'get',
+]);
+
+const CONTEXT_FIELD_NAMES = new Set([
+  'siteNo', 'siteId', 'mallNo', 'mallId', 'shopNo', 'shopId',
+  'langCd', 'locale', 'channel', 'channelCd', 'tenantId',
+  'page', 'pageNo', 'pageSize', 'size', 'limit', 'offset',
+  'sort', 'sortBy', 'orderBy',
+]);
+
+interface LeafField {
+  field: string;
+  jsonPath: string;
+  type: string;
+}
+
+function meaningfulPathSegments(templatedPath: string): string[] {
+  return templatedPath
+    .split('/')
+    .filter(Boolean)
+    .filter((s) => !s.startsWith('{'))
+    .map((s) => s.toLowerCase())
+    .filter((s) => !NOISE_SEGMENTS.has(s));
+}
+
+function inferCanonicalAction(method: string, templatedPath: string): TraceToolAiMetadata['canonical_action'] {
+  const m = method.toUpperCase();
+  const segText = meaningfulPathSegments(templatedPath).join(' ');
+  if (m === 'DELETE') return 'delete';
+  if (m === 'PUT' || m === 'PATCH') return 'update';
+  if (/\b(search|find|query|list)\b/.test(segText)) return 'search';
+  if (m === 'GET') return 'read';
+  if (/\b(create|add|register)\b/.test(segText)) return 'create';
+  if (/\b(update|modify|save)\b/.test(segText)) return 'update';
+  return m === 'POST' ? 'action' : 'read';
+}
+
+function inferPrimaryResource(templatedPath: string): string {
+  const segs = meaningfulPathSegments(templatedPath);
+  const found = segs.find((s) => !ACTION_SEGMENTS.has(s)) ?? segs[0] ?? 'api';
+  return splitCamelKebab(found).join('_') || found;
+}
+
+function normalizeFieldSemantic(field: string, resource: string): string {
+  const normalized = field
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+  if (!normalized) return field.toLowerCase();
+  if (normalized === 'id' && resource) return `${resource}_id`;
+  if (/^(keyword|search_word|search_keyword|query|q)$/.test(normalized)) return 'search_keyword';
+  return normalized;
+}
+
+function valueType(value: unknown): string {
+  if (Array.isArray(value)) return 'array';
+  if (value === null) return 'null';
+  return typeof value;
+}
+
+function collectLeafFields(value: unknown, max = 24): LeafField[] {
+  const leaves: LeafField[] = [];
+  const walk = (node: unknown, path: string, depth: number) => {
+    if (leaves.length >= max || depth > 6 || node == null) return;
+    if (Array.isArray(node)) {
+      if (node.length > 0) walk(node[0], `${path}[]`, depth + 1);
+      return;
+    }
+    if (typeof node === 'object') {
+      for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+        const childPath = path === '$' ? `$.${key}` : `${path}.${key}`;
+        if (child != null && typeof child === 'object') {
+          walk(child, childPath, depth + 1);
+        } else {
+          leaves.push({ field: key, jsonPath: childPath, type: valueType(child) });
+          if (leaves.length >= max) return;
+        }
+      }
+      return;
+    }
+    const field = path.split('.').pop()?.replace(/\[\]$/, '') || 'value';
+    leaves.push({ field, jsonPath: path, type: valueType(node) });
+  };
+  walk(value, '$', 0);
+  return leaves;
+}
+
+function uniqueStrings(values: Iterable<string>, max = 24): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const v = raw.trim();
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    out.push(v);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function inferFieldKind(field: string): 'data' | 'context' {
+  if (CONTEXT_FIELD_NAMES.has(field)) return 'context';
+  if (/^(site|mall|shop|lang|locale|tenant|channel)/i.test(field)) return 'context';
+  if (/^(page|size|limit|offset|sort|orderBy)$/i.test(field)) return 'context';
+  return 'data';
+}
+
+function buildTraceToolAiMetadata(tool: {
+  method: string;
+  templatedPath: string;
+  pathParams: string[];
+  queryParamKeys: string[];
+  requestBodySample?: unknown;
+  responseSample?: unknown;
+  label: string;
+}): TraceToolAiMetadata {
+  const canonicalAction = inferCanonicalAction(tool.method, tool.templatedPath);
+  const primaryResource = inferPrimaryResource(tool.templatedPath);
+  const requestLeaves = collectLeafFields(tool.requestBodySample);
+  const responseLeaves = collectLeafFields(tool.responseSample);
+  const inputFields = uniqueStrings([
+    ...tool.pathParams,
+    ...tool.queryParamKeys,
+    ...requestLeaves.map((leaf) => leaf.field),
+  ], 32);
+  const outputFields = uniqueStrings(responseLeaves.map((leaf) => leaf.field), 32);
+  const consumes = inputFields.map((field) => ({
+    semantic: normalizeFieldSemantic(field, primaryResource),
+    field,
+    kind: inferFieldKind(field),
+  }));
+  const produces = responseLeaves
+    .filter((leaf) => leaf.field && !/^(ok|success|status|message)$/i.test(leaf.field))
+    .map((leaf) => ({
+      semantic: normalizeFieldSemantic(leaf.field, primaryResource),
+      field: leaf.field,
+      json_path: leaf.jsonPath,
+    }));
+  const pathKeywords = meaningfulPathSegments(tool.templatedPath)
+    .flatMap((seg) => splitCamelKebab(seg));
+  const keywords = uniqueStrings([
+    tool.label,
+    primaryResource,
+    canonicalAction,
+    ...pathKeywords,
+    ...inputFields,
+    ...outputFields.slice(0, 8),
+  ], 32);
+  const inputText = inputFields.length > 0 ? `입력: ${inputFields.slice(0, 8).join(', ')}` : '입력 없음';
+  const outputText = outputFields.length > 0 ? `응답: ${outputFields.slice(0, 8).join(', ')}` : '응답 필드 미확인';
+
+  return {
+    source: 'pathfinder_trace',
+    canonical_action: canonicalAction,
+    primary_resource: primaryResource,
+    one_line_summary: `${tool.label} (${tool.method} ${tool.templatedPath})`,
+    when_to_use: `${tool.label}이 필요할 때 사용합니다. ${inputText}. ${outputText}.`,
+    keywords,
+    input_fields: inputFields,
+    output_fields: outputFields,
+    produces_semantics: produces.slice(0, 24),
+    consumes_semantics: consumes.slice(0, 32),
+  };
+}
+
 // ── 폴링 감지 ──
 // 같은 (method, full url) 3건 이상이 10초 윈도우 안에 있으면 1건만 남기고 drop
 function dropPolling(captures: CapturedApi[]): { kept: CapturedApi[]; droppedCount: number } {
@@ -540,6 +723,9 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
       }
       const allEmpty = members.every((m) => isEmptyAck(m.responseBody));
       const first = members[0];
+      const requestBodySample = safeJsonParse(first.requestBody);
+      const responseSample = safeJsonParse(first.responseBody);
+      const label = describeTool(method, templatedPath);
       tools.push({
         id: toolId,
         method,
@@ -550,10 +736,19 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
         pathParams,
         queryParamKeys: [...queryKeys],
         querySample,
-        requestBodySample: safeJsonParse(first.requestBody),
-        responseSample: safeJsonParse(first.responseBody),
-        label: describeTool(method, templatedPath),
+        requestBodySample,
+        responseSample,
+        label,
         isLowPriority: allEmpty,
+        aiMetadata: buildTraceToolAiMetadata({
+          method,
+          templatedPath,
+          pathParams,
+          queryParamKeys: [...queryKeys],
+          requestBodySample,
+          responseSample,
+          label,
+        }),
       });
       for (const m of members) captureToolMap.push({ capture: m, toolId });
     }
