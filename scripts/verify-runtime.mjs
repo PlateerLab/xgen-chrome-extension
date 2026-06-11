@@ -34,6 +34,15 @@ function setExtensionStorage(page, values) {
   }), values);
 }
 
+function findTabIdByUrl(page, urlPatternSource) {
+  return page.evaluate((source) => new Promise((resolve) => {
+    const pattern = new RegExp(source);
+    chrome.tabs.query({}, (tabs) => {
+      resolve(tabs.find((tab) => pattern.test(tab.url || ''))?.id || null);
+    });
+  }), urlPatternSource);
+}
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -638,6 +647,48 @@ async function verifyStoredServerCookieAuth(extensionPage, browserContext, targe
   );
 }
 
+async function verifyDevXgenOriginDetection(extensionPage, browserContext) {
+  await browserContext.route('https://dev-xgen.x2bee.com/**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: `<!doctype html>
+<html>
+  <head><title>XGEN dev fixture</title></head>
+  <body>
+    <main>Dev XGEN fixture</main>
+    <script>
+      localStorage.setItem('xgen_access_token', 'dev-xgen-token');
+      localStorage.setItem('accessToken', 'dev-xgen-token');
+    </script>
+  </body>
+</html>`,
+    });
+  });
+
+  const devPage = await browserContext.newPage();
+  await devPage.goto('https://dev-xgen.x2bee.com/main?view=tool-storage');
+  await devPage.waitForLoadState('domcontentloaded');
+  await devPage.waitForFunction(() => localStorage.getItem('accessToken') === 'dev-xgen-token');
+
+  const tabId = await findTabIdByUrl(extensionPage, '^https://dev-xgen\\.x2bee\\.com/main');
+  assert.ok(tabId, 'dev-xgen tab id should be discoverable');
+
+  let config;
+  for (let attempt = 0; attempt < 25; attempt++) {
+    config = await sendExtensionMessage(extensionPage, { type: 'GET_CHAT_CONFIG', tabId });
+    if (config?.serverUrl === 'https://dev-xgen.x2bee.com' && config?.authToken === 'dev-xgen-token') {
+      await devPage.close();
+      console.log('dev-xgen origin token detection verified');
+      return;
+    }
+    await wait(200);
+  }
+
+  await devPage.close();
+  assert.fail(`dev-xgen origin token detection failed: ${JSON.stringify(config)}`);
+}
+
 async function verifyRelayCommandBridge(extensionPage, targetPage, commandResults) {
   await targetPage.bringToFront();
   const origin = new URL(targetPage.url()).origin;
@@ -862,6 +913,8 @@ async function main() {
     const unsupportedStart = await sendExtensionMessage(extensionPage, { type: 'START_CAPTURE_SESSION' });
     assert.equal(unsupportedStart?.ok, false, `START_CAPTURE_SESSION should reject extension pages: ${JSON.stringify(unsupportedStart)}`);
     assert.match(unsupportedStart?.error || '', /http\/https|API 캡처/);
+
+    await verifyDevXgenOriginDetection(extensionPage, context);
 
     const targetPage = await context.newPage();
     await targetPage.goto(url);

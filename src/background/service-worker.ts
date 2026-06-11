@@ -146,13 +146,36 @@ chrome.sidePanel
 /**
  * origin이 XGEN 자체 호스트인지 — 이걸로 SET_ORIGIN/SET_TOKEN/resolver/startup migration 모두 검증.
  * fo.x2bee.com 같은 형제 서브도메인이 storage/메모리/resolver에 끼어들지 못하게 막는 single source of truth.
+ * dev-xgen.x2bee.com / xgen-dev.x2bee.com 같은 환경별 XGEN 호스트는 허용한다.
  */
+function isXgenHostedHost(host: string): boolean {
+  const normalized = host.toLowerCase();
+  return (
+    normalized === 'xgen.x2bee.com' ||
+    normalized.startsWith('xgen.') ||
+    normalized.endsWith('.xgen.x2bee.com') ||
+    /^(?:[a-z0-9-]+-)?xgen(?:-[a-z0-9-]+)?\.x2bee\.com$/.test(normalized)
+  );
+}
+
 function isXgenOrigin(origin: string): boolean {
-  return /^https?:\/\/(xgen\.x2bee\.com|xgen\.[^/:]+|[^/:]+\.xgen\.x2bee\.com|localhost(:\d+)?|127\.0\.0\.1(:\d+)?)(\/|$)/.test(origin);
+  try {
+    const parsed = new URL(origin);
+    if (!/^https?:$/.test(parsed.protocol)) return false;
+    return isXgenHostedHost(parsed.hostname) || parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+  } catch {
+    return false;
+  }
 }
 
 function isXgenHostedOrigin(origin: string): boolean {
-  return /^https?:\/\/(xgen\.x2bee\.com|xgen\.[^/:]+|[^/:]+\.xgen\.x2bee\.com)(\/|$)/.test(origin);
+  try {
+    const parsed = new URL(origin);
+    if (!/^https?:$/.test(parsed.protocol)) return false;
+    return isXgenHostedHost(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 function isLocalOrigin(origin: string): boolean {
@@ -900,7 +923,7 @@ function isCapturableHost(url: string | undefined): boolean {
     const u = new URL(url);
     if (!/^https?:$/.test(u.protocol)) return false;
     const h = u.hostname;
-    if (h === 'xgen.x2bee.com' || h.startsWith('xgen.') || h.endsWith('.xgen.x2bee.com')) return false;
+    if (isXgenHostedHost(h)) return false;
     if (h === 'localhost' || h === '127.0.0.1') return false;
     return true;
   } catch {

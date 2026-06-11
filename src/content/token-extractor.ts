@@ -1,12 +1,20 @@
+function isXgenHostedHost(host: string): boolean {
+  const normalized = host.toLowerCase();
+  return (
+    normalized === 'xgen.x2bee.com' ||
+    normalized.startsWith('xgen.') ||
+    normalized.endsWith('.xgen.x2bee.com') ||
+    /^(?:[a-z0-9-]+-)?xgen(?:-[a-z0-9-]+)?\.x2bee\.com$/.test(normalized)
+  );
+}
+
 function isXgenDomain(): boolean {
   const host = window.location.hostname;
   // XGEN 자체 호스트만 — 다른 x2bee.com 서브도메인(fo.x2bee.com 등 캡처 대상)은 제외.
   // 잘못 넣으면 그 사이트의 origin이 SET_ORIGIN으로 chrome.storage.serverUrl을 덮어써서
   // 모든 API 호출이 그쪽으로 빠짐.
   return (
-    host === 'xgen.x2bee.com' ||
-    host.startsWith('xgen.') ||
-    host.endsWith('.xgen.x2bee.com') ||
+    isXgenHostedHost(host) ||
     host === 'localhost' ||
     host === '127.0.0.1'
   );
