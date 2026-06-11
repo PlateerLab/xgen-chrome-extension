@@ -28,6 +28,12 @@ function sendExtensionMessage(page, message) {
   }), message);
 }
 
+function setExtensionStorage(page, values) {
+  return page.evaluate((payload) => new Promise((resolve) => {
+    chrome.storage.local.set(payload, () => resolve(undefined));
+  }), values);
+}
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -607,6 +613,31 @@ async function pinSidepanelToTarget(extensionPage, targetPage) {
   await wait(300);
 }
 
+async function verifyStoredServerCookieAuth(extensionPage, browserContext, targetPage, url) {
+  const origin = new URL(url).origin;
+  await browserContext.addCookies([{
+    name: 'xgen_access_token',
+    value: 'cookie-token',
+    url: `${origin}/`,
+    httpOnly: true,
+    sameSite: 'Lax',
+  }]);
+  await setExtensionStorage(extensionPage, { serverUrl: origin });
+
+  await targetPage.bringToFront();
+  const config = await sendExtensionMessage(extensionPage, { type: 'GET_CHAT_CONFIG' });
+  assert.equal(
+    config?.serverUrl,
+    origin,
+    `stored localhost serverUrl should be returned without requiring token storage: ${JSON.stringify(config)}`,
+  );
+  assert.equal(
+    config?.authToken,
+    'cookie-token',
+    `GET_CHAT_CONFIG should read httpOnly xgen_access_token cookie: ${JSON.stringify(config)}`,
+  );
+}
+
 async function verifyRelayCommandBridge(extensionPage, targetPage, commandResults) {
   await targetPage.bringToFront();
   const origin = new URL(targetPage.url()).origin;
@@ -838,6 +869,7 @@ async function main() {
     const distractorPage = await context.newPage();
     await distractorPage.goto(`${url}distractor`);
     await verifyPageAgent(extensionPage, targetPage);
+    await verifyStoredServerCookieAuth(extensionPage, context, targetPage, url);
     await verifyRelayCommandBridge(extensionPage, targetPage, commandResults);
     await verifySidepanelChatRelay(extensionPage, targetPage, distractorPage, commandResults, chatRequests);
     await wait(2_200);
@@ -912,6 +944,7 @@ async function main() {
     console.log([
       `PathFinder runtime verification passed: extension loaded (${extensionId})`,
       'PageAgent context and commands verified',
+      'stored server cookie auth verified',
       'page_command relay callback verified',
       'sidepanel chat relay verified',
       'capture result registration verified',

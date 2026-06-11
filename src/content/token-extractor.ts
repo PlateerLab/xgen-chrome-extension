@@ -12,14 +12,31 @@ function isXgenDomain(): boolean {
   );
 }
 
+const TOKEN_STORAGE_KEYS = [
+  'xgen_access_token',
+  'access_token',
+  'accessToken',
+  'token',
+  'jwt',
+];
+
+function readLocalStorageToken(): string | null {
+  for (const key of TOKEN_STORAGE_KEYS) {
+    const value = localStorage.getItem(key);
+    if (value) return value;
+  }
+  return null;
+}
+
 export function extractAndSendToken(): void {
   // XGEN 도메인에서만 토큰 추출
   if (!isXgenDomain()) return;
 
   const token =
-    localStorage.getItem('xgen_access_token') ??
+    readLocalStorageToken() ??
     document.cookie.match(/(?:^|; )xgen_access_token=([^;]+)/)?.[1] ??
     document.cookie.match(/(?:^|; )access_token=([^;]+)/)?.[1] ??
+    document.cookie.match(/(?:^|; )accessToken=([^;]+)/)?.[1] ??
     null;
 
   if (token) {
@@ -41,7 +58,7 @@ export function watchTokenChanges(): void {
 
   // Also watch for storage changes
   window.addEventListener('storage', (e) => {
-    if (e.key === 'xgen_access_token' && e.newValue) {
+    if (e.key && TOKEN_STORAGE_KEYS.includes(e.key) && e.newValue) {
       chrome.runtime.sendMessage({ type: 'SET_TOKEN', token: e.newValue, origin: window.location.origin }).catch(() => {});
     }
   });
