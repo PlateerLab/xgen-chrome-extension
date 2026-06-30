@@ -4,8 +4,9 @@ function isXgenDomain(): boolean {
   // 잘못 넣으면 그 사이트의 origin이 SET_ORIGIN으로 chrome.storage.serverUrl을 덮어써서
   // 모든 API 호출이 그쪽으로 빠짐.
   return (
-    host === 'xgen.x2bee.com' ||
-    host.startsWith('xgen.') ||
+    // xgen.x2bee.com 및 dev-xgen·stg-xgen 같은 하이픈 prefix 서브도메인
+    /^(?:[a-z0-9-]+-)?xgen\.x2bee\.com$/.test(host) ||
+    host.startsWith('xgen.') ||           // xgen.<host> (예: xgen.jejubank.com)
     host.endsWith('.xgen.x2bee.com') ||
     host === 'localhost' ||
     host === '127.0.0.1'
