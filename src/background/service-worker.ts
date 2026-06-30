@@ -72,9 +72,12 @@ chrome.sidePanel
 /**
  * origin이 XGEN 자체 호스트인지 — 이걸로 SET_ORIGIN/SET_TOKEN/resolver/startup migration 모두 검증.
  * fo.x2bee.com 같은 형제 서브도메인이 storage/메모리/resolver에 끼어들지 못하게 막는 single source of truth.
+ *
+ * 허용: xgen.x2bee.com, dev-xgen·stg-xgen 같은 하이픈 prefix 서브도메인(`(?:[a-z0-9-]+-)?xgen.x2bee.com`),
+ * xgen.<host>(예: xgen.jejubank.com), *.xgen.x2bee.com, localhost. fo.x2bee.com 등 xgen 없는 형제는 차단.
  */
 function isXgenOrigin(origin: string): boolean {
-  return /^https?:\/\/(xgen\.x2bee\.com|xgen\.[^/:]+|[^/:]+\.xgen\.x2bee\.com|localhost(:\d+)?|127\.0\.0\.1(:\d+)?)(\/|$)/.test(origin);
+  return /^https?:\/\/((?:[a-z0-9-]+-)?xgen\.x2bee\.com|xgen\.[^/:]+|[^/:]+\.xgen\.x2bee\.com|localhost(:\d+)?|127\.0\.0\.1(:\d+)?)(\/|$)/.test(origin);
 }
 
 // ── Startup: migrate stale storage from earlier buggy versions ──
