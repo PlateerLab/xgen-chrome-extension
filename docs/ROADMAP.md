@@ -17,9 +17,10 @@
 
 - [x] `feature/pathfinder-verification-and-stability`에서 build/trace/runtime 검증 구성
 - [x] dev/stg 및 prefix/suffix 형태 XGEN origin 인식
+- [x] 기존 PR #1의 `service-worker`/`token-extractor` origin 수정 포함 여부 확인
 - [x] 개발, 검증, XGEN 연동, 고객사 환경 및 보안 문서
 - [x] 기존 `docs/PLAN.md`를 historical 문서로 표시
-- [ ] feature 전체를 `main`으로 반영하는 통합 PR
+- [x] feature 전체를 `main`으로 반영하는 통합 PR #19 생성
 - [ ] `main` 머지 후 깨끗한 checkout에서 전체 검증
 
 완료 gate:
@@ -42,7 +43,7 @@ npm run verify:pathfinder
 - [x] extension client와 runtime mock의 XGEN endpoint 계약 검사
 - [x] 실제 XGEN dev T2 smoke를 opt-in script로 분리
 - [x] PR workflow에서 secret을 참조하지 않도록 분리
-- [ ] main 대상 통합 PR에서 T0/T1 green 확인
+- [x] main 대상 통합 PR #19에서 T0/T1 green 확인
 
 완료 gate:
 
