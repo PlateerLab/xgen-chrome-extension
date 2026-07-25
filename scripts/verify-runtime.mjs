@@ -259,7 +259,7 @@ function startFixtureServer() {
       return;
     }
 
-    const mergeMatch = req.url?.match(/^\/api\/tools\/api-collections\/([^/]+)\/from-trace\/merge$/);
+    const mergeMatch = req.url?.match(/^\/api\/tools\/api-collections\/([^/]+)\/from-trace$/);
     if (req.method === 'POST' && mergeMatch) {
       const collectionId = decodeURIComponent(mergeMatch[1]);
       let rawBody = '';

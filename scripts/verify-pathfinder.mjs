@@ -119,6 +119,7 @@ async function loadApiClient() {
   const mod = await import(pathToFileURL(path.join(tmpDir, 'api.mjs')).href);
   return {
     createCollectionFromTrace: mod.createCollectionFromTrace,
+    mergeCollectionFromTrace: mod.mergeCollectionFromTrace,
     cleanup: () => rm(tmpDir, { recursive: true, force: true }),
   };
 }
@@ -478,7 +479,7 @@ async function withMockFetch(handler, fn) {
   }
 }
 
-async function testCreateCollectionFromTrace(createCollectionFromTrace) {
+async function testCollectionFromTraceApi(createCollectionFromTrace, mergeCollectionFromTrace) {
   const payload = {
     host: 'bo.x2bee.com',
     authProfileId: 'bo_x2bee_com',
@@ -537,6 +538,25 @@ async function testCreateCollectionFromTrace(createCollectionFromTrace) {
       /Collection create failed: 500 broken/,
     );
   });
+
+  await withMockFetch(async () => new Response(JSON.stringify({
+    collection_id: 'bo_x2bee_com',
+    tool_count: 1,
+  }), { status: 200, headers: { 'content-type': 'application/json' } }), async (calls) => {
+    const result = await mergeCollectionFromTrace(
+      'https://xgen.x2bee.com',
+      'token-123',
+      'bo/x2bee',
+      payload,
+    );
+    assert.equal(result.status, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(
+      calls[0].url,
+      'https://xgen.x2bee.com/api/tools/api-collections/bo%2Fx2bee/from-trace',
+    );
+    assert.equal(calls[0].init.method, 'POST');
+  });
 }
 
 async function main() {
@@ -545,7 +565,11 @@ async function main() {
     buildTraceRegistrationPayload,
     cleanup: cleanupRegistration,
   } = await loadTraceRegistration();
-  const { createCollectionFromTrace, cleanup: cleanupApi } = await loadApiClient();
+  const {
+    createCollectionFromTrace,
+    mergeCollectionFromTrace,
+    cleanup: cleanupApi,
+  } = await loadApiClient();
   try {
     testTraceFiltering(analyzeTrace);
     testAnalyticsHeavyCaptureKeepsPrimaryApiHost(analyzeTrace);
@@ -557,7 +581,7 @@ async function main() {
     testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayload);
     testTraceRegistrationPayloadHardening(analyzeTrace, buildTraceRegistrationPayload);
     testTraceRegistrationPayloadCaps(buildTraceRegistrationPayload);
-    await testCreateCollectionFromTrace(createCollectionFromTrace);
+    await testCollectionFromTraceApi(createCollectionFromTrace, mergeCollectionFromTrace);
   } finally {
     await cleanup();
     await cleanupRegistration();

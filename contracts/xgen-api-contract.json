@@ -70,14 +70,14 @@
     {
       "id": "collection_from_trace_merge",
       "method": "POST",
-      "path": "/api/tools/api-collections/{collectionId}/from-trace/merge",
+      "path": "/api/tools/api-collections/{collectionId}/from-trace",
       "client": {
         "file": "src/shared/api.ts",
-        "needle": "/api/tools/api-collections/${encodedCollectionId}/from-trace/merge"
+        "needle": "/api/tools/api-collections/${encodedCollectionId}/from-trace"
       },
       "runtimeMock": {
         "file": "scripts/verify-runtime.mjs",
-        "needle": "/from-trace\\/merge$/"
+        "needle": "/from-trace$/"
       },
       "devProbe": false
     }

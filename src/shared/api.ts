@@ -253,7 +253,7 @@ export async function mergeCollectionFromTrace(
   payload: FromTraceRequest,
 ): Promise<FromTraceSuccess> {
   const encodedCollectionId = encodeURIComponent(collectionId);
-  const url = `${serverUrl}/api/tools/api-collections/${encodedCollectionId}/from-trace/merge`;
+  const url = `${serverUrl}/api/tools/api-collections/${encodedCollectionId}/from-trace`;
   const response = await fetch(url, {
     method: 'POST',
     headers: {

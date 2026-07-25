@@ -17,7 +17,7 @@
 | `GET /api/pathfinder/resolve` | URL 기반 Collection/실행 컨텍스트 해석 |
 | `POST /api/pathfinder/greet` | 외부 페이지 진입 컨텍스트 생성 |
 | `POST /api/tools/api-collections/from-trace` | 캡처 결과로 Collection 생성 |
-| `POST /api/tools/api-collections/{id}/from-trace/merge` | 기존 Collection과 trace 병합 |
+| `POST /api/tools/api-collections/{id}/from-trace` | 기존 Collection과 trace 병합 |
 | `POST /api/tools/api-collections/{id}/run` | Collection tool 실행 |
 | `/api/session-station/v1/auth-profiles` | 대상 host 인증 profile 조회/생성 |
 
