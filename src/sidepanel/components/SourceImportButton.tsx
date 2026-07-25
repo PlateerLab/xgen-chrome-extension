@@ -8,6 +8,7 @@ interface Props {
   targetTabId?: number | null;
   disabled?: boolean;
   onOpenApiRequested: () => void;
+  onGraphQLRequested: () => void;
   onManualRequested: () => void;
   onPostmanRequested: () => void;
   onImported: (result: SessionResult) => void;
@@ -18,6 +19,7 @@ export function SourceImportButton({
   targetTabId,
   disabled = false,
   onOpenApiRequested,
+  onGraphQLRequested,
   onManualRequested,
   onPostmanRequested,
   onImported,
@@ -108,6 +110,19 @@ export function SourceImportButton({
             OpenAPI
             <span className="mt-0.5 block text-[9px] text-gray-400">
               URL 또는 JSON/YAML 파일
+            </span>
+          </button>
+          <button
+            type="button"
+            className="block w-full rounded px-2 py-1.5 text-left text-[11px] text-gray-700 hover:bg-gray-50"
+            onClick={() => {
+              setMenuOpen(false);
+              onGraphQLRequested();
+            }}
+          >
+            GraphQL Introspection
+            <span className="mt-0.5 block text-[9px] text-gray-400">
+              schema JSON과 실행 endpoint
             </span>
           </button>
           <button

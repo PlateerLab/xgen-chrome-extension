@@ -115,7 +115,7 @@
       "path": "/api/tools/api-collections/preview",
       "client": {
         "file": "src/shared/api.ts",
-        "needle": "function previewOpenApiSource("
+        "needle": "function previewCollectionSource("
       },
       "runtimeMock": {
         "file": "scripts/verify-runtime.mjs",
@@ -129,7 +129,7 @@
       "path": "/api/tools/api-collections/{collectionId}/sources",
       "client": {
         "file": "src/shared/api.ts",
-        "needle": "function addOpenApiSource("
+        "needle": "function addCollectionSource("
       },
       "runtimeMock": {
         "file": "scripts/verify-runtime.mjs",

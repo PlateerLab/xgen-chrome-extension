@@ -121,9 +121,9 @@ npm run verify:pathfinder
 
 - [x] privacy-safe HAR 1.2 import
 - [x] OpenAPI/Swagger URL 및 JSON/YAML file import
-- [ ] GraphQL introspection
+- [x] GraphQL introspection file, endpoint, preview 및 Collection source 등록
 - [x] privacy-safe Postman Collection v2.0/v2.1 import
-- [ ] MCP tool catalog
+- [x] MCP Station session catalog preview 및 Collection source 등록
 - [x] 수동 contract 작성, 수정, preview 및 Collection 등록 UI
 
 모든 importer가 만들어야 하는 공통 결과:

@@ -429,9 +429,13 @@ function startFixtureServer() {
     if (req.method === 'POST' && req.url === '/api/tools/api-collections/preview') {
       readJsonRequest(req, (body) => {
         sourcePreviewRequests.push({ headers: req.headers, body });
+        const adapter = body.format_hint === 'graphql-introspection'
+          ? 'graphql-introspection'
+          : 'openapi';
+        const toolCount = adapter === 'graphql-introspection' ? 3 : 2;
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
-          incoming_tool_count: 2,
+          incoming_tool_count: toolCount,
           conflicts: body.target_collection_id ? ['listItems'] : [],
           edges_before: body.target_collection_id ? 1 : 0,
           edges_after: body.target_collection_id ? 3 : 2,
@@ -440,7 +444,7 @@ function startFixtureServer() {
           spec_hash: 'fixture-openapi-hash',
           ingest_stats: { inserted: 2 },
           ingest_result: {
-            adapter: 'openapi',
+            adapter,
             ready: true,
             issues: [],
             capabilities: {
@@ -454,7 +458,7 @@ function startFixtureServer() {
             summary: {
               readiness_score: 95,
               status: 'ready',
-              tool_count: 2,
+              tool_count: toolCount,
             },
             issues: [],
           },
@@ -504,10 +508,12 @@ function startFixtureServer() {
         res.end(JSON.stringify({
           collection_id: collectionId,
           name: 'Fixture OpenAPI Collection',
-          tool_count: 2,
+          tool_count: body.format_hint === 'graphql-introspection' ? 3 : 2,
           source_count: 1,
           ingest_result: {
-            adapter: 'openapi',
+            adapter: body.format_hint === 'graphql-introspection'
+              ? 'graphql-introspection'
+              : 'openapi',
             ready: true,
           },
         }));
@@ -1365,6 +1371,17 @@ async function openOpenApiImport(extensionPage, targetPage) {
   await extensionPage.getByTestId('openapi-import-panel').waitFor();
 }
 
+async function openGraphQLImport(extensionPage, targetPage) {
+  await clickSidepanelButton(
+    extensionPage,
+    targetPage,
+    'Open source import menu',
+    /소스 가져오기/,
+  );
+  await extensionPage.getByRole('button', { name: /GraphQL Introspection/ }).click();
+  await extensionPage.getByTestId('graphql-import-panel').waitFor();
+}
+
 async function openManualToolContract(extensionPage, targetPage) {
   await clickSidepanelButton(
     extensionPage,
@@ -1863,6 +1880,117 @@ paths:
   await panel.waitFor({ state: 'detached' });
 }
 
+async function verifyGraphQLImportUi(
+  extensionPage,
+  targetPage,
+  collectionCreateRequests,
+  sourcePreviewRequests,
+  sourceAddRequests,
+) {
+  await openGraphQLImport(extensionPage, targetPage);
+  const sourcePanel = extensionPage.getByTestId('graphql-import-panel');
+  const endpoint = 'https://graphql.customer.test/v1/graphql';
+  await sourcePanel.getByTestId('graphql-endpoint-input').fill(endpoint);
+  await sourcePanel.getByTestId('graphql-file-input').setInputFiles({
+    name: 'graphql-introspection.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify({
+      data: {
+        __schema: {
+          queryType: { name: 'Query' },
+          mutationType: { name: 'Mutation' },
+          subscriptionType: { name: 'Subscription' },
+          types: [
+            {
+              kind: 'OBJECT',
+              name: 'Query',
+              fields: [
+                { name: 'order', args: [], type: { kind: 'OBJECT', name: 'Order' } },
+                { name: 'orders', args: [], type: { kind: 'LIST', ofType: { name: 'Order' } } },
+              ],
+            },
+            {
+              kind: 'OBJECT',
+              name: 'Mutation',
+              fields: [{
+                name: 'createOrder',
+                args: [{ name: 'input', type: { kind: 'INPUT_OBJECT', name: 'OrderInput' } }],
+                type: { kind: 'OBJECT', name: 'Order' },
+              }],
+            },
+            {
+              kind: 'OBJECT',
+              name: 'Subscription',
+              fields: [{ name: 'orderUpdated', args: [] }],
+            },
+            { kind: 'OBJECT', name: 'Order', fields: [{ name: 'id', args: [] }] },
+            {
+              kind: 'INPUT_OBJECT',
+              name: 'OrderInput',
+              inputFields: [{ name: 'sku', type: { kind: 'SCALAR', name: 'String' } }],
+            },
+          ],
+        },
+      },
+      errors: [{
+        message: 'Bearer graphql-runtime-secret',
+        extensions: {
+          token: 'graphql-token-must-not-persist',
+          email: 'customer@example.com',
+        },
+      }],
+    })),
+  });
+
+  const panel = extensionPage.getByTestId('openapi-import-panel');
+  await panel.getByText('GraphQL Introspection 등록').waitFor();
+  await panel.getByText(/query 2개 · mutation 1개/).waitFor();
+  await panel.getByText(/subscription은 streaming adapter가 없어/).waitFor();
+
+  await panel.getByRole('button', { name: '미리보기' }).click();
+  await panel.getByText(/adapter graphql-introspection/).waitFor();
+  const preview = await waitForItem(
+    sourcePreviewRequests,
+    (entry) => entry.body?.format_hint === 'graphql-introspection',
+    'GraphQL introspection preview request',
+  );
+  assert.equal(preview.body.endpoint_url, endpoint);
+  assert.deepEqual(
+    preview.body.required_capabilities,
+    ['input_schema', 'output_schema'],
+  );
+  assert.equal(preview.body.spec?.data?.__schema?.queryType?.name, 'Query');
+  assert.equal(preview.body.spec?.errors?.length, 1);
+  const previewPayload = JSON.stringify(preview.body);
+  assert.ok(!previewPayload.includes('graphql-runtime-secret'));
+  assert.ok(!previewPayload.includes('graphql-token-must-not-persist'));
+  assert.ok(!previewPayload.includes('customer@example.com'));
+
+  await panel.getByRole('button', { name: 'Collection에 등록' }).click();
+  await panel.getByText(/Collection 등록 완료: graphql-customer-test/).waitFor();
+  const created = await waitForItem(
+    collectionCreateRequests,
+    (entry) => entry.body?.collection_id === 'graphql-customer-test',
+    'GraphQL Collection create request',
+  );
+  assert.equal(created.body.name, 'graphql.customer.test GraphQL');
+  assert.equal(created.body.base_url, 'https://graphql.customer.test');
+  assert.deepEqual(created.body.domain_patterns, ['graphql.customer.test']);
+  assert.deepEqual(created.body.tags, ['pathfinder', 'graphql']);
+
+  const source = await waitForItem(
+    sourceAddRequests,
+    (entry) => entry.collectionId === 'graphql-customer-test',
+    'GraphQL introspection source add request',
+  );
+  assert.equal(source.body.format_hint, 'graphql-introspection');
+  assert.equal(source.body.endpoint_url, endpoint);
+  assert.equal(source.body.auto_enrich, false);
+  assert.ok(!JSON.stringify(source.body).includes('graphql-runtime-secret'));
+  await panel.getByRole('button', { name: '닫기' }).click();
+  await panel.waitFor({ state: 'detached' });
+}
+
 async function verifyDevXgenOriginDetection(extensionPage, browserContext) {
   await browserContext.route('https://dev-xgen.x2bee.com/**', async (route) => {
     await route.fulfill({
@@ -2250,6 +2378,13 @@ async function main() {
       collectionDeleteRequests,
       sourceAddMode,
     );
+    await verifyGraphQLImportUi(
+      extensionPage,
+      targetPage,
+      collectionCreateRequests,
+      sourcePreviewRequests,
+      sourceAddRequests,
+    );
     await verifyManualToolContractUi(
       extensionPage,
       targetPage,
@@ -2407,6 +2542,7 @@ async function main() {
       'page_command relay callback verified',
       'sidepanel chat relay verified',
       'OpenAPI URL/YAML import and rollback verified',
+      'GraphQL introspection preview and registration verified',
       'manual tool contract preview and registration verified',
       'privacy-safe Postman Collection import verified',
       'MCP Station source preview and registration verified',

@@ -9,6 +9,7 @@ import { useElementPicker, PickerResultPanel } from './components/ElementPickerB
 import { SessionResultPanel } from './components/SessionResultPanel';
 import { SourceImportButton } from './components/SourceImportButton';
 import { OpenApiImportPanel } from './components/OpenApiImportPanel';
+import { GraphQLImportPanel } from './components/GraphQLImportPanel';
 import { ManualToolContractPanel } from './components/ManualToolContractPanel';
 import { PostmanImportPanel } from './components/PostmanImportPanel';
 import { MenuDrawer } from './components/MenuDrawer';
@@ -40,6 +41,7 @@ export function App() {
   const [importedResult, setImportedResult] = useState<SessionResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [openApiImportOpen, setOpenApiImportOpen] = useState(false);
+  const [graphQLImportOpen, setGraphQLImportOpen] = useState(false);
   const [manualToolOpen, setManualToolOpen] = useState(false);
   const [postmanImportOpen, setPostmanImportOpen] = useState(false);
   const [authCapturing, setAuthCapturing] = useState(false);
@@ -233,6 +235,7 @@ export function App() {
               captureSession.active
               || captureSession.pending
               || openApiImportOpen
+              || graphQLImportOpen
               || manualToolOpen
               || postmanImportOpen
             }
@@ -240,15 +243,26 @@ export function App() {
               setImportedResult(null);
               captureSession.dismissResult();
               setImportError(null);
+              setGraphQLImportOpen(false);
               setManualToolOpen(false);
               setPostmanImportOpen(false);
               setOpenApiImportOpen(true);
+            }}
+            onGraphQLRequested={() => {
+              setImportedResult(null);
+              captureSession.dismissResult();
+              setImportError(null);
+              setOpenApiImportOpen(false);
+              setManualToolOpen(false);
+              setPostmanImportOpen(false);
+              setGraphQLImportOpen(true);
             }}
             onManualRequested={() => {
               setImportedResult(null);
               captureSession.dismissResult();
               setImportError(null);
               setOpenApiImportOpen(false);
+              setGraphQLImportOpen(false);
               setPostmanImportOpen(false);
               setManualToolOpen(true);
             }}
@@ -257,12 +271,14 @@ export function App() {
               captureSession.dismissResult();
               setImportError(null);
               setOpenApiImportOpen(false);
+              setGraphQLImportOpen(false);
               setManualToolOpen(false);
               setPostmanImportOpen(true);
             }}
             onImported={(result) => {
               setImportError(null);
               setOpenApiImportOpen(false);
+              setGraphQLImportOpen(false);
               setManualToolOpen(false);
               setPostmanImportOpen(false);
               captureSession.dismissResult();
@@ -336,6 +352,12 @@ export function App() {
         <OpenApiImportPanel
           targetTabId={targetTabId}
           onDismiss={() => setOpenApiImportOpen(false)}
+        />
+      )}
+      {graphQLImportOpen && (
+        <GraphQLImportPanel
+          targetTabId={targetTabId}
+          onDismiss={() => setGraphQLImportOpen(false)}
         />
       )}
       {manualToolOpen && (

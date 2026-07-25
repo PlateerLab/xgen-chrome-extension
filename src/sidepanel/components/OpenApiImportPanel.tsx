@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  addCollectionSource,
   addOpenApiSource,
   createApiCollection,
   deleteApiCollection,
   listApiCollections,
+  previewCollectionSource,
   previewOpenApiSource,
   type ApiCollectionSummary,
   type OpenApiPreviewResult,
@@ -23,6 +25,12 @@ interface Props {
   heading?: string;
   onEditSource?: () => void;
   sourceWarnings?: string[];
+  formatHint?: string;
+  endpointUrl?: string;
+  requiredCapabilities?: string[];
+  collectionTags?: string[];
+  collectionDescription?: string;
+  sourceKindLabel?: string;
 }
 
 interface XgenConfig {
@@ -67,6 +75,12 @@ export function OpenApiImportPanel({
   heading = 'OpenAPI 가져오기',
   onEditSource,
   sourceWarnings = [],
+  formatHint = 'openapi',
+  endpointUrl,
+  requiredCapabilities = ['input_schema', 'output_schema'],
+  collectionTags = ['pathfinder', 'openapi'],
+  collectionDescription = 'Pathfinder OpenAPI import',
+  sourceKindLabel = 'OpenAPI',
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const sourceLocked = Boolean(initialSource);
@@ -140,15 +154,28 @@ export function OpenApiImportPanel({
     try {
       const source = await prepareCurrentSource();
       const config = await getXgenConfig(targetTabId);
-      const result = await previewOpenApiSource(
-        config.serverUrl,
-        config.authToken,
-        source,
-        {
-          targetCollectionId: currentTargetId,
-          label: sourceLabel || 'openapi',
-        },
-      );
+      const options = {
+        targetCollectionId: currentTargetId,
+        label: sourceLabel || formatHint,
+      };
+      const result = formatHint === 'openapi'
+        ? await previewOpenApiSource(
+          config.serverUrl,
+          config.authToken,
+          source,
+          options,
+        )
+        : await previewCollectionSource(
+          config.serverUrl,
+          config.authToken,
+          {
+            ...source,
+            formatHint,
+            endpointUrl,
+            requiredCapabilities,
+          },
+          options,
+        );
       setPreview(result);
     } catch (previewError) {
       setPreview(null);
@@ -193,24 +220,38 @@ export function OpenApiImportPanel({
         await createApiCollection(config.serverUrl, config.authToken, {
           collectionId: targetId,
           name: collectionName.trim(),
-          description: 'Pathfinder OpenAPI import',
+          description: collectionDescription,
           baseUrl: source.baseUrl,
           authProfileId,
           domainPatterns: source.host ? [source.host] : [],
+          tags: collectionTags,
         });
         created = true;
       }
 
       try {
-        const result = await addOpenApiSource(
-          config.serverUrl,
-          config.authToken,
-          targetId,
-          {
-            ...source,
-            label: sourceLabel.trim(),
-          },
-        );
+        const result = formatHint === 'openapi'
+          ? await addOpenApiSource(
+            config.serverUrl,
+            config.authToken,
+            targetId,
+            {
+              ...source,
+              label: sourceLabel.trim(),
+            },
+          )
+          : await addCollectionSource(
+            config.serverUrl,
+            config.authToken,
+            targetId,
+            {
+              ...source,
+              label: sourceLabel.trim(),
+              formatHint,
+              endpointUrl,
+              requiredCapabilities,
+            },
+          );
         setSuccess({
           collectionId: targetId,
           toolCount: Number(result.tool_count ?? preview?.incoming_tool_count ?? 0),
@@ -503,8 +544,8 @@ export function OpenApiImportPanel({
       <div className="flex items-center justify-between">
         <span className="text-[9px] text-gray-400">
           {sourceLocked
-            ? '수동 contract도 XGEN의 동일한 OpenAPI parser와 품질 게이트를 사용합니다.'
-            : '미리보기와 등록은 XGEN의 동일한 OpenAPI parser를 사용합니다.'}
+            ? `${sourceKindLabel} contract도 XGEN의 동일한 adapter와 품질 게이트를 사용합니다.`
+            : `미리보기와 등록은 XGEN의 동일한 ${sourceKindLabel} adapter를 사용합니다.`}
         </span>
         <button
           type="button"

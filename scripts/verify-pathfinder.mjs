@@ -253,6 +253,54 @@ async function loadPostmanImporter() {
   };
 }
 
+async function loadGraphQLIntrospectionImporter() {
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-graphql-'));
+  const registrationSourcePath = path.join(
+    repoRoot,
+    'src/sidepanel/lib/trace-registration.ts',
+  );
+  const sourcePath = path.join(
+    repoRoot,
+    'src/sidepanel/lib/graphql-introspection.ts',
+  );
+  const compilerOptions = {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2022,
+    verbatimModuleSyntax: true,
+  };
+  const registration = ts.transpileModule(
+    await readFile(registrationSourcePath, 'utf8'),
+    { compilerOptions, fileName: registrationSourcePath },
+  );
+  const compiled = ts.transpileModule(
+    await readFile(sourcePath, 'utf8'),
+    {
+      compilerOptions,
+      fileName: sourcePath,
+    },
+  );
+  await writeFile(
+    path.join(tmpDir, 'trace-registration.mjs'),
+    registration.outputText,
+    'utf8',
+  );
+  const outputPath = path.join(tmpDir, 'graphql-introspection.mjs');
+  await writeFile(
+    outputPath,
+    compiled.outputText.replace(
+      /from ['"]\.\/trace-registration['"]/g,
+      "from './trace-registration.mjs'",
+    ),
+    'utf8',
+  );
+  const mod = await import(pathToFileURL(outputPath).href);
+  return {
+    normalizeGraphQLEndpoint: mod.normalizeGraphQLEndpoint,
+    prepareGraphQLIntrospection: mod.prepareGraphQLIntrospection,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
 async function loadApiClient() {
   const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-api-'));
 
@@ -287,8 +335,10 @@ async function loadApiClient() {
     mergeCollectionFromTrace: mod.mergeCollectionFromTrace,
     listApiCollections: mod.listApiCollections,
     previewOpenApiSource: mod.previewOpenApiSource,
+    previewCollectionSource: mod.previewCollectionSource,
     createApiCollection: mod.createApiCollection,
     addOpenApiSource: mod.addOpenApiSource,
+    addCollectionSource: mod.addCollectionSource,
     deleteApiCollection: mod.deleteApiCollection,
     cleanup: () => rm(tmpDir, { recursive: true, force: true }),
   };
@@ -1564,6 +1614,92 @@ async function withMockFetch(handler, fn) {
   }
 }
 
+function testGraphQLIntrospectionImport({
+  normalizeGraphQLEndpoint,
+  prepareGraphQLIntrospection,
+}) {
+  const imported = prepareGraphQLIntrospection({
+    data: {
+      __schema: {
+        queryType: { name: 'Query' },
+        mutationType: { name: 'Mutation' },
+        subscriptionType: { name: 'Subscription' },
+        types: [
+          {
+            kind: 'OBJECT',
+            name: 'Query',
+            fields: [
+              { name: 'order', args: [] },
+              { name: 'orders', args: [] },
+            ],
+          },
+          {
+            kind: 'OBJECT',
+            name: 'Mutation',
+            fields: [{ name: 'createOrder', args: [] }],
+          },
+          {
+            kind: 'OBJECT',
+            name: 'Subscription',
+            fields: [{ name: 'orderUpdated', args: [] }],
+          },
+        ],
+      },
+    },
+    errors: [{
+      message: 'Bearer graphql-secret-must-not-persist',
+      extensions: {
+        token: 'graphql-token-must-not-persist',
+        email: 'customer@example.com',
+      },
+    }],
+  }, 'https://graphql.customer.test/v1/graphql', 'schema.json');
+
+  assert.equal(imported.endpointUrl, 'https://graphql.customer.test/v1/graphql');
+  assert.equal(imported.baseUrl, 'https://graphql.customer.test');
+  assert.equal(imported.host, 'graphql.customer.test');
+  assert.equal(imported.sourceName, 'schema.json');
+  assert.deepEqual(imported.summary, {
+    queryCount: 2,
+    mutationCount: 1,
+    subscriptionCount: 1,
+    typeCount: 3,
+    omittedErrorCount: 1,
+  });
+  assert.equal(imported.spec.data.__schema.queryType.name, 'Query');
+  const serialized = JSON.stringify(imported);
+  assert.ok(!serialized.includes('graphql-secret-must-not-persist'));
+  assert.ok(!serialized.includes('graphql-token-must-not-persist'));
+  assert.ok(!serialized.includes('customer@example.com'));
+  assert.match(serialized, /error details omitted/i);
+
+  const rootSchema = prepareGraphQLIntrospection({
+    __schema: {
+      queryType: { name: 'Query' },
+      types: [{ kind: 'OBJECT', name: 'Query', fields: [{ name: 'health' }] }],
+    },
+  }, 'http://localhost:4000/graphql');
+  assert.equal(rootSchema.summary.queryCount, 1);
+
+  assert.throws(
+    () => normalizeGraphQLEndpoint(
+      'https://graphql.customer.test/graphql?access_token=secret',
+    ),
+    /인증값/,
+  );
+  assert.throws(
+    () => normalizeGraphQLEndpoint('file:///tmp/schema.json'),
+    /HTTP 또는 HTTPS/,
+  );
+  assert.throws(
+    () => prepareGraphQLIntrospection(
+      { data: { notSchema: {} } },
+      'https://graphql.customer.test/graphql',
+    ),
+    /표준 GraphQL introspection/,
+  );
+}
+
 async function testCollectionFromTraceApi(createCollectionFromTrace, mergeCollectionFromTrace) {
   const payload = {
     host: 'bo.x2bee.com',
@@ -1770,6 +1906,80 @@ async function testOpenApiCollectionApi({
   );
 }
 
+async function testGenericCollectionSourceApi({
+  previewCollectionSource,
+  addCollectionSource,
+}) {
+  const observed = [];
+  await withMockFetch(async (url, init) => {
+    observed.push({
+      url: String(url),
+      body: JSON.parse(String(init.body)),
+      headers: init.headers,
+    });
+    return new Response(JSON.stringify({
+      incoming_tool_count: 2,
+      conflicts: [],
+      edges_before: 0,
+      edges_after: 0,
+      edges_added: 0,
+      existing_total: 0,
+      spec_hash: 'graphql-hash',
+      ingest_stats: {},
+      ingest_result: {
+        adapter: 'graphql-introspection',
+        ready: true,
+        issues: [],
+      },
+      ingest_supported: true,
+      readiness_report: null,
+      tool_count: 2,
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }, async () => {
+    const source = {
+      spec: { data: { __schema: { types: [] } } },
+      formatHint: 'graphql-introspection',
+      endpointUrl: 'https://api.example/graphql',
+      requiredCapabilities: ['input_schema', 'output_schema'],
+    };
+    await previewCollectionSource(
+      'https://xgen.example',
+      'auth-value',
+      source,
+      { targetCollectionId: 'existing', label: 'graphql' },
+    );
+    await addCollectionSource(
+      'https://xgen.example',
+      'auth-value',
+      'graphql/catalog',
+      { ...source, label: 'graphql' },
+    );
+  });
+
+  assert.equal(observed.length, 2);
+  assert.equal(
+    observed[0].url,
+    'https://xgen.example/api/tools/api-collections/preview',
+  );
+  assert.equal(observed[0].headers.Authorization, 'Bearer auth-value');
+  assert.equal(observed[0].body.format_hint, 'graphql-introspection');
+  assert.equal(observed[0].body.endpoint_url, 'https://api.example/graphql');
+  assert.equal(observed[0].body.target_collection_id, 'existing');
+  assert.deepEqual(
+    observed[0].body.required_capabilities,
+    ['input_schema', 'output_schema'],
+  );
+  assert.equal(
+    observed[1].url,
+    'https://xgen.example/api/tools/api-collections/graphql%2Fcatalog/sources',
+  );
+  assert.equal(observed[1].body.label, 'graphql');
+  assert.equal(observed[1].body.auto_enrich, false);
+}
+
 async function main() {
   await testManifestPermissionContract();
   const { analyzeTrace, cleanup } = await loadTraceAnalyzer();
@@ -1790,12 +2000,19 @@ async function main() {
     cleanup: cleanupPostmanImporter,
   } = await loadPostmanImporter();
   const {
+    normalizeGraphQLEndpoint,
+    prepareGraphQLIntrospection,
+    cleanup: cleanupGraphQLImporter,
+  } = await loadGraphQLIntrospectionImporter();
+  const {
     createCollectionFromTrace,
     mergeCollectionFromTrace,
     listApiCollections,
     previewOpenApiSource,
+    previewCollectionSource,
     createApiCollection,
     addOpenApiSource,
+    addCollectionSource,
     deleteApiCollection,
     cleanup: cleanupApi,
   } = await loadApiClient();
@@ -1822,6 +2039,10 @@ async function main() {
     testHarImportValidationAndCaps(importHarArchive);
     testManualToolContractBuilder(buildManualToolContractSource);
     testPrivacySafePostmanImport(importPostmanCollection);
+    testGraphQLIntrospectionImport({
+      normalizeGraphQLEndpoint,
+      prepareGraphQLIntrospection,
+    });
     await testCollectionFromTraceApi(createCollectionFromTrace, mergeCollectionFromTrace);
     await testOpenApiCollectionApi({
       listApiCollections,
@@ -1830,12 +2051,17 @@ async function main() {
       addOpenApiSource,
       deleteApiCollection,
     });
+    await testGenericCollectionSourceApi({
+      previewCollectionSource,
+      addCollectionSource,
+    });
   } finally {
     await cleanup();
     await cleanupRegistration();
     await cleanupHarImporter();
     await cleanupManualToolContract();
     await cleanupPostmanImporter();
+    await cleanupGraphQLImporter();
     await cleanupApi();
   }
 

@@ -12,6 +12,7 @@
 | [아키텍처](docs/architecture.md) | 확장 컨텍스트와 API 캡처 흐름 |
 | [메시지 프로토콜](docs/message-protocol.md) | Side Panel, Service Worker, Content Script 계약 |
 | [검증 가이드](docs/verification.md) | Playwright 자동화와 실제 환경 검증 계층 |
+| [GraphQL Introspection 가져오기](docs/graphql-introspection-import.md) | schema JSON과 endpoint 기반 GraphQL tool 등록 |
 | [Postman 가져오기](docs/postman-import.md) | Collection v2.0/v2.1의 schema-only import |
 | [수동 Tool Contract](docs/manual-tool-contract.md) | endpoint와 schema로 단일 API 도구 등록 |
 | [XGEN 연동](docs/xgen-integration.md) | endpoint, 인증 및 Collection 등록 |
@@ -86,6 +87,7 @@ LangGraph `create_react_agent`를 수동 ReAct 루프로 교체하여 전체 제
 ### 10. 범용 API 입력
 - 브라우저 fetch/XHR 캡처와 개인정보 보호형 HAR import
 - OpenAPI/Swagger URL 또는 JSON/YAML 파일 import
+- GraphQL introspection JSON과 실행 endpoint import
 - Postman Collection v2.0/v2.1 schema-only import
 - endpoint, parameter, request/response JSON Schema 기반 수동 Tool Contract
 - 모든 입력은 XGEN API Collection preview와 readiness 검사를 거쳐 등록

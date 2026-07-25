@@ -219,6 +219,12 @@ export interface OpenApiSourceInput {
   spec?: Record<string, unknown>;
 }
 
+export interface CollectionSourceInput extends OpenApiSourceInput {
+  formatHint: string;
+  endpointUrl?: string;
+  requiredCapabilities?: string[];
+}
+
 export interface OpenApiPreviewResult {
   incoming_tool_count: number;
   conflicts: string[];
@@ -261,6 +267,7 @@ export interface CreateApiCollectionInput {
   baseUrl?: string;
   authProfileId?: string;
   domainPatterns?: string[];
+  tags?: string[];
 }
 
 export interface AddOpenApiSourceInput extends OpenApiSourceInput {
@@ -331,6 +338,16 @@ function openApiSourceBody(source: OpenApiSourceInput): Record<string, unknown> 
     ...(source.spec ? { spec: source.spec } : {}),
     format_hint: 'openapi',
     required_capabilities: ['input_schema', 'output_schema'],
+  };
+}
+
+function collectionSourceBody(source: CollectionSourceInput): Record<string, unknown> {
+  return {
+    ...(source.sourceUrl ? { source_url: source.sourceUrl } : {}),
+    ...(source.spec ? { spec: source.spec } : {}),
+    ...(source.endpointUrl ? { endpoint_url: source.endpointUrl } : {}),
+    format_hint: source.formatHint,
+    required_capabilities: source.requiredCapabilities ?? [],
   };
 }
 
@@ -431,6 +448,28 @@ export async function previewOpenApiSource(
   return response.json();
 }
 
+export async function previewCollectionSource(
+  serverUrl: string,
+  token: string,
+  source: CollectionSourceInput,
+  options: { targetCollectionId?: string; label?: string } = {},
+): Promise<OpenApiPreviewResult> {
+  const response = await fetch(`${serverUrl}/api/tools/api-collections/preview`, {
+    method: 'POST',
+    headers: authenticatedJsonHeaders(token),
+    body: JSON.stringify({
+      ...collectionSourceBody(source),
+      ...(options.targetCollectionId
+        ? { target_collection_id: options.targetCollectionId }
+        : {}),
+      label: options.label || 'preview',
+      on_conflict: 'prefix',
+    }),
+  });
+  if (!response.ok) throw await apiError(response, 'Collection source 미리보기 실패');
+  return response.json();
+}
+
 export async function createApiCollection(
   serverUrl: string,
   token: string,
@@ -443,7 +482,7 @@ export async function createApiCollection(
       collection_id: input.collectionId,
       name: input.name,
       description: input.description || '',
-      tags: ['pathfinder', 'openapi'],
+      tags: input.tags ?? ['pathfinder', 'openapi'],
       base_url: input.baseUrl || '',
       ...(input.authProfileId ? { auth_profile_id: input.authProfileId } : {}),
       visibility: 'private',
@@ -474,6 +513,29 @@ export async function addOpenApiSource(
     },
   );
   if (!response.ok) throw await apiError(response, 'OpenAPI source 등록 실패');
+  return response.json();
+}
+
+export async function addCollectionSource(
+  serverUrl: string,
+  token: string,
+  collectionId: string,
+  input: CollectionSourceInput & { label: string },
+): Promise<Record<string, unknown>> {
+  const response = await fetch(
+    `${serverUrl}/api/tools/api-collections/${encodeURIComponent(collectionId)}/sources`,
+    {
+      method: 'POST',
+      headers: authenticatedJsonHeaders(token),
+      body: JSON.stringify({
+        ...collectionSourceBody(input),
+        label: input.label,
+        on_conflict: 'prefix',
+        auto_enrich: false,
+      }),
+    },
+  );
+  if (!response.ok) throw await apiError(response, 'Collection source 등록 실패');
   return response.json();
 }
 

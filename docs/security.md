@@ -71,6 +71,12 @@ request/response shape, parameter 이름과 auth 요구사항만 OpenAPI 3.1로
 folder 및 request 표시 이름도 값 패턴 scrub을 거친다. 자세한 지원 범위는
 [Postman 가져오기](postman-import.md)를 따른다.
 
+GraphQL introspection import는 실행 endpoint와 schema JSON을 분리해서 받는다.
+endpoint URL의 userinfo, fragment와 민감 query key를 거부하고, introspection
+응답의 top-level error 원문은 전송 전에 제거한다. 실제 API 인증은 URL이나
+schema에 포함하지 않고 XGEN Collection 인증 프로필에서 해석한다. 자세한 범위는
+[GraphQL Introspection 가져오기](graphql-introspection-import.md)를 따른다.
+
 ## 남는 위험
 
 캡처 세션 중에는 브라우저 요청과 응답 원문이 extension 메모리에 일시적으로 존재한다. 등록 payload를 정제하는 것만으로 캡처 단계의 노출 위험이 없어지는 것은 아니다. 세션 결과는 sidepanel이 소비할 때까지 또는 최대 5분 동안 메모리에 남을 수 있으므로 민감 화면에서는 캡처를 시작하지 않아야 한다.
