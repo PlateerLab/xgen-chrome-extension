@@ -216,9 +216,11 @@ export type ExtensionMessage =
   | { type: 'CAPTURE_SESSION_RESULT'; apis: import('./api-hook-types').CapturedApi[]; tabId: number; durationMs: number }
   /** sidepanel이 stop 이후에 처음 열렸을 때 SW에 캐시된 마지막 결과를 직접 가져오기 위한 query. */
   | { type: 'GET_CAPTURE_RESULT' }
+  | { type: 'CONTENT_SCRIPT_SHUTDOWN'; reason: 'host_permission_revoked' }
+  | { type: 'GET_PERMISSION_READINESS'; url?: string }
   /** 특정 host의 현재 살아있는 쿠키를 SW에서 chrome.cookies API로 읽어 반환.
    *  collection /run 호출 직전에 사용자 브라우저의 fresh 세션을 외부 API에 전달하기 위함. */
-  | { type: 'GET_LIVE_COOKIES'; host: string }
+  | { type: 'GET_LIVE_COOKIES'; host: string; url?: string }
   /** host 도메인에 매칭되는 인증 프로필의 service_id 조회. SessionResultPanel이 collection
    *  등록 시 auth_profile_id를 같이 넘기기 위해 사용. SW의 autoMatchAuthProfile 재사용. */
   | { type: 'LOOKUP_AUTH_PROFILE_FOR_HOST'; host: string; tabId?: number }

@@ -27,10 +27,51 @@ function sendExtensionMessage(page, message) {
   }), message);
 }
 
+function removeExtensionPermissions(page, request) {
+  return page.evaluate(
+    (permissionRequest) => chrome.permissions.remove(permissionRequest),
+    request,
+  );
+}
+
+function containsExtensionPermissions(page, request) {
+  return page.evaluate(
+    (permissionRequest) => chrome.permissions.contains(permissionRequest),
+    request,
+  );
+}
+
+async function grantPersistedExtensionPermissions(
+  userDataDir,
+  extensionId,
+  { permissions = [], origins = [] },
+) {
+  const prefPath = path.join(userDataDir, 'Default', 'Preferences');
+  const preferences = JSON.parse(await readFile(prefPath, 'utf8'));
+  const extension = preferences?.extensions?.settings?.[extensionId];
+  assert.ok(extension, `extension preferences not found for ${extensionId}`);
+
+  for (const key of ['active_permissions', 'granted_permissions']) {
+    assert.ok(extension[key], `${key} not found for ${extensionId}`);
+    extension[key].api = [...new Set([...(extension[key].api || []), ...permissions])];
+    extension[key].explicit_host = [
+      ...new Set([...(extension[key].explicit_host || []), ...origins]),
+    ];
+  }
+  await writeFile(prefPath, JSON.stringify(preferences), 'utf8');
+}
+
 function setExtensionStorage(page, values) {
   return page.evaluate((payload) => new Promise((resolve) => {
     chrome.storage.local.set(payload, () => resolve(undefined));
   }), values);
+}
+
+function getExtensionSessionStorage(page, key) {
+  return page.evaluate(
+    (storageKey) => chrome.storage.session.get(storageKey),
+    key,
+  );
 }
 
 function findTabIdByUrl(page, urlPatternSource) {
@@ -136,6 +177,15 @@ function sendActiveTabMessage(page, message) {
       });
     });
   }), message);
+}
+
+function sendTabMessage(page, tabId, message) {
+  return page.evaluate(({ targetTabId, payload }) => new Promise((resolve) => {
+    chrome.tabs.sendMessage(targetTabId, payload, (response) => {
+      const lastError = chrome.runtime.lastError?.message;
+      resolve(lastError ? { __error: lastError } : response);
+    });
+  }), { targetTabId: tabId, payload: message });
 }
 
 async function waitForPageContext(extensionPage, predicate, label) {
@@ -698,6 +748,28 @@ async function findExtensionIdFromCdp(context, timeoutMs = 5_000) {
   return '';
 }
 
+async function resolveExtensionId(context, userDataDir) {
+  let extensionId = await findExtensionIdFromCdp(context);
+  const serviceWorker = context.serviceWorkers()[0]
+    || await context.waitForEvent('serviceworker', { timeout: 3_000 }).catch(() => null);
+  extensionId ||= serviceWorker ? new URL(serviceWorker.url()).host : '';
+  if (!extensionId) {
+    await wait(1_000);
+    extensionId = await findExtensionIdFromPreferences(userDataDir);
+  }
+  assert.ok(extensionId, 'extension id should be detected from service worker URL or profile');
+  return extensionId;
+}
+
+async function openExtensionPage(context, extensionId) {
+  const extensionPage = await context.newPage();
+  await extensionPage.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
+  const serviceWorker = context.serviceWorkers()[0]
+    || await context.waitForEvent('serviceworker', { timeout: 5_000 }).catch(() => null);
+  assert.ok(serviceWorker, 'extension service worker should start after opening sidepanel page');
+  return extensionPage;
+}
+
 async function runCaptureSession(extensionPage, targetPage, action, label) {
   await targetPage.bringToFront();
   const start = await sendExtensionMessage(extensionPage, { type: 'START_CAPTURE_SESSION' });
@@ -718,6 +790,208 @@ async function runCaptureSession(extensionPage, targetPage, action, label) {
   const consumed = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
   assert.equal(consumed?.result, null, `${label}: consumed capture result should be released`);
   return apis;
+}
+
+async function bootstrapGrantedContentScript(extensionPage, targetPage, url) {
+  const parsed = new URL(url);
+  const tabId = await findTabIdByUrl(
+    extensionPage,
+    `^${parsed.origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+  );
+  assert.ok(tabId, 'granted fixture tab should be discoverable');
+  const start = await sendExtensionMessage(extensionPage, {
+    type: 'START_CAPTURE_SESSION',
+    tabId,
+  });
+  assert.equal(start?.ok, true, `granted content injection failed: ${JSON.stringify(start)}`);
+  const stop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
+  assert.equal(stop?.ok, true, `granted content bootstrap cleanup failed: ${JSON.stringify(stop)}`);
+  await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
+}
+
+async function verifyDeniedOptionalPermissions(extensionPage, targetPage, url) {
+  const parsed = new URL(url);
+  await targetPage.bringToFront();
+  const tabId = await extensionPage.evaluate(() => new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      resolve(tabs[0]?.id || null);
+    });
+  }));
+  assert.ok(tabId, 'denied permission fixture tab should be discoverable');
+
+  assert.equal(
+    await containsExtensionPermissions(
+      extensionPage,
+      { origins: [`${parsed.protocol}//${parsed.hostname}/*`] },
+    ),
+    false,
+    'fixture host permission must not be granted at install time',
+  );
+  assert.equal(
+    await containsExtensionPermissions(extensionPage, { permissions: ['cookies'] }),
+    false,
+    'cookies permission must not be granted at install time',
+  );
+
+  const deniedReadiness = await sendExtensionMessage(extensionPage, {
+    type: 'GET_PERMISSION_READINESS',
+    tabId,
+    url,
+  });
+  assert.equal(deniedReadiness?.ok, true);
+  assert.equal(deniedReadiness?.readiness?.reason, 'host_permission_required');
+
+  const deniedStart = await sendExtensionMessage(extensionPage, {
+    type: 'START_CAPTURE_SESSION',
+    tabId,
+  });
+  assert.equal(deniedStart?.ok, false, 'capture must not start without host permission');
+  assert.match(
+    deniedStart?.reason || deniedStart?.error || '',
+    /host_permission_required|No active tab/,
+  );
+
+  const deniedCookies = await sendExtensionMessage(extensionPage, {
+    type: 'GET_LIVE_COOKIES',
+    host: parsed.hostname,
+    url,
+  });
+  assert.equal(deniedCookies?.ok, false, 'cookie lookup must fail without host permission');
+  assert.equal(deniedCookies?.reason, 'host_permission_required');
+}
+
+async function verifyOptionalPermissionLifecycle(extensionPage, context, targetPage, url) {
+  const parsed = new URL(url);
+  const originPattern = `${parsed.protocol}//${parsed.hostname}/*`;
+  const tabId = await findTabIdByUrl(extensionPage, `^${parsed.origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
+  assert.ok(tabId, 'optional permission fixture tab should be discoverable');
+
+  assert.equal(
+    await containsExtensionPermissions(extensionPage, { origins: [originPattern] }),
+    true,
+    'persisted fixture host permission should be active after browser restart',
+  );
+  assert.equal(
+    await containsExtensionPermissions(extensionPage, { permissions: ['cookies'] }),
+    true,
+    'persisted cookies permission should be active after browser restart',
+  );
+  const hostReadiness = await sendExtensionMessage(extensionPage, {
+    type: 'GET_PERMISSION_READINESS',
+    tabId,
+    url,
+  });
+  assert.equal(hostReadiness?.readiness?.ready, true);
+  assert.equal(hostReadiness?.readiness?.originPattern, originPattern);
+  assert.equal(hostReadiness?.readiness?.cookiePermission, true);
+  await context.addCookies([{
+    name: 'pathfinder_optional_permission',
+    value: 'runtime-secret-must-not-be-logged',
+    url: `${parsed.origin}/`,
+    httpOnly: true,
+    sameSite: 'Lax',
+  }]);
+  const liveCookies = await sendExtensionMessage(extensionPage, {
+    type: 'GET_LIVE_COOKIES',
+    host: parsed.hostname,
+    url,
+  });
+  assert.equal(liveCookies?.ok, true, 'cookie lookup should work after explicit grant');
+  assert.ok(liveCookies?.count >= 1, 'granted cookie lookup should see the fixture cookie');
+
+  const started = await sendExtensionMessage(extensionPage, {
+    type: 'START_CAPTURE_SESSION',
+    tabId,
+  });
+  assert.equal(started?.ok, true, `capture should start after host grant: ${JSON.stringify(started)}`);
+  const trackedBeforeRevoke = await getExtensionSessionStorage(
+    extensionPage,
+    'runtime:content-script-origins',
+  );
+  assert.equal(
+    trackedBeforeRevoke['runtime:content-script-origins']?.[String(tabId)],
+    originPattern,
+    'content-script origin must survive a Service Worker restart in session storage',
+  );
+  await targetPage.evaluate(async () => {
+    const response = await fetch('/api/goods/v1/search?keyword=permission');
+    if (!response.ok) throw new Error(`permission fixture failed: ${response.status}`);
+    await response.json();
+  });
+
+  assert.equal(
+    await removeExtensionPermissions(extensionPage, { origins: [originPattern] }),
+    true,
+    'host permission removal should report a change',
+  );
+  await targetPage.waitForFunction(
+    () => (window).__xgenApiHookActive === false,
+    undefined,
+    { timeout: 5_000 },
+  );
+  const contentAfterRevoke = await sendTabMessage(
+    extensionPage,
+    tabId,
+    { type: 'GET_PAGE_CONTEXT' },
+  );
+  assert.match(
+    contentAfterRevoke?.__error || '',
+    /Receiving end does not exist|Could not establish connection/,
+    'revocation should remove the isolated content-script listener',
+  );
+  await sendExtensionMessage(extensionPage, {
+    type: 'PAGE_COMMAND',
+    action: 'start_api_hook',
+    params: {},
+    tabId,
+  });
+  await wait(200);
+  assert.equal(
+    await targetPage.evaluate(() => (window).__xgenApiHookActive === true),
+    false,
+    'a background command must not reactivate capture after permission revoke',
+  );
+  const stopAfterRevoke = await sendExtensionMessage(extensionPage, {
+    type: 'STOP_CAPTURE_SESSION',
+  });
+  assert.equal(stopAfterRevoke?.ok, false, 'revocation should terminate the active capture');
+  assert.match(stopAfterRevoke?.error || '', /No active session/);
+  const purgedResult = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
+  assert.equal(purgedResult?.result, null, 'revocation must purge cached capture payloads');
+  let trackedAfterRevoke;
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    trackedAfterRevoke = await getExtensionSessionStorage(
+      extensionPage,
+      'runtime:content-script-origins',
+    );
+    if (!trackedAfterRevoke['runtime:content-script-origins']?.[String(tabId)]) break;
+    await wait(100);
+  }
+  assert.ok(
+    !trackedAfterRevoke?.['runtime:content-script-origins']?.[String(tabId)],
+    'revocation must remove persisted content-script tracking',
+  );
+
+  const revokedReadiness = await sendExtensionMessage(extensionPage, {
+    type: 'GET_PERMISSION_READINESS',
+    tabId,
+    url,
+  });
+  assert.equal(revokedReadiness?.readiness?.ready, false);
+  assert.equal(revokedReadiness?.readiness?.reason, 'host_permission_required');
+
+  assert.equal(
+    await removeExtensionPermissions(extensionPage, { permissions: ['cookies'] }),
+    true,
+    'cookie permission removal should report a change',
+  );
+  const cookiesAfterRevoke = await sendExtensionMessage(extensionPage, {
+    type: 'GET_LIVE_COOKIES',
+    host: parsed.hostname,
+    url,
+  });
+  assert.equal(cookiesAfterRevoke?.ok, false);
+  assert.equal(cookiesAfterRevoke?.reason, 'host_permission_required');
 }
 
 async function clickSidepanelButton(extensionPage, targetPage, label, matcher) {
@@ -892,6 +1166,21 @@ async function pinSidepanelToTarget(extensionPage, targetPage) {
     'Sidepanel pinned target context',
   );
   await wait(300);
+}
+
+async function verifyCookiePermissionUi(extensionPage) {
+  await extensionPage.getByTestId('settings-toggle').click();
+  await extensionPage.waitForFunction(
+    () => document.querySelector('[data-testid="cookie-permission-status"]')
+      ?.textContent?.includes('현재 사이트 쿠키 연결됨'),
+    undefined,
+    { timeout: 5_000 },
+  );
+  assert.match(
+    await extensionPage.getByTestId('cookie-permission-status').innerText(),
+    /현재 사이트 쿠키 연결됨/,
+  );
+  await extensionPage.getByTestId('settings-toggle').click();
 }
 
 async function verifyStoredServerCookieAuth(extensionPage, browserContext, targetPage, url) {
@@ -1174,12 +1463,24 @@ async function verifyDevXgenOriginDetection(extensionPage, browserContext) {
 
   const tabId = await findTabIdByUrl(extensionPage, '^https://dev-xgen\\.x2bee\\.com/main');
   assert.ok(tabId, 'dev-xgen tab id should be discoverable');
+  const start = await sendExtensionMessage(extensionPage, {
+    type: 'START_CAPTURE_SESSION',
+    tabId,
+  });
+  assert.equal(start?.ok, true, `dev-xgen content injection failed: ${JSON.stringify(start)}`);
+  const stop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
+  assert.equal(stop?.ok, true, `dev-xgen capture cleanup failed: ${JSON.stringify(stop)}`);
+  await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
 
   let config;
   for (let attempt = 0; attempt < 25; attempt++) {
     config = await sendExtensionMessage(extensionPage, { type: 'GET_CHAT_CONFIG', tabId });
     if (config?.serverUrl === 'https://dev-xgen.x2bee.com' && config?.authToken === 'dev-xgen-token') {
       await devPage.close();
+      await removeExtensionPermissions(
+        extensionPage,
+        { origins: ['https://dev-xgen.x2bee.com/*'] },
+      );
       console.log('dev-xgen origin token detection verified');
       return;
     }
@@ -1458,6 +1759,28 @@ async function main() {
       ],
     };
 
+    context = await chromium.launchPersistentContext(userDataDir, {
+      ...launchOptions,
+      args: [...launchOptions.args, '--deny-permission-prompts'],
+    });
+    attachRuntimeLogging(context, runtimeLogs);
+    const extensionId = await resolveExtensionId(context, userDataDir);
+    const deniedExtensionPage = await openExtensionPage(context, extensionId);
+    const deniedTargetPage = await context.newPage();
+    await deniedTargetPage.goto(url);
+    await verifyDeniedOptionalPermissions(deniedExtensionPage, deniedTargetPage, url);
+    await context.close();
+    context = undefined;
+
+    const parsedFixtureUrl = new URL(url);
+    await grantPersistedExtensionPermissions(userDataDir, extensionId, {
+      permissions: ['cookies'],
+      origins: [
+        `${parsedFixtureUrl.protocol}//${parsedFixtureUrl.hostname}/*`,
+        'https://dev-xgen.x2bee.com/*',
+      ],
+    });
+
     context = await chromium.launchPersistentContext(userDataDir, launchOptions);
     attachRuntimeLogging(context, runtimeLogs);
     await context.tracing.start({
@@ -1466,34 +1789,22 @@ async function main() {
       sources: true,
     });
 
-    let extensionId = await findExtensionIdFromCdp(context);
-    let serviceWorker = context.serviceWorkers()[0];
-    if (!serviceWorker) {
-      serviceWorker = await context.waitForEvent('serviceworker', { timeout: 3_000 }).catch(() => null);
-    }
-    extensionId ||= serviceWorker ? new URL(serviceWorker.url()).host : '';
-    if (!extensionId) {
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      extensionId = await findExtensionIdFromPreferences(userDataDir);
-    }
-    assert.ok(extensionId, 'extension id should be detected from service worker URL');
-
-    const extensionPage = await context.newPage();
-    await extensionPage.goto(`chrome-extension://${extensionId}/src/sidepanel/index.html`);
-    serviceWorker = context.serviceWorkers()[0]
-      || await context.waitForEvent('serviceworker', { timeout: 5_000 }).catch(() => null);
-    assert.ok(serviceWorker, 'extension service worker should start after opening sidepanel page');
+    const relaunchedExtensionId = await resolveExtensionId(context, userDataDir);
+    assert.equal(relaunchedExtensionId, extensionId, 'extension id should remain stable after restart');
+    const extensionPage = await openExtensionPage(context, extensionId);
 
     await extensionPage.bringToFront();
     const unsupportedStart = await sendExtensionMessage(extensionPage, { type: 'START_CAPTURE_SESSION' });
     assert.equal(unsupportedStart?.ok, false, `START_CAPTURE_SESSION should reject extension pages: ${JSON.stringify(unsupportedStart)}`);
-    assert.match(unsupportedStart?.error || '', /http\/https|API 캡처/);
+    assert.match(unsupportedStart?.error || '', /http\/https|API 캡처|No active tab/);
 
     await verifyDevXgenOriginDetection(extensionPage, context);
 
     const targetPage = await context.newPage();
     await targetPage.goto(url);
+    await bootstrapGrantedContentScript(extensionPage, targetPage, url);
     await pinSidepanelToTarget(extensionPage, targetPage);
+    await verifyCookiePermissionUi(extensionPage);
     const distractorPage = await context.newPage();
     await distractorPage.goto(`${url}distractor`);
     await verifyPageAgent(extensionPage, targetPage);
@@ -1635,6 +1946,7 @@ async function main() {
     const extraStop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
     assert.equal(extraStop?.ok, false, `STOP_CAPTURE_SESSION without active session should fail: ${JSON.stringify(extraStop)}`);
     assert.match(extraStop?.error || '', /No active session/);
+    await verifyOptionalPermissionLifecycle(extensionPage, context, targetPage, url);
 
     console.log([
       `PathFinder runtime verification passed: extension loaded (${extensionId})`,
@@ -1647,6 +1959,7 @@ async function main() {
       'capture result merge conflict verified',
       'privacy-safe HAR import verified',
       'capture payload memory release verified',
+      'optional host/cookie denial, persisted grant, and revoke cleanup verified',
       `fetch/xhr captured ${firstApis.length} API request(s)`,
       `navigation reinjection captured ${secondApis.length} API request(s)`,
     ].join('; '));

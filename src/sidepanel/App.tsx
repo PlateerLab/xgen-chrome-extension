@@ -26,13 +26,14 @@ function extractHost(u: string | undefined): string | null {
 
 export function App() {
   const [targetTabId, setTargetTabId] = useState<number | null>(null);
+  const [targetTabUrl, setTargetTabUrl] = useState<string | null>(null);
   const {
     messages, isStreaming, sendMessage, stopStream, clearMessages,
     planQuestions, submitQuestionAnswers, dismissQuestions,
     greetProactive, collectionId, runCollection,
   } = useChat(targetTabId);
-  const picker = useElementPicker(targetTabId);
-  const captureSession = useCaptureSession(targetTabId);
+  const picker = useElementPicker(targetTabId, targetTabUrl);
+  const captureSession = useCaptureSession(targetTabId, targetTabUrl);
   const [importedResult, setImportedResult] = useState<SessionResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [openApiImportOpen, setOpenApiImportOpen] = useState(false);
@@ -59,6 +60,7 @@ export function App() {
       if (tabs[0]?.id) {
         pinnedTabIdRef.current = tabs[0].id;
         setTargetTabId(tabs[0].id);
+        setTargetTabUrl(tabs[0].url || null);
       }
       const config = await chrome.runtime.sendMessage({
         type: 'GET_CHAT_CONFIG',
@@ -79,6 +81,7 @@ export function App() {
         setTargetTabId(message.tabId);
       }
       setPageContext(message.context);
+      setTargetTabUrl(message.context.url || null);
     };
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
@@ -88,6 +91,7 @@ export function App() {
     clearMessages();
     pinnedTabIdRef.current = null;
     setTargetTabId(null);
+    setTargetTabUrl(null);
     greetedHostsRef.current = new Set();
     setPageContext(null);
     // 새 active 탭 기준으로 재pin + 재greet
@@ -96,6 +100,7 @@ export function App() {
       if (tabs[0]?.id) {
         pinnedTabIdRef.current = tabs[0].id;
         setTargetTabId(tabs[0].id);
+        setTargetTabUrl(tabs[0].url || null);
       }
       const config = await chrome.runtime.sendMessage({
         type: 'GET_CHAT_CONFIG',
@@ -157,12 +162,19 @@ export function App() {
           {/* Element Picker 아이콘 */}
           <button
             onClick={picker.togglePicker}
+            disabled={picker.permissionPending}
             className={`p-1 rounded transition-colors ${
               picker.picking
                 ? 'text-violet-600 bg-violet-100'
-                : 'text-gray-400 hover:text-gray-600'
+                : 'text-gray-400 hover:text-gray-600 disabled:opacity-40'
             }`}
-            title={picker.picking ? '요소 선택 취소 (Esc)' : 'API 캡처 — 요소 선택'}
+            title={
+              picker.permissionPending
+                ? '사이트 권한 확인 중'
+                : picker.picking
+                  ? '요소 선택 취소 (Esc)'
+                  : 'API 캡처 — 요소 선택'
+            }
           >
             <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10" />
@@ -267,7 +279,7 @@ export function App() {
           </button>
 
           {/* Settings 아이콘 */}
-          <SettingsBar />
+          <SettingsBar targetTabUrl={targetTabUrl} />
 
           <div className="flex-1" />
 
@@ -340,6 +352,20 @@ export function App() {
           <button
             onClick={captureSession.dismissError}
             className="text-[10px] text-red-500 hover:text-red-700"
+          >
+            닫기
+          </button>
+        </div>
+      )}
+
+      {picker.permissionError && (
+        <div className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 flex items-center gap-2">
+          <span className="text-[11px] text-amber-800 flex-1">
+            요소 캡처: {picker.permissionError}
+          </span>
+          <button
+            onClick={picker.dismissPermissionError}
+            className="text-[10px] text-amber-700 hover:text-amber-900"
           >
             닫기
           </button>

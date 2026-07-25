@@ -49,7 +49,8 @@ flowchart LR
 
 - extension ID 고정
 - 허용된 update URL
-- 필요한 host permission 검토
+- 고객사별 허용 origin과 optional host permission 승인 절차
+- live cookie auth를 사용할 때만 `cookies` 선택 권한 승인
 - 브라우저 정책의 side-loading 제한
 - 자동 업데이트 및 rollback 절차
 
@@ -57,15 +58,17 @@ flowchart LR
 
 1. XGEN 로그인과 provider 조회
 2. 외부 업무 페이지에서 Side Panel 열기
-3. Page Agent가 현재 URL과 DOM을 읽는지 확인
-4. read-only 사용자 시나리오 캡처
-5. 민감 query/body 값이 등록 payload에서 제거되는지 확인
-6. auth profile 자동 연결 또는 명시적 선택
-7. API Collection 생성 및 graph build
-8. 한국어 업무 질의로 search Top-K 확인
-9. plan 생성 확인
-10. read-only API execute 확인
-11. 브라우저 재시작과 Service Worker 재시작 후 복구 확인
+3. 캡처 시작 시 현재 사이트 접근 권한만 요청되는지 확인
+4. Page Agent가 현재 URL과 DOM을 읽는지 확인
+5. read-only 사용자 시나리오 캡처
+6. 민감 query/body 값이 등록 payload에서 제거되는지 확인
+7. auth profile 자동 연결 또는 명시적 선택
+8. API Collection 생성 및 graph build
+9. 한국어 업무 질의로 search Top-K 확인
+10. plan 생성 확인
+11. read-only API execute 확인
+12. 사이트 권한 회수 시 캡처가 중단되고 재승인 전까지 재개되지 않는지 확인
+13. 브라우저 재시작과 Service Worker 재시작 후 복구 확인
 
 ## 자동화가 제한되는 영역
 
@@ -86,4 +89,3 @@ flowchart LR
 - 전용 계정 session revoke
 - 테스트 중 생성한 업무 데이터 cleanup
 - 결과에는 버전, 환경, 성공/실패 stage만 보존
-

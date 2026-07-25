@@ -2,6 +2,10 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ExtensionMessage } from '../../shared/types';
 import type { CapturedApi } from '../../shared/api-hook-types';
 import type { HarImportSummary } from '../lib/har-import';
+import {
+  requestHostPermission,
+  type PermissionReadinessReason,
+} from '../../shared/permissions';
 
 export interface SessionResult {
   apis: CapturedApi[];
@@ -17,6 +21,7 @@ export interface CaptureSessionState {
   pending: boolean;
   count: number;
   error: string | null;
+  reason: PermissionReadinessReason | null;
   result: SessionResult | null;
   start: () => void;
   stop: () => void;
@@ -28,11 +33,25 @@ function tabTarget(tabId: number | null | undefined): { tabId?: number } {
   return typeof tabId === 'number' ? { tabId } : {};
 }
 
-export function useCaptureSession(targetTabId?: number | null): CaptureSessionState {
+function permissionError(reason: PermissionReadinessReason): string {
+  if (reason === 'host_permission_required') {
+    return '이 사이트의 API를 캡처하려면 사이트 접근 권한이 필요합니다.';
+  }
+  if (reason === 'unsupported_url') {
+    return 'API 캡처는 http/https 페이지에서만 사용할 수 있습니다.';
+  }
+  return reason;
+}
+
+export function useCaptureSession(
+  targetTabId?: number | null,
+  targetTabUrl?: string | null,
+): CaptureSessionState {
   const [active, setActive] = useState(false);
   const [pending, setPending] = useState(false);
   const [count, setCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [reason, setReason] = useState<PermissionReadinessReason | null>(null);
   const [result, setResult] = useState<SessionResult | null>(null);
 
   useEffect(() => {
@@ -43,14 +62,23 @@ export function useCaptureSession(targetTabId?: number | null): CaptureSessionSt
         setPending(false);
         if (message.error) {
           setError(message.error);
+          if (
+            message.error === 'host_permission_required'
+            || message.error === 'cookie_permission_required'
+            || message.error === 'unsupported_url'
+          ) {
+            setReason(message.error);
+          }
         } else if (message.active) {
           setError(null);
+          setReason(null);
         }
       } else if (message.type === 'CAPTURE_SESSION_RESULT') {
         setActive(false);
         setPending(false);
         setCount(0);
         setError(null);
+        setReason(null);
         setResult({
           apis: message.apis,
           tabId: message.tabId,
@@ -71,6 +99,7 @@ export function useCaptureSession(targetTabId?: number | null): CaptureSessionSt
           setPending(false);
           setCount(0);
           setError(null);
+          setReason(null);
           setResult(resp.result);
         }
       })
@@ -82,10 +111,24 @@ export function useCaptureSession(targetTabId?: number | null): CaptureSessionSt
   const start = useCallback(() => {
     setResult(null);
     setError(null);
+    setReason(null);
     setPending(true);
-    chrome.runtime
-      .sendMessage({ type: 'START_CAPTURE_SESSION', ...tabTarget(targetTabId) } satisfies ExtensionMessage)
+    requestHostPermission(targetTabUrl || undefined)
+      .then((readiness) => {
+        if (!readiness.ready) {
+          setActive(false);
+          setCount(0);
+          setReason(readiness.reason);
+          setError(permissionError(readiness.reason));
+          return undefined;
+        }
+        return chrome.runtime.sendMessage({
+          type: 'START_CAPTURE_SESSION',
+          ...tabTarget(targetTabId),
+        } satisfies ExtensionMessage);
+      })
       .then((resp: { ok?: boolean; error?: string } | undefined) => {
+        if (!resp) return;
         if (resp?.ok === false) {
           setActive(false);
           setCount(0);
@@ -98,7 +141,7 @@ export function useCaptureSession(targetTabId?: number | null): CaptureSessionSt
         setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => setPending(false));
-  }, [targetTabId]);
+  }, [targetTabId, targetTabUrl]);
 
   const stop = useCallback(() => {
     setError(null);
@@ -117,7 +160,21 @@ export function useCaptureSession(targetTabId?: number | null): CaptureSessionSt
   }, []);
 
   const dismissResult = useCallback(() => setResult(null), []);
-  const dismissError = useCallback(() => setError(null), []);
+  const dismissError = useCallback(() => {
+    setError(null);
+    setReason(null);
+  }, []);
 
-  return { active, pending, count, error, result, start, stop, dismissResult, dismissError };
+  return {
+    active,
+    pending,
+    count,
+    error,
+    reason,
+    result,
+    start,
+    stop,
+    dismissResult,
+    dismissError,
+  };
 }

@@ -431,7 +431,7 @@ export function useChat(targetTabId?: number | null) {
         if (tabUrl) {
           const host = new URL(tabUrl).hostname;
           const resp = await chrome.runtime.sendMessage({
-            type: 'GET_LIVE_COOKIES', host,
+            type: 'GET_LIVE_COOKIES', host, url: tabUrl,
           } satisfies ExtensionMessage);
           if (resp?.ok && typeof resp.cookieHeader === 'string' && resp.cookieHeader) {
             liveCookies = resp.cookieHeader;

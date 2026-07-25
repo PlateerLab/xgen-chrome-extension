@@ -2,7 +2,7 @@
 
 ## 권한
 
-현재 manifest는 다음 주요 권한을 사용한다.
+현재 manifest는 다음 설치 시 필수 권한을 사용한다.
 
 | 권한 | 목적 |
 |---|---|
@@ -11,10 +11,19 @@
 | `activeTab`, `scripting` | 사용자가 선택한 페이지의 Agent와 hook |
 | `webNavigation` | SPA 및 페이지 이동 감지 |
 | `contextMenus` | 사용자 주도 API 스캔 시작 |
-| `cookies` | XGEN token 및 대상 host live cookie 해석 |
-| `<all_urls>` | 다양한 고객사 host에서 API 관찰 |
 
-`<all_urls>`와 `cookies`는 강한 권한이다. 배포 전에 조직 보안 검토를 받아야 하며, 캡처는 사용자 동작으로 시작하고 현재 대상 탭으로 제한해야 한다. optional permission 전환의 제약과 단계별 구현안은 [Optional Permissions 설계](design/optional-permissions.md)에 정리한다.
+강한 권한은 사용 시 선택적으로 요청한다.
+
+| 선택 권한 | 요청 시점 | 범위 |
+|---|---|---|
+| `<all_urls>` 선언의 일부 origin | 해당 사이트에서 캡처 시작 | 현재 origin만 |
+| `cookies` | live cookie 기반 auth 연결 | 별도 사용자 승인과 host 권한 필요 |
+
+정적 `<all_urls>` content script와 필수 `cookies` 권한은 없다.
+`web_accessible_resources.matches`의 `<all_urls>` 표시는 리소스 노출 대상
+선언이며 host 접근 권한을 부여하지 않는다. 상세한 readiness, revoke 및
+마이그레이션 정책은 [Optional Permissions 설계](design/optional-permissions.md)를
+따른다.
 
 ## 신뢰 경계
 
@@ -37,6 +46,7 @@ Collection 등록 전에 다음을 적용한다.
 - 관계 edge에는 실제 공유값 대신 source/target field path와 value type만 전송
 - 등록 화면에서 request/response sample 전송을 끄고 필드 구조만 등록 가능
 - 탭별 raw capture FIFO 500건 제한, 세션 종료 후 탭 버퍼 삭제, 미소비 결과 5분 TTL
+- host 권한 회수 시 main-world hook/relay 종료, tab buffer와 cached result 즉시 폐기
 - XGEN origin 검증
 - 캡처 시점 cookie 대신 실행 시점 live cookie 사용
 

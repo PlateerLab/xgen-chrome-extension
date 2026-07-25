@@ -70,10 +70,10 @@ function performUpload(draft: ProductDraft): UploadResult {
   };
 }
 
-export function bootBoAutofill(): void {
+export function bootBoAutofill(): () => void {
   console.log('[bo-autofill] booted on', window.location.href);
 
-  chrome.runtime.onMessage.addListener((message: ExtensionMessage, _sender, sendResponse) => {
+  const listener = (message: ExtensionMessage, _sender: chrome.runtime.MessageSender, sendResponse: (response?: unknown) => void) => {
     if (message.type !== 'PRODUCT_UPLOAD_REQUEST') return;
     try {
       const result = performUpload(message.draft);
@@ -95,5 +95,7 @@ export function bootBoAutofill(): void {
       sendResponse({ type: 'PRODUCT_UPLOAD_RESPONSE', ok: false, error: msg } satisfies ExtensionMessage);
     }
     return true;
-  });
+  };
+  chrome.runtime.onMessage.addListener(listener);
+  return () => chrome.runtime.onMessage.removeListener(listener);
 }

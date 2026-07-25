@@ -10,6 +10,11 @@ export function mainWorldHookFunction() {
   }
   (window as any).__xgenApiHookInstalled = true;
   (window as any).__xgenApiHookActive = true;
+  window.addEventListener('xgen:api-hook-control', ((event: CustomEvent) => {
+    if (event.detail?.active === false) {
+      (window as any).__xgenApiHookActive = false;
+    }
+  }) as EventListener);
 
   const MAX_BODY = 100 * 1024; // 100KB
 

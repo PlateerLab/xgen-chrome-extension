@@ -67,6 +67,7 @@ DEBUG=pw:browser npm run verify:pathfinder:runtime
 
 ## 캡처 결과가 없음
 
+- 캡처 시작 시 표시되는 현재 사이트 접근 권한을 허용했는지 확인한다.
 - 캡처를 시작한 탭과 실제 조작한 탭이 같은지 확인한다.
 - 페이지를 새로고침해 Content Script와 main-world hook을 다시 주입한다.
 - 요청이 fetch/XHR인지 확인한다.
@@ -74,10 +75,16 @@ DEBUG=pw:browser npm run verify:pathfinder:runtime
 - 캡처 시작 전에 발생한 요청은 포함되지 않는다.
 - Pathfinder 자체가 실행한 AI 요청은 사용자 API 캡처에서 제외될 수 있다.
 
+`host_permission_required`가 표시되면 해당 사이트에서 캡처 시작을 다시 눌러
+origin 권한을 요청한다. `cookie_permission_required`는 페이지 캡처 자체가
+아니라 live cookie 기반 auth 연결에 필요한 별도 권한이다. 권한을 회수하면
+진행 중 캡처와 메모리 버퍼가 즉시 폐기되므로 이전 세션은 복구되지 않는다.
+
 ## SPA 이동 후 캡처가 중단됨
 
 - runtime verification의 navigation reinjection 시나리오를 실행한다.
 - `webNavigation` event와 Content Script reinjection log를 확인한다.
+- 다른 origin으로 이동했다면 새 origin 권한을 명시적으로 허용한다.
 - 대상 앱이 iframe 안에서 API를 호출하는지 확인한다.
 - cross-origin iframe이면 해당 frame과 host permission을 별도로 검토한다.
 
@@ -95,4 +102,3 @@ DEBUG=pw:browser npm run verify:pathfinder:runtime
 - SSO session이 third-party cookie 정책의 영향을 받는지 확인한다.
 - 개발자 도구가 정책으로 차단되어 있다면 내부 runner에서 Playwright artifact를 수집한다.
 - 고객사 실제 secret이나 응답 body를 외부 issue tracker에 올리지 않는다.
-

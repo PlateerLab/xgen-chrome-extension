@@ -9,6 +9,35 @@ import ts from 'typescript';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+async function testManifestPermissionContract() {
+  for (const manifestPath of [
+    path.join(repoRoot, 'manifest.json'),
+    path.join(repoRoot, 'dist', 'manifest.json'),
+  ]) {
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    assert.ok(
+      !manifest.permissions?.includes('cookies'),
+      `${manifestPath}: cookies must not be an install-time permission`,
+    );
+    assert.ok(
+      !manifest.host_permissions?.length,
+      `${manifestPath}: install-time host permissions must be empty`,
+    );
+    assert.ok(
+      !manifest.content_scripts?.length,
+      `${manifestPath}: static all-host content scripts must not be declared`,
+    );
+    assert.deepEqual(manifest.optional_permissions, ['cookies']);
+    assert.deepEqual(manifest.optional_host_permissions, ['<all_urls>']);
+  }
+
+  const contentBundlePath = path.join(repoRoot, 'dist', 'pathfinder-content.js');
+  assert.ok(
+    (await readFile(contentBundlePath, 'utf8')).length > 0,
+    'dynamic content script bundle must be built',
+  );
+}
+
 function captured({
   id,
   timestamp,
@@ -1146,6 +1175,7 @@ async function testOpenApiCollectionApi({
 }
 
 async function main() {
+  await testManifestPermissionContract();
   const { analyzeTrace, cleanup } = await loadTraceAnalyzer();
   const {
     buildTraceRegistrationPayload,
@@ -1201,7 +1231,9 @@ async function main() {
     await cleanupApi();
   }
 
-  console.log('PathFinder verification passed: trace analysis, registration payload, API client.');
+  console.log(
+    'PathFinder verification passed: permission manifest, trace analysis, registration payload, API client.',
+  );
 }
 
 main().catch((err) => {

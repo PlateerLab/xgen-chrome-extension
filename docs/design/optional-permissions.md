@@ -2,9 +2,9 @@
 
 ## 결정
 
-현재의 `<all_urls>` host permission과 `cookies` permission은 이번 보안 변경에서 바로 제거하지 않는다. 정적 content script, background cookie 조회, 페이지 이동 후 재주입이 모두 이 권한에 의존하므로 manifest만 축소하면 캡처와 인증 프로필 연결이 조용히 실패한다.
-
-대신 다음 릴리즈에서 사용자 승인 기반 권한 모델로 전환할 수 있도록 구현 경계를 고정한다.
+`<all_urls>` host permission과 `cookies` permission을 설치 시 필수 권한에서
+제거했다. 두 권한은 manifest에 선택 권한으로만 선언하며, 기능을 사용하는
+시점에 최소 범위로 요청한다.
 
 ## 목표 권한 모델
 
@@ -22,16 +22,27 @@
 - `optional_host_permissions: ["<all_urls>"]`
 - `optional_permissions: ["cookies"]`
 
-host 권한은 사용자가 특정 사이트에서 캡처를 시작할 때 해당 origin 단위로 요청한다. `cookies`는 auth profile 자동 연결을 켤 때 별도로 요청한다. 권한 거부는 예외나 빈 결과가 아니라 `host_permission_required` 또는 `cookie_permission_required` readiness로 표시한다.
+host 권한은 사용자가 특정 사이트에서 캡처를 시작할 때 해당 origin 단위로
+요청한다. `cookies`는 live cookie 기반 auth 연결에 필요하며 host 권한과
+별도로 확인한다. 권한 거부는 빈 결과가 아니라
+`host_permission_required` 또는 `cookie_permission_required` readiness로
+표시한다.
 
-## 필요한 코드 변경
+## 구현
 
-1. `chrome.permissions.contains()` 결과를 반환하는 capability service를 background에 둔다.
-2. 캡처 시작 버튼의 사용자 gesture 안에서 현재 tab origin 권한을 요청한다.
-3. 정적 `<all_urls>` content script를 제거하고 승인된 origin에 `chrome.scripting.registerContentScripts()` 또는 명시적 `executeScript()`로 relay를 주입한다.
-4. 페이지 이동 후에는 새 origin 권한을 다시 확인하고, 없으면 자동 재주입하지 않는다.
+1. `chrome.permissions.contains()` 기반 readiness를 background와 sidepanel이
+   동일하게 사용한다.
+2. 캡처 시작 버튼의 사용자 gesture 안에서 현재 origin 권한을 요청한다.
+3. 정적 content script 선언 대신 승인된 탭에
+   `chrome.scripting.executeScript()`로 versioned bundle을 주입한다.
+4. 페이지 이동 시 새 origin 권한을 확인하고, 없으면 hook을 재주입하지 않는다.
 5. cookie 조회 전에 `cookies`와 대상 host 권한을 모두 확인한다.
-6. 권한 revoke 이벤트에서 등록된 script, tab buffer 및 auth capability cache를 폐기한다.
+6. 권한 회수 시 탭별로 기억한 origin pattern을 검사해 main-world hook과
+   isolated relay를 중지하고 raw buffer, cached result, auth cache를 폐기한다.
+7. extension action의 `activeTab`은 sidepanel/PageAgent를 여는 단발성 경로에만
+   사용하며, 지속 캡처 권한의 대체물로 저장하지 않는다.
+8. 주입된 탭의 origin pattern은 `chrome.storage.session`에도 보존해 MV3 Service
+   Worker가 재시작된 뒤 발생한 revoke 이벤트도 기존 hook을 정리할 수 있게 한다.
 
 ## 마이그레이션
 
@@ -50,4 +61,12 @@ host 권한은 사용자가 특정 사이트에서 캡처를 시작할 때 해�
 | 거부 | 거부 | sidepanel 문서/설정 UI만 동작 |
 | 실행 중 revoke | 무관 | hook 해제, raw buffer 폐기, 구조화된 중단 |
 
-Chromium runtime test에는 최초 허용, 거부, revoke, navigation 후 재승인 시나리오를 넣는다. 이 행렬이 통과하기 전에는 manifest의 필수 권한을 줄이지 않는다.
+T0는 source/dist manifest에 필수 `cookies`, `host_permissions`, 정적
+`content_scripts`가 없는지와 동적 bundle 생성을 검사한다. T1 Chromium
+runtime은 최초 미승인 상태, 브라우저에 저장된 승인 상태, 캡처/쿠키 사용,
+실행 중 revoke와 payload 폐기를 검사한다.
+
+headless Chromium은 사용자 승인 모달을 자동 수락할 수 없으므로 최초 승인과
+회수 후 재승인 버튼은 릴리즈 후보의 수동 브라우저 체크리스트로도 확인한다.
+CI의 승인 상태는 실제 Chrome profile의 persisted extension permission과 같은
+형태로 부팅해 재현한다.

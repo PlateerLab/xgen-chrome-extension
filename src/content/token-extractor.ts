@@ -58,16 +58,21 @@ export function extractAndSendToken(): void {
   }).catch(() => {});
 }
 
-export function watchTokenChanges(): void {
-  if (!isXgenDomain()) return;
+export function watchTokenChanges(): () => void {
+  if (!isXgenDomain()) return () => {};
 
   // Re-extract token periodically (handles token refresh)
-  setInterval(extractAndSendToken, 30_000);
+  const interval = window.setInterval(extractAndSendToken, 30_000);
 
   // Also watch for storage changes
-  window.addEventListener('storage', (e) => {
+  const handleStorage = (e: StorageEvent) => {
     if (e.key && TOKEN_STORAGE_KEYS.includes(e.key) && e.newValue) {
       chrome.runtime.sendMessage({ type: 'SET_TOKEN', token: e.newValue, origin: window.location.origin }).catch(() => {});
     }
-  });
+  };
+  window.addEventListener('storage', handleStorage);
+  return () => {
+    window.clearInterval(interval);
+    window.removeEventListener('storage', handleStorage);
+  };
 }

@@ -12,6 +12,12 @@ import type {
 import type { CapturedApi } from '../shared/api-hook-types';
 import { mainWorldHookFunction, mainWorldUnhookFunction } from '../content/api-hook/main-world-hook';
 import { apiHookRelayFunction } from '../content/api-hook/relay';
+import {
+  inspectCookiePermission,
+  inspectHostPermission,
+  originPatternForUrl,
+  requestHostPermission,
+} from '../shared/permissions';
 
 // ── State ──
 // origin별 토큰 저장 — 멀티 인스턴스 (xgen.x2bee.com / jeju-xgen.x2bee.com) 동시 사용 지원
@@ -22,8 +28,41 @@ let cachedPageContextTabId: number | null = null;
 
 // ── API Hook State ──
 const hookedTabs = new Set<number>();
+const contentScriptTabs = new Set<number>();
+const contentScriptOriginPatterns = new Map<number, string>();
 const capturedApisByTab = new Map<number, CapturedApi[]>();
 const CAPTURE_TAB_MAX = 500;
+const CONTENT_SCRIPT_BUNDLE = 'pathfinder-content.js';
+const CONTENT_SCRIPT_ORIGINS_KEY = 'runtime:content-script-origins';
+let contentScriptOriginUpdate: Promise<void> = Promise.resolve();
+
+async function readPersistedContentScriptOrigins(): Promise<Record<string, string>> {
+  const stored = await chrome.storage.session.get(CONTENT_SCRIPT_ORIGINS_KEY);
+  const value = stored[CONTENT_SCRIPT_ORIGINS_KEY];
+  return value && typeof value === 'object'
+    ? { ...(value as Record<string, string>) }
+    : {};
+}
+
+function updatePersistedContentScriptOrigin(
+  tabId: number,
+  originPattern: string | null,
+): Promise<void> {
+  contentScriptOriginUpdate = contentScriptOriginUpdate.catch(() => {}).then(async () => {
+    const origins = await readPersistedContentScriptOrigins();
+    if (originPattern) {
+      origins[String(tabId)] = originPattern;
+    } else {
+      delete origins[String(tabId)];
+    }
+    if (Object.keys(origins).length > 0) {
+      await chrome.storage.session.set({ [CONTENT_SCRIPT_ORIGINS_KEY]: origins });
+    } else {
+      await chrome.storage.session.remove(CONTENT_SCRIPT_ORIGINS_KEY);
+    }
+  });
+  return contentScriptOriginUpdate;
+}
 
 function appendCapturedApi(tabId: number, captured: CapturedApi): void {
   const captures = capturedApisByTab.get(tabId) ?? [];
@@ -120,7 +159,12 @@ async function injectApiHookIntoTab(tabId: number): Promise<void> {
   if (!isInjectableTabUrl(tab.url)) {
     throw new Error('API 캡처는 http/https 페이지에서만 사용할 수 있습니다.');
   }
+  const readiness = await inspectHostPermission(tab.url);
+  if (!readiness.ready) {
+    throw new Error(readiness.reason);
+  }
 
+  await injectContentScriptIntoTab(tabId);
   await chrome.scripting.executeScript({
     target: { tabId },
     func: apiHookRelayFunction,
@@ -132,6 +176,54 @@ async function injectApiHookIntoTab(tabId: number): Promise<void> {
     world: 'MAIN' as any,
   });
   hookedTabs.add(tabId);
+}
+
+async function injectContentScriptIntoTab(tabId: number): Promise<void> {
+  const tab = await chrome.tabs.get(tabId);
+  if (!isInjectableTabUrl(tab.url)) return;
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: [CONTENT_SCRIPT_BUNDLE],
+    world: 'ISOLATED' as any,
+  });
+  contentScriptTabs.add(tabId);
+  const originPattern = originPatternForUrl(tab.url);
+  if (originPattern) {
+    contentScriptOriginPatterns.set(tabId, originPattern);
+    await updatePersistedContentScriptOrigin(tabId, originPattern);
+  }
+}
+
+async function abortTabForPermission(
+  tabId: number,
+  reason: 'host_permission_required' | 'host_permission_revoked',
+): Promise<void> {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: mainWorldUnhookFunction,
+    world: 'MAIN' as any,
+  }).catch(() => {});
+  await chrome.tabs.sendMessage(tabId, {
+    type: 'CONTENT_SCRIPT_SHUTDOWN',
+    reason: 'host_permission_revoked',
+  } satisfies ExtensionMessage).catch(() => {});
+  hookedTabs.delete(tabId);
+  contentScriptTabs.delete(tabId);
+  contentScriptOriginPatterns.delete(tabId);
+  await updatePersistedContentScriptOrigin(tabId, null);
+  capturedApisByTab.delete(tabId);
+  aiDrivingTabIds.delete(tabId);
+  if (cachedCaptureResult?.tabId === tabId) {
+    clearCachedCaptureResult();
+  }
+  if (activeCaptureSession?.tabId === tabId) {
+    activeCaptureSession = null;
+    broadcastCaptureStatus({
+      active: false,
+      tabId,
+      error: reason,
+    });
+  }
 }
 
 function completeCaptureSession(session: CaptureSession, options: { openPanel: boolean } = { openPanel: true }): void {
@@ -164,6 +256,15 @@ function completeCaptureSession(session: CaptureSession, options: { openPanel: b
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch(console.error);
+
+// Extension action 클릭은 activeTab 권한을 부여한다. 설치 시 전역 host 권한 없이도
+// 현재 페이지의 PageAgent를 사용자 동작으로만 주입한다.
+chrome.action.onClicked.addListener((tab) => {
+  if (!tab.id || !isInjectableTabUrl(tab.url)) return;
+  injectContentScriptIntoTab(tab.id).catch((err) => {
+    console.warn('[XGEN SW] content script injection on action click failed:', err);
+  });
+});
 
 /**
  * origin이 XGEN 자체 호스트인지 — 이걸로 SET_ORIGIN/SET_TOKEN/resolver/startup migration 모두 검증.
@@ -455,9 +556,20 @@ chrome.runtime.onMessage.addListener(
         const targetTabId = getMessageTabId(message);
         (async () => {
           try {
-            const tabId = (await getTargetTab(targetTabId))?.id;
-            if (!tabId) {
+            const tab = await getTargetTab(targetTabId);
+            const tabId = tab?.id;
+            if (!tabId || !tab?.url) {
               sendResponse({ ok: false, error: 'No active tab' });
+              return;
+            }
+            const readiness = await inspectHostPermission(tab.url);
+            if (!readiness.ready) {
+              sendResponse({
+                ok: false,
+                error: readiness.reason,
+                reason: readiness.reason,
+                readiness,
+              });
               return;
             }
             await handlePickerHookInject(tabId);
@@ -509,6 +621,22 @@ chrome.runtime.onMessage.addListener(
         break;
       }
 
+      case 'GET_PERMISSION_READINESS': {
+        (async () => {
+          const targetTab = await getTargetTab(getMessageTabId(message));
+          const targetUrl = message.url || targetTab?.url;
+          const readiness = await inspectHostPermission(targetUrl);
+          sendResponse({ ok: true, readiness });
+        })().catch((err) => {
+          sendResponse({
+            ok: false,
+            error: errorMessage(err),
+            reason: 'host_permission_required',
+          });
+        });
+        return true;
+      }
+
       case 'LOOKUP_AUTH_PROFILE_FOR_HOST': {
         // host에 대해 등록된 인증 프로필의 service_id 조회. autoMatchAuthProfile 재사용 —
         // 같은 도메인 키워드 매칭 + 캡처된 로그인 fallback. 결과를 collection 등록 시
@@ -542,6 +670,18 @@ chrome.runtime.onMessage.addListener(
         // <all_urls>가 manifest에 있어서 어떤 host든 읽기 가능.
         (async () => {
           try {
+            const readiness = await inspectCookiePermission(
+              message.url || `https://${message.host}/`,
+            );
+            if (!readiness.ready) {
+              sendResponse({
+                ok: false,
+                error: readiness.reason,
+                reason: readiness.reason,
+                readiness,
+              });
+              return;
+            }
             const cookies = await chrome.cookies.getAll({ domain: message.host });
             // 같은 이름이 여러 path에 걸려있으면 longest-path가 일반적으로 우선 — 단순화 위해
             // 첫 발견 우선. 도메인은 .x2bee.com과 fo.x2bee.com 둘 다 들어옴 (chrome 동작).
@@ -695,6 +835,8 @@ async function getStoredToken(origin: string): Promise<string> {
 
 async function getXgenCookieToken(origin: string): Promise<string> {
   try {
+    const readiness = await inspectCookiePermission(origin);
+    if (!readiness.ready) return '';
     const cookies = await chrome.cookies.getAll({ url: `${origin.replace(/\/+$/, '')}/` });
     const preferredNames = [
       'xgen_access_token',
@@ -1001,6 +1143,15 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   // 사이드패널은 정지 시(STOP_FLOATING_CAPTURE 핸들러)에 열어서 결과 리스트를 보여준다.
 
   try {
+    const readiness = await requestHostPermission(url);
+    if (!readiness.ready) {
+      broadcastCaptureStatus({
+        active: false,
+        tabId: tab.id,
+        error: readiness.reason,
+      });
+      return;
+    }
     await handlePickerHookInject(tab.id);
     activeCaptureSession = { tabId: tab.id, startedAt: Date.now(), captures: [] };
 
@@ -1792,6 +1943,9 @@ async function handlePickerHookInject(tabId: number) {
 // ── 탭 닫힘 시 정리 ──
 chrome.tabs.onRemoved.addListener((tabId) => {
   hookedTabs.delete(tabId);
+  contentScriptTabs.delete(tabId);
+  contentScriptOriginPatterns.delete(tabId);
+  updatePersistedContentScriptOrigin(tabId, null).catch(() => {});
   capturedApisByTab.delete(tabId);
   aiDrivingTabIds.delete(tabId);
   if (activeCaptureSession?.tabId === tabId) {
@@ -1810,6 +1964,12 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
   const tabId = details.tabId;
 
   if (!hookedTabs.has(tabId)) return;
+
+  const readiness = await inspectHostPermission(details.url);
+  if (!readiness.ready) {
+    await abortTabForPermission(tabId, 'host_permission_required');
+    return;
+  }
 
   // 네비게이션 기록을 캡처 데이터에 추가
   appendCapturedApi(tabId, {
@@ -1835,4 +1995,34 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
     hookedTabs.delete(tabId);
     console.warn('[XGEN SW] Failed to re-inject hook:', err);
   }
+});
+
+chrome.permissions.onRemoved.addListener((removed) => {
+  (async () => {
+    if (removed.permissions?.includes('cookies')) {
+      for (const origin of Object.keys(tokensByOrigin)) {
+        delete tokensByOrigin[origin];
+      }
+    }
+    if (!removed.origins?.length) return;
+    await contentScriptOriginUpdate;
+    const persistedOrigins = await readPersistedContentScriptOrigins();
+    const affectedTabs = new Set([
+      ...hookedTabs,
+      ...contentScriptTabs,
+      ...Object.keys(persistedOrigins).map(Number),
+    ]);
+    for (const tabId of affectedTabs) {
+      const originPattern = contentScriptOriginPatterns.get(tabId)
+        || persistedOrigins[String(tabId)];
+      const stillGranted = originPattern
+        ? await chrome.permissions.contains({ origins: [originPattern] })
+        : false;
+      if (!stillGranted) {
+        await abortTabForPermission(tabId, 'host_permission_revoked');
+      }
+    }
+  })().catch((err) => {
+    console.warn('[XGEN SW] permission revoke cleanup failed:', err);
+  });
 });

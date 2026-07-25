@@ -32,6 +32,8 @@ xvfb-run -a npm run verify:pathfinder:runtime
 
 ### Trace contract
 
+- source/dist manifest의 optional host/cookie 권한 계약
+- 동적 content script bundle 생성
 - GET/POST 및 query/body sample 분석
 - path template 및 identifier 추론
 - noise/analytics 요청 제외
@@ -57,6 +59,8 @@ xvfb-run -a npm run verify:pathfinder:runtime
 - Side Panel 채팅 SSE relay
 - capture 결과의 Collection 등록
 - Collection 충돌 및 merge UI
+- host/cookie 최초 미승인 readiness와 persisted 승인 상태
+- 실행 중 host permission revoke 후 hook, relay, raw buffer 폐기
 
 ### XGEN endpoint contract
 
