@@ -14,11 +14,7 @@ const distDir = path.join(repoRoot, 'dist');
 const SIDEPANEL_CHAT_COMMAND_REQUEST_ID = 'verify-sidepanel-chat-command';
 
 function loadPlaywright() {
-  const searchPaths = [
-    repoRoot,
-    path.resolve(repoRoot, '../../tools/demo-recorder'),
-  ];
-  const resolved = require.resolve('playwright', { paths: searchPaths });
+  const resolved = require.resolve('playwright', { paths: [repoRoot] });
   return require(resolved);
 }
 
@@ -435,6 +431,27 @@ async function findExtensionIdFromPreferences(userDataDir) {
       return id;
     }
   }
+  return '';
+}
+
+async function findExtensionIdFromCdp(context, timeoutMs = 5_000) {
+  const bootstrapPage = context.pages()[0] || await context.newPage();
+  const cdp = await context.newCDPSession(bootstrapPage);
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const { targetInfos } = await cdp.send('Target.getTargets');
+    const extensionTarget = targetInfos.find((target) => (
+      target.type === 'service_worker'
+      && target.url.startsWith('chrome-extension://')
+      && target.url.endsWith('/service-worker-loader.js')
+    ));
+    if (extensionTarget) {
+      return new URL(extensionTarget.url).host;
+    }
+    await wait(100);
+  }
+
   return '';
 }
 
@@ -864,7 +881,7 @@ async function main() {
   const { chromium } = loadPlaywright();
   if (!existsSync(chromium.executablePath())) {
     throw new Error(
-      'Playwright Chromium is not installed. Run `../../tools/demo-recorder/node_modules/.bin/playwright install chromium` first.',
+      'Playwright Chromium is not installed. Run `npx playwright install chromium` first.',
     );
   }
   const userDataDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-runtime-'));
@@ -881,7 +898,8 @@ async function main() {
 
   try {
     const launchOptions = {
-      headless: false,
+      channel: 'chromium',
+      headless: true,
       args: [
         `--disable-extensions-except=${distDir}`,
         `--load-extension=${distDir}`,
@@ -892,11 +910,12 @@ async function main() {
 
     context = await chromium.launchPersistentContext(userDataDir, launchOptions);
 
+    let extensionId = await findExtensionIdFromCdp(context);
     let serviceWorker = context.serviceWorkers()[0];
     if (!serviceWorker) {
       serviceWorker = await context.waitForEvent('serviceworker', { timeout: 3_000 }).catch(() => null);
     }
-    let extensionId = serviceWorker ? new URL(serviceWorker.url()).host : '';
+    extensionId ||= serviceWorker ? new URL(serviceWorker.url()).host : '';
     if (!extensionId) {
       await new Promise((resolve) => setTimeout(resolve, 1_000));
       extensionId = await findExtensionIdFromPreferences(userDataDir);
