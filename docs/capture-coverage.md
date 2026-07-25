@@ -54,6 +54,10 @@ frame URL 대신 `frameOrigin`과 `top_frame/subframe`만 저장한다.
 Service Worker 제어가 감지되면 worker 내부 fetch가 보이지 않는다는 warning을
 표시한다. 조용히 빈 schema를 만들어 높은 confidence를 주지 않는다.
 
+직접 transport 관찰 후보와 권한/보안 결론은
+[`design/worker-transport-observation.md`](design/worker-transport-observation.md)에
+정리한다. 기본 배포에는 `webRequest`나 `debugger` 권한을 추가하지 않는다.
+
 ## 검증
 
 정적 fixture는 REST, GraphQL, multipart, nested envelope, schema variation, frame
