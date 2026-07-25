@@ -74,17 +74,17 @@ npm run verify:pathfinder
 
 ## P3. Capture Quality
 
-상태: `planned`
+상태: `done`
 
 목표: 어떤 고객사 API가 들어오더라도 관찰 가능한 contract를 최대한 정확하게 복원하고 불확실성을 표시한다.
 
-- [ ] GraphQL operation, query 및 variables 인식
-- [ ] multipart/form-data 및 file upload contract
-- [ ] nested request/response와 response envelope
-- [ ] path parameter와 identifier 오탐 감소
-- [ ] 동일 operation의 schema variation 보존 및 중복 병합
-- [ ] iframe, Web Worker, Service Worker 및 streaming 요청의 관찰 범위 조사
-- [ ] 도구별 coverage, confidence 및 evidence 표시
+- [x] GraphQL operation, query 및 variables 인식
+- [x] multipart/form-data 및 file upload contract
+- [x] nested request/response와 response envelope
+- [x] path parameter와 identifier 오탐 감소
+- [x] 동일 operation의 schema variation 보존 및 중복 병합
+- [x] iframe, Web Worker, Service Worker 및 streaming 요청의 관찰 범위 조사
+- [x] 도구별 coverage, confidence 및 evidence 표시
 
 완료 gate:
 

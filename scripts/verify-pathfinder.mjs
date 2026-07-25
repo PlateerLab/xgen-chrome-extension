@@ -15,6 +15,8 @@ function captured({
   url,
   method = 'GET',
   requestBody = null,
+  requestContentType = '',
+  requestMetadata,
   responseStatus = 200,
   responseBody = {},
   requestHeaders = {},
@@ -28,7 +30,13 @@ function captured({
     url,
     method,
     requestHeaders,
-    requestBody,
+    requestBody: requestBody == null
+      ? null
+      : typeof requestBody === 'string'
+        ? requestBody
+        : JSON.stringify(requestBody),
+    requestContentType,
+    ...(requestMetadata ? { requestMetadata } : {}),
     responseStatus,
     responseHeaders,
     responseBody: responseBody == null
@@ -254,6 +262,162 @@ function testPathTemplating(analyzeTrace) {
   assert.deepEqual(new Set(tool.queryParamKeys), new Set(['siteNo', 'langCd']));
 }
 
+function testSingleNumericPathIsConservative(analyzeTrace) {
+  const analysis = analyzeTrace([
+    captured({
+      id: 'year-report',
+      timestamp: 1,
+      url: 'https://bo.x2bee.com/api/reports/2026',
+      responseBody: { year: 2026, total: 10 },
+    }),
+    captured({
+      id: 'long-id',
+      timestamp: 2,
+      url: 'https://bo.x2bee.com/api/goods/123456',
+      responseBody: { goodsNo: '123456' },
+    }),
+  ]);
+
+  assert.ok(
+    analysis.tools.some((tool) => tool.templatedPath === '/api/reports/2026'),
+    `single year segment must stay literal: ${JSON.stringify(analysis.tools)}`,
+  );
+  assert.ok(
+    analysis.tools.some((tool) => tool.templatedPath === '/api/goods/{id}'),
+    `long numeric identifier should still be templated: ${JSON.stringify(analysis.tools)}`,
+  );
+}
+
+function testGraphqlOperationsRemainDistinct(analyzeTrace) {
+  const analysis = analyzeTrace([
+    captured({
+      id: 'graphql-list',
+      timestamp: 1,
+      method: 'POST',
+      url: 'https://bo.x2bee.com/graphql',
+      requestContentType: 'application/json',
+      requestBody: JSON.stringify({
+        operationName: 'GetGoodsList',
+        query: 'query GetGoodsList($keyword: String!) { goods(keyword: $keyword) { id name } }',
+        variables: { keyword: 'jeju' },
+      }),
+      requestMetadata: {
+        bodyKind: 'graphql',
+        fieldPaths: ['query', 'operationName', 'variables.keyword'],
+        fileFields: [],
+        graphql: { operationType: 'query', operationName: 'GetGoodsList' },
+      },
+      responseBody: { data: { goods: [{ id: 'G10001', name: '제주 상품' }] } },
+    }),
+    captured({
+      id: 'graphql-detail',
+      timestamp: 2,
+      method: 'POST',
+      url: 'https://bo.x2bee.com/graphql',
+      requestContentType: 'application/json',
+      requestBody: JSON.stringify({
+        operationName: 'GetGoodsDetail',
+        query: 'query GetGoodsDetail($id: ID!) { goodsDetail(id: $id) { id name price } }',
+        variables: { id: 'G10001' },
+      }),
+      requestMetadata: {
+        bodyKind: 'graphql',
+        fieldPaths: ['query', 'operationName', 'variables.id'],
+        fileFields: [],
+        graphql: { operationType: 'query', operationName: 'GetGoodsDetail' },
+      },
+      responseBody: { data: { goodsDetail: { id: 'G10001', name: '제주 상품', price: 1000 } } },
+    }),
+  ]);
+
+  assert.equal(analysis.tools.length, 2);
+  assert.ok(analysis.tools.every((tool) => tool.captureMetadata.protocol === 'graphql'));
+  assert.deepEqual(
+    new Set(analysis.tools.map((tool) => tool.captureMetadata.graphql?.operationName)),
+    new Set(['GetGoodsList', 'GetGoodsDetail']),
+  );
+  assert.equal(analysis.qualitySummary.graphqlToolCount, 2);
+  assert.ok(
+    analysis.tools.every((tool) => tool.captureMetadata.responseEnvelopePaths.includes('$.data')),
+  );
+}
+
+function testRestQueryFieldAndHeterogeneousArray(analyzeTrace) {
+  const analysis = analyzeTrace([
+    captured({
+      id: 'rest-query-field',
+      timestamp: 1,
+      method: 'POST',
+      url: 'https://bo.x2bee.com/api/search',
+      requestContentType: 'application/json',
+      requestBody: { query: 'summer sale', filters: ['active'] },
+      responseBody: [
+        { id: 'ITEM-1' },
+        { id: 'ITEM-2', displayName: 'Summer item' },
+      ],
+    }),
+  ]);
+
+  assert.equal(analysis.tools.length, 1);
+  const tool = analysis.tools[0];
+  assert.equal(tool.captureMetadata.protocol, 'http');
+  assert.ok(
+    tool.captureMetadata.responseSchemaVariants[0].fields.some(
+      (field) => field.path === '$[].displayName' && field.type === 'string',
+    ),
+    `heterogeneous array fields should be preserved: ${JSON.stringify(tool.captureMetadata)}`,
+  );
+}
+
+function testMultipartAndSchemaVariation(analyzeTrace) {
+  const multipartMetadata = {
+    bodyKind: 'multipart',
+    fieldPaths: ['title', 'attachment.$file', 'attachment.contentType', 'attachment.size'],
+    fileFields: [{ fieldPath: 'attachment', contentType: 'application/pdf', size: 1024 }],
+  };
+  const analysis = analyzeTrace([
+    captured({
+      id: 'upload-1',
+      timestamp: 1,
+      method: 'POST',
+      url: 'https://bo.x2bee.com/api/documents/upload',
+      requestContentType: 'multipart/form-data; boundary=fixture',
+      requestBody: JSON.stringify({
+        title: 'manual',
+        attachment: { $file: true, contentType: 'application/pdf', size: 1024 },
+      }),
+      requestMetadata: multipartMetadata,
+      responseBody: { result: { documentId: 'DOC-10001' } },
+    }),
+    captured({
+      id: 'upload-2',
+      timestamp: 2,
+      method: 'POST',
+      url: 'https://bo.x2bee.com/api/documents/upload',
+      requestContentType: 'multipart/form-data; boundary=fixture-2',
+      requestBody: JSON.stringify({
+        title: 'manual',
+        category: 'guide',
+        attachment: { $file: true, contentType: 'application/pdf', size: 2048 },
+      }),
+      requestMetadata: multipartMetadata,
+      responseBody: { result: { documentId: 'DOC-10002', revision: 2 } },
+    }),
+  ]);
+
+  assert.equal(analysis.tools.length, 1);
+  const tool = analysis.tools[0];
+  assert.ok(tool.captureMetadata.requestBodyKinds.includes('multipart'));
+  assert.equal(tool.captureMetadata.fileFields[0].fieldPath, 'attachment');
+  assert.equal(tool.captureMetadata.requestSchemaVariants.length, 2);
+  assert.equal(tool.captureMetadata.responseSchemaVariants.length, 2);
+  assert.ok(
+    tool.captureMetadata.issues.some((entry) => entry.code === 'schema_variation_observed'),
+  );
+  assert.equal(analysis.qualitySummary.multipartToolCount, 1);
+  assert.equal(analysis.qualitySummary.schemaVariationToolCount, 1);
+}
+
 function testPollingIsCollapsed(analyzeTrace) {
   const analysis = analyzeTrace([
     captured({
@@ -376,6 +540,8 @@ function testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayloa
     targetFieldPath: 'query.goodsNo',
     valueType: 'string',
   });
+  assert.equal(searchTool?.captureMetadata?.protocol, 'http');
+  assert.equal(typeof searchTool?.captureMetadata?.coverageScore, 'number');
 
   assert.throws(
     () => buildTraceRegistrationPayload({ ...analysis, primaryHost: null }, selected),
@@ -613,6 +779,10 @@ async function main() {
     testAnalyticsHeavyCaptureKeepsPrimaryApiHost(analyzeTrace);
     testAuthHostDoesNotStealPrimaryHost(analyzeTrace);
     testPathTemplating(analyzeTrace);
+    testSingleNumericPathIsConservative(analyzeTrace);
+    testGraphqlOperationsRemainDistinct(analyzeTrace);
+    testRestQueryFieldAndHeterogeneousArray(analyzeTrace);
+    testMultipartAndSchemaVariation(analyzeTrace);
     testPollingIsCollapsed(analyzeTrace);
     testPostBodySample(analyzeTrace);
     testObservedEdges(analyzeTrace);

@@ -1,7 +1,12 @@
 // 캡처 트레이스 → "도구 + 추정 엣지" 분석기.
 // Phase 2: 시간순 + 값 흐름만 사용 (클릭 매핑은 Phase 3+에서 통합).
 
-import type { CapturedApi } from '../../shared/api-hook-types';
+import type {
+  CapturedApi,
+  CapturedBodyKind,
+  CapturedFileField,
+  CapturedGraphqlOperation,
+} from '../../shared/api-hook-types';
 
 // ── 출력 타입 ──
 
@@ -23,6 +28,35 @@ export interface AnalyzedTool {
   label: string;                                // 사람이 읽는 한국어
   isLowPriority: boolean;                       // 빈 ack 등
   aiMetadata?: TraceToolAiMetadata;             // graph-tool-call 검색/plan용 의미 seed
+  captureMetadata: ToolCaptureMetadata;
+}
+
+export interface ObservedSchemaVariant {
+  signature: string;
+  observedCount: number;
+  fields: { path: string; type: string }[];
+}
+
+export interface ToolCaptureIssue {
+  code: string;
+  severity: 'info' | 'warning';
+  message: string;
+}
+
+export interface ToolCaptureMetadata {
+  protocol: 'http' | 'graphql';
+  operationKey?: string;
+  graphql?: CapturedGraphqlOperation & { rootField?: string };
+  requestContentTypes: string[];
+  responseContentTypes: string[];
+  requestBodyKinds: CapturedBodyKind[];
+  requestSchemaVariants: ObservedSchemaVariant[];
+  responseSchemaVariants: ObservedSchemaVariant[];
+  responseEnvelopePaths: string[];
+  fileFields: CapturedFileField[];
+  coverageScore: number;
+  confidence: 'high' | 'medium' | 'low';
+  issues: ToolCaptureIssue[];
 }
 
 export interface TraceToolAiMetadata {
@@ -63,6 +97,14 @@ export interface TraceAnalysis {
   dropped: DroppedReason[];
   totalRaw: number;
   keptRaw: number;                              // dedup·노이즈 제거 후 트레이스에 남은 캡처 수
+  qualitySummary: {
+    averageCoverageScore: number;
+    highConfidenceToolCount: number;
+    graphqlToolCount: number;
+    multipartToolCount: number;
+    schemaVariationToolCount: number;
+    issueCounts: Record<string, number>;
+  };
 }
 
 // ── 노이즈 패턴 ──
@@ -133,12 +175,51 @@ function safeJsonParse(s: string | null): unknown {
   try { return JSON.parse(s); } catch { return null; }
 }
 
+interface ParsedGraphqlOperation extends CapturedGraphqlOperation {
+  rootField?: string;
+  operationKey: string;
+}
+
+function parseGraphqlOperation(api: CapturedApi): ParsedGraphqlOperation | null {
+  const captured = api.requestMetadata?.graphql;
+  const body = safeJsonParse(api.requestBody);
+  const bodyRecord = body && typeof body === 'object' && !Array.isArray(body)
+    ? body as Record<string, unknown>
+    : null;
+  const query = typeof bodyRecord?.query === 'string' ? bodyRecord.query : '';
+  const queryLooksGraphql = /^\s*(?:(?:query|mutation|subscription)\b|{)/.test(query);
+  if (!captured && !queryLooksGraphql) return null;
+
+  const operationMatch = query.match(
+    /\b(query|mutation|subscription)\b\s*([_A-Za-z][_0-9A-Za-z]*)?/,
+  );
+  const rootFieldMatch = query.match(
+    /\{\s*(?:[_A-Za-z][_0-9A-Za-z]*\s*:\s*)?([_A-Za-z][_0-9A-Za-z]*)/,
+  );
+  const operationType = captured?.operationType
+    ?? operationMatch?.[1] as ParsedGraphqlOperation['operationType']
+    ?? 'unknown';
+  const operationName = captured?.operationName
+    ?? (typeof bodyRecord?.operationName === 'string' ? bodyRecord.operationName : undefined)
+    ?? operationMatch?.[2];
+  const rootField = rootFieldMatch?.[1];
+  const identity = operationName || rootField || 'anonymous';
+  return {
+    operationType,
+    ...(operationName ? { operationName } : {}),
+    ...(rootField ? { rootField } : {}),
+    operationKey: `graphql:${operationType}:${identity}`,
+  };
+}
+
 // ── path 템플릿화 ──
 // 같은 (method, host, segment 개수, 다른 segment 동일) 캡처가 2건+ → 차이 segment를 {paramN}으로
 // 추가로 단일 캡처도 shape이 명확한 ID(2자리+ 숫자, UUID, hex+digit)면 공격적으로 치환.
 const ID_LIKE = /^(\d+|[0-9a-f]{8,}|[0-9a-f-]{8,}-[0-9a-f-]{4,}-[0-9a-f-]{4,}-[0-9a-f-]{4,}-[0-9a-f-]{8,})$/i;
 const HASH_LIKE = /^[a-z0-9_-]{8,}$/i;         // 영문+숫자 섞인 8자리+ (slug일 수도, ID일 수도)
-const PURE_NUMERIC = /^\d{2,}$/;               // 단일 캡처에서도 자신있게 ID로 치환할 shape
+// 단일 관찰의 짧은 숫자는 연도, 상태 코드, 버전일 수 있으므로 템플릿화하지 않는다.
+// 여러 캡처에서 값이 달라지면 isIdLike 기반 변형 분석이 짧은 numeric ID도 처리한다.
+const PURE_NUMERIC = /^\d{5,}$/;
 
 function isIdLike(seg: string): boolean {
   if (ID_LIKE.test(seg)) return true;
@@ -438,6 +519,337 @@ function collectLeafFields(value: unknown, max = 24): LeafField[] {
   return leaves;
 }
 
+function collectSchemaFields(
+  value: unknown,
+  path = '$',
+  max = 100,
+): { path: string; type: string }[] {
+  const fields: { path: string; type: string }[] = [];
+  const seen = new Set<string>();
+  const addField = (fieldPath: string, type: string) => {
+    const key = `${fieldPath}:${type}`;
+    if (seen.has(key) || fields.length >= max) return;
+    seen.add(key);
+    fields.push({ path: fieldPath, type });
+  };
+  const walk = (node: unknown, currentPath: string, depth: number) => {
+    if (fields.length >= max || depth > 8) return;
+    if (node === null) {
+      addField(currentPath, 'null');
+      return;
+    }
+    if (Array.isArray(node)) {
+      addField(currentPath, 'array');
+      for (const item of node.slice(0, 5)) walk(item, `${currentPath}[]`, depth + 1);
+      return;
+    }
+    if (typeof node === 'object') {
+      const entries = Object.entries(node as Record<string, unknown>);
+      addField(currentPath, 'object');
+      for (const [key, child] of entries) {
+        walk(child, currentPath === '$' ? `$.${key}` : `${currentPath}.${key}`, depth + 1);
+        if (fields.length >= max) return;
+      }
+      return;
+    }
+    addField(currentPath, typeof node);
+  };
+  walk(value, path, 0);
+  return fields;
+}
+
+function hashText(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function schemaVariant(value: unknown): ObservedSchemaVariant | null {
+  if (value == null) return null;
+  const fields = collectSchemaFields(value)
+    .sort((a, b) => a.path.localeCompare(b.path) || a.type.localeCompare(b.type));
+  if (fields.length === 0) return null;
+  const shape = fields.map((field) => `${field.path}:${field.type}`).join('|');
+  return {
+    signature: `shape_${hashText(shape)}`,
+    observedCount: 1,
+    fields,
+  };
+}
+
+function mergeSchemaVariants(
+  variants: Iterable<ObservedSchemaVariant | null>,
+): ObservedSchemaVariant[] {
+  const merged = new Map<string, ObservedSchemaVariant>();
+  for (const variant of variants) {
+    if (!variant) continue;
+    const canonicalShape = variant.fields
+      .map((field) => `${field.path}:${field.type}`)
+      .sort()
+      .join('|');
+    const existing = merged.get(canonicalShape);
+    if (existing) existing.observedCount += variant.observedCount;
+    else merged.set(canonicalShape, {
+      ...variant,
+      fields: variant.fields.map((field) => ({ ...field })),
+    });
+  }
+  return [...merged.values()].sort(
+    (a, b) => b.observedCount - a.observedCount || a.signature.localeCompare(b.signature),
+  );
+}
+
+const RESPONSE_ENVELOPE_KEYS = new Set([
+  'data', 'result', 'results', 'payload', 'body', 'response', 'content', 'items', 'rows',
+]);
+
+function detectResponseEnvelopePath(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  let node = value as Record<string, unknown>;
+  let path = '$';
+  for (let depth = 0; depth < 4; depth++) {
+    const entries = Object.entries(node);
+    const candidates = entries.filter(([key, child]) => (
+      RESPONSE_ENVELOPE_KEYS.has(key.toLowerCase())
+      && child != null
+      && typeof child === 'object'
+    ));
+    if (candidates.length !== 1) break;
+    const [key, child] = candidates[0];
+    path += `.${key}`;
+    if (Array.isArray(child)) return `${path}[]`;
+    node = child as Record<string, unknown>;
+  }
+  return path === '$' ? null : path;
+}
+
+function normalizedContentType(value: string | undefined): string {
+  return (value || '').split(';', 1)[0].trim().toLowerCase();
+}
+
+function inferredBodyKind(api: CapturedApi): CapturedBodyKind {
+  if (api.requestMetadata?.bodyKind) return api.requestMetadata.bodyKind;
+  if (!api.requestBody) return 'none';
+  const contentType = normalizedContentType(api.requestContentType);
+  if (contentType.includes('multipart/form-data')) return 'multipart';
+  if (contentType.includes('application/x-www-form-urlencoded')) return 'form_urlencoded';
+  if (contentType.includes('graphql')) return 'graphql';
+  if (contentType.includes('json') || safeJsonParse(api.requestBody) != null) return 'json';
+  return 'text';
+}
+
+function requestContractValue(api: CapturedApi, graphql: ParsedGraphqlOperation | null): unknown {
+  const parsed = safeJsonParse(api.requestBody);
+  if (
+    graphql
+    && parsed
+    && typeof parsed === 'object'
+    && !Array.isArray(parsed)
+  ) {
+    return (parsed as Record<string, unknown>).variables ?? {};
+  }
+  return parsed;
+}
+
+function issue(
+  code: string,
+  severity: ToolCaptureIssue['severity'],
+  message: string,
+): ToolCaptureIssue {
+  return { code, severity, message };
+}
+
+function buildToolCaptureMetadata(
+  members: CapturedApi[],
+  graphql: ParsedGraphqlOperation | null,
+): ToolCaptureMetadata {
+  const requestSchemaVariants = mergeSchemaVariants(
+    members.map((member) => schemaVariant(requestContractValue(member, parseGraphqlOperation(member)))),
+  );
+  const responseValues = members.map((member) => safeJsonParse(member.responseBody));
+  const responseSchemaVariants = mergeSchemaVariants(responseValues.map(schemaVariant));
+  const requestContentTypes = uniqueStrings(
+    members.map((member) => normalizedContentType(member.requestContentType)).filter(Boolean),
+  );
+  const responseContentTypes = uniqueStrings(
+    members.map((member) => normalizedContentType(member.contentType)).filter(Boolean),
+  );
+  const requestBodyKinds = uniqueStrings(
+    members.map(inferredBodyKind),
+  ) as CapturedBodyKind[];
+  const responseEnvelopePaths = uniqueStrings(
+    responseValues.map(detectResponseEnvelopePath).filter((path): path is string => Boolean(path)),
+  );
+  const fileFieldsByPath = new Map<string, CapturedFileField>();
+  for (const member of members) {
+    for (const file of member.requestMetadata?.fileFields ?? []) {
+      if (!fileFieldsByPath.has(file.fieldPath)) {
+        fileFieldsByPath.set(file.fieldPath, {
+          fieldPath: file.fieldPath,
+          ...(file.contentType ? { contentType: file.contentType } : {}),
+          ...(typeof file.size === 'number' ? { size: file.size } : {}),
+        });
+      }
+    }
+  }
+
+  const issues: ToolCaptureIssue[] = [];
+  const limitationCodes = new Set(
+    members.flatMap((member) => member.requestMetadata?.limitations ?? []),
+  );
+  if (limitationCodes.size > 0) {
+    issues.push(issue(
+      'request_body_partially_observed',
+      'warning',
+      `요청 본문 관찰 제한: ${[...limitationCodes].sort().join(', ')}`,
+    ));
+  }
+  if (members.some((member) => member.requestBody?.includes('...[truncated]'))) {
+    issues.push(issue(
+      'request_body_truncated',
+      'warning',
+      '요청 본문이 캡처 상한을 넘어 일부만 보존되었습니다.',
+    ));
+  }
+  if (members.some((member) => member.responseBody?.includes('...[truncated]'))) {
+    issues.push(issue(
+      'response_body_truncated',
+      'warning',
+      '응답 본문이 캡처 상한을 넘어 일부만 보존되었습니다.',
+    ));
+  }
+  if (responseSchemaVariants.length === 0) {
+    issues.push(issue(
+      'response_schema_unobserved',
+      'warning',
+      '구조화된 응답 schema를 관찰하지 못했습니다.',
+    ));
+  }
+  if (requestSchemaVariants.length > 1 || responseSchemaVariants.length > 1) {
+    issues.push(issue(
+      'schema_variation_observed',
+      'info',
+      '같은 operation에서 서로 다른 request/response shape가 관찰되었습니다.',
+    ));
+  }
+  if (requestBodyKinds.includes('multipart')) {
+    issues.push(issue(
+      'multipart_file_content_omitted',
+      'info',
+      '파일 내용은 저장하지 않고 field, media type, size만 보존합니다.',
+    ));
+  }
+  if (graphql && !graphql.operationName) {
+    issues.push(issue(
+      'graphql_operation_name_missing',
+      'warning',
+      'GraphQL operationName이 없어 root field 기반 identity를 사용합니다.',
+    ));
+  }
+  if (graphql) {
+    issues.push(issue(
+      'xgen_graphql_contract_upgrade_required',
+      'info',
+      '현재 XGEN from-trace 계약은 같은 endpoint의 GraphQL operation 분리를 지원해야 합니다.',
+    ));
+  }
+
+  let coverageScore = 0.2;
+  if (!graphql || graphql.operationName || graphql.rootField) coverageScore += 0.2;
+  if (
+    requestBodyKinds.every((kind) => kind === 'none')
+    || requestSchemaVariants.length > 0
+  ) coverageScore += 0.2;
+  if (responseSchemaVariants.length > 0) coverageScore += 0.3;
+  if (requestContentTypes.length > 0 || responseContentTypes.length > 0) coverageScore += 0.1;
+  coverageScore = Math.round(Math.min(1, coverageScore) * 100) / 100;
+  const warningCount = issues.filter((entry) => entry.severity === 'warning').length;
+  const confidence: ToolCaptureMetadata['confidence'] = coverageScore >= 0.9 && warningCount === 0
+    ? 'high'
+    : coverageScore >= 0.65
+      ? 'medium'
+      : 'low';
+
+  return {
+    protocol: graphql ? 'graphql' : 'http',
+    ...(graphql ? {
+      operationKey: graphql.operationKey,
+      graphql: {
+        operationType: graphql.operationType,
+        ...(graphql.operationName ? { operationName: graphql.operationName } : {}),
+        ...(graphql.rootField ? { rootField: graphql.rootField } : {}),
+      },
+    } : {}),
+    requestContentTypes,
+    responseContentTypes,
+    requestBodyKinds,
+    requestSchemaVariants,
+    responseSchemaVariants,
+    responseEnvelopePaths,
+    fileFields: [...fileFieldsByPath.values()],
+    coverageScore,
+    confidence,
+    issues,
+  };
+}
+
+function mergeCaptureMetadata(
+  left: ToolCaptureMetadata,
+  right: ToolCaptureMetadata,
+): ToolCaptureMetadata {
+  const issues = new Map<string, ToolCaptureIssue>();
+  for (const entry of [...left.issues, ...right.issues]) {
+    if (!issues.has(entry.code)) issues.set(entry.code, entry);
+  }
+  const requestSchemaVariants = mergeSchemaVariants([
+    ...left.requestSchemaVariants,
+    ...right.requestSchemaVariants,
+  ]);
+  const responseSchemaVariants = mergeSchemaVariants([
+    ...left.responseSchemaVariants,
+    ...right.responseSchemaVariants,
+  ]);
+  const coverageScore = Math.round(Math.max(left.coverageScore, right.coverageScore) * 100) / 100;
+  const confidenceOrder = { low: 0, medium: 1, high: 2 } as const;
+  const confidence = confidenceOrder[left.confidence] >= confidenceOrder[right.confidence]
+    ? left.confidence
+    : right.confidence;
+  const fileFields = new Map<string, CapturedFileField>();
+  for (const field of [...left.fileFields, ...right.fileFields]) {
+    if (!fileFields.has(field.fieldPath)) fileFields.set(field.fieldPath, field);
+  }
+  return {
+    protocol: left.protocol === 'graphql' || right.protocol === 'graphql' ? 'graphql' : 'http',
+    operationKey: left.operationKey ?? right.operationKey,
+    graphql: left.graphql ?? right.graphql,
+    requestContentTypes: uniqueStrings([
+      ...left.requestContentTypes,
+      ...right.requestContentTypes,
+    ]),
+    responseContentTypes: uniqueStrings([
+      ...left.responseContentTypes,
+      ...right.responseContentTypes,
+    ]),
+    requestBodyKinds: uniqueStrings([
+      ...left.requestBodyKinds,
+      ...right.requestBodyKinds,
+    ]) as CapturedBodyKind[],
+    requestSchemaVariants,
+    responseSchemaVariants,
+    responseEnvelopePaths: uniqueStrings([
+      ...left.responseEnvelopePaths,
+      ...right.responseEnvelopePaths,
+    ]),
+    fileFields: [...fileFields.values()],
+    coverageScore,
+    confidence,
+    issues: [...issues.values()],
+  };
+}
+
 function uniqueStrings(values: Iterable<string>, max = 24): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -734,11 +1146,13 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
   stage = polling.kept;
   addDrop('폴링 패턴 (10초 내 동일 호출 3+회)', polling.droppedCount);
 
-  // 9. (method, host) 단위로 묶고, 안에서 다시 path 템플릿화
+  // 9. (method, host, protocol operation) 단위로 묶고, 안에서 다시 path 템플릿화.
+  // GraphQL은 같은 POST /graphql endpoint를 공유하므로 operation identity를 반드시 포함한다.
   const byMethodHost = new Map<string, CapturedApi[]>();
   for (const c of stage) {
     const u = tryParseUrl(c.url)!;
-    const k = `${c.method}|${u.host}`;
+    const graphql = parseGraphqlOperation(c);
+    const k = JSON.stringify([c.method, u.host, graphql?.operationKey ?? 'http']);
     if (!byMethodHost.has(k)) byMethodHost.set(k, []);
     byMethodHost.get(k)!.push(c);
   }
@@ -747,11 +1161,12 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
   const captureToolMap: CaptureWithTool[] = [];
 
   for (const [k, arr] of byMethodHost.entries()) {
-    const [method, host] = k.split('|');
+    const [method, host] = JSON.parse(k) as [string, string, string];
     const groups = groupForTemplating(method, host, arr);
     for (const g of groups) {
       const { templatedPath, pathParams, members } = templatize(method, host, g);
-      const toolId = `${method}:${host}${templatedPath}`;
+      const graphql = parseGraphqlOperation(members[0]);
+      const toolId = `${method}:${host}${templatedPath}${graphql ? `#${graphql.operationKey}` : ''}`;
       const queryKeys = new Set<string>();
       const querySample: Record<string, string> = {};
       for (const m of members) {
@@ -769,7 +1184,12 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
       const first = members[0];
       const requestBodySample = safeJsonParse(first.requestBody);
       const responseSample = safeJsonParse(first.responseBody);
-      const label = describeTool(method, templatedPath);
+      const semanticPath = graphql
+        ? `${templatedPath}/${graphql.operationName || graphql.rootField || 'graphql'}`
+        : templatedPath;
+      const semanticMethod = graphql?.operationType === 'query' ? 'GET' : method;
+      const label = describeTool(semanticMethod, semanticPath);
+      const captureMetadata = buildToolCaptureMetadata(members, graphql);
       tools.push({
         id: toolId,
         method,
@@ -784,12 +1204,13 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
         responseSample,
         label,
         isLowPriority: allEmpty,
+        captureMetadata,
         aiMetadata: buildTraceToolAiMetadata({
-          method,
-          templatedPath,
+          method: semanticMethod,
+          templatedPath: semanticPath,
           pathParams,
           queryParamKeys: [...queryKeys],
-          requestBodySample,
+          requestBodySample: requestContractValue(first, graphql),
           responseSample,
           label,
         }),
@@ -820,6 +1241,10 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
       if (existing.responseSample == null && t.responseSample != null) {
         existing.responseSample = t.responseSample;
       }
+      existing.captureMetadata = mergeCaptureMetadata(
+        existing.captureMetadata,
+        t.captureMetadata,
+      );
       idRewrite.set(t.id, existing.id);
     } else {
       mergedById.set(t.id, t);
@@ -863,6 +1288,19 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
   });
   edges.sort((a, b) => b.confidence - a.confidence);
 
+  const issueCounts: Record<string, number> = {};
+  for (const tool of mergedTools) {
+    for (const entry of tool.captureMetadata.issues) {
+      issueCounts[entry.code] = (issueCounts[entry.code] ?? 0) + 1;
+    }
+  }
+  const averageCoverageScore = mergedTools.length > 0
+    ? Math.round(
+        (mergedTools.reduce((sum, tool) => sum + tool.captureMetadata.coverageScore, 0)
+          / mergedTools.length) * 100,
+      ) / 100
+    : 0;
+
   return {
     primaryHost,
     tools: mergedTools,
@@ -871,5 +1309,24 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
     dropped,
     totalRaw,
     keptRaw: stage.length,
+    qualitySummary: {
+      averageCoverageScore,
+      highConfidenceToolCount: mergedTools.filter(
+        (tool) => tool.captureMetadata.confidence === 'high',
+      ).length,
+      graphqlToolCount: mergedTools.filter(
+        (tool) => tool.captureMetadata.protocol === 'graphql',
+      ).length,
+      multipartToolCount: mergedTools.filter(
+        (tool) => tool.captureMetadata.requestBodyKinds.includes('multipart'),
+      ).length,
+      schemaVariationToolCount: mergedTools.filter(
+        (tool) => (
+          tool.captureMetadata.requestSchemaVariants.length > 1
+          || tool.captureMetadata.responseSchemaVariants.length > 1
+        ),
+      ).length,
+      issueCounts,
+    },
   };
 }

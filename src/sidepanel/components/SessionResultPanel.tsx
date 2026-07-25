@@ -59,6 +59,35 @@ function ToolRow({
           <span className={methodColor(tool.method)}>{tool.method}</span> {tool.templatedPath}
           {tool.sampleCount > 1 && <span className="ml-1 text-gray-400">×{tool.sampleCount}</span>}
         </div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[9px]">
+          <span className={
+            tool.captureMetadata.confidence === 'high'
+              ? 'text-green-700'
+              : tool.captureMetadata.confidence === 'medium'
+                ? 'text-amber-700'
+                : 'text-red-700'
+          }>
+            contract {Math.round(tool.captureMetadata.coverageScore * 100)}%
+          </span>
+          {tool.captureMetadata.protocol === 'graphql' && (
+            <span className="text-fuchsia-700">GraphQL</span>
+          )}
+          {tool.captureMetadata.requestBodyKinds.includes('multipart') && (
+            <span className="text-blue-700">multipart</span>
+          )}
+          {(tool.captureMetadata.requestSchemaVariants.length > 1
+            || tool.captureMetadata.responseSchemaVariants.length > 1) && (
+            <span className="text-violet-700">shape variation</span>
+          )}
+          {tool.captureMetadata.issues.some((entry) => entry.severity === 'warning') && (
+            <span
+              className="text-amber-700"
+              title={tool.captureMetadata.issues.map((entry) => entry.message).join('\n')}
+            >
+              확인 필요
+            </span>
+          )}
+        </div>
         {edgesFrom.length > 0 && (
           <div className="text-[9px] text-violet-600 mt-0.5 truncate">
             → 보통 다음으로:{' '}
@@ -224,6 +253,11 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
         원본 {analysis.totalRaw}건 · 노이즈 제거 {totalDropped}건 ·
         도구 {analysis.tools.length}개 · 추정 관계 {analysis.edges.length}개
         {analysis.authCandidates.length > 0 && ` · 인증 후보 ${analysis.authCandidates.length}건`}
+        {' '}· contract 평균 {Math.round(analysis.qualitySummary.averageCoverageScore * 100)}%
+        {analysis.qualitySummary.graphqlToolCount > 0
+          && ` · GraphQL ${analysis.qualitySummary.graphqlToolCount}개`}
+        {analysis.qualitySummary.multipartToolCount > 0
+          && ` · multipart ${analysis.qualitySummary.multipartToolCount}개`}
       </div>
 
       {/* 도구 목록 */}

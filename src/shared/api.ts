@@ -169,6 +169,8 @@ export interface FromTraceTool {
     truncated?: boolean;
     droppedQueryKeyCount?: number;
   };
+  /** Pathfinder 관찰 품질/transport evidence. 구버전 XGEN은 안전하게 무시한다. */
+  captureMetadata?: unknown;
 }
 
 export interface FromTraceEdge {

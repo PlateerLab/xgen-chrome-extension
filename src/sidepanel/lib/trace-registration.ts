@@ -228,6 +228,7 @@ export function buildTraceRegistrationPayload(
         sampleCount: tool.sampleCount,
         ...(aiMetadata !== undefined ? { aiMetadata: aiMetadata as NonNullable<typeof tool.aiMetadata> } : {}),
         ...(sampleMeta ? { sampleMeta } : {}),
+        captureMetadata: tool.captureMetadata,
       };
     }),
     edges: selectedEdges.map((edge) => ({

@@ -332,11 +332,11 @@ chrome.runtime.onMessage.addListener(
         const targetTabId = getMessageTabId(message);
         console.log('[XGEN SW] RELAY_COMMAND received:', event.type, event);
         (async () => {
-          // AI agent의 직접 dispatch — 이후 ~2초 캡처를 origin='ai'로 태깅하기 위해 active tab 마킹
           const targetTab = await getTargetTab(targetTabId);
-          if (targetTab?.id) markAiDriving(targetTab.id);
 
           if (event.type === 'canvas_command') {
+            // 실제 페이지 조작 뒤 발생한 API만 AI-origin으로 분리한다.
+            if (targetTab?.id) markAiDriving(targetTab.id);
             await sendToContentScript({
               type: 'CANVAS_COMMAND',
               requestId: (event as any).requestId || crypto.randomUUID(),
@@ -349,6 +349,7 @@ chrome.runtime.onMessage.addListener(
             if (apiHookResult) {
               await postCommandResultToBackend(requestId, apiHookResult, targetTab?.id ?? targetTabId);
             } else {
+              if (targetTab?.id) markAiDriving(targetTab.id);
               // 네비게이션 생존주기 처리 포함 디스패치
               await dispatchPageCommand(requestId, event.action, event.params, targetTab?.id ?? targetTabId);
             }
@@ -483,6 +484,12 @@ chrome.runtime.onMessage.addListener(
         }
         const session = activeCaptureSession;
         activeCaptureSession = null;
+        chrome.scripting.executeScript({
+          target: { tabId: session.tabId },
+          func: mainWorldUnhookFunction,
+          world: 'MAIN' as any,
+        }).catch(() => {});
+        hookedTabs.delete(session.tabId);
         completeCaptureSession(session, { openPanel: true });
         capturedApisByTab.delete(session.tabId);
         sendResponse({

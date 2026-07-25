@@ -403,6 +403,37 @@ function startFixtureServer() {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/graphql') {
+      let rawBody = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => {
+        rawBody += chunk;
+      });
+      req.on('end', () => {
+        let body = {};
+        try { body = JSON.parse(rawBody || '{}'); } catch { /* fixture returns generic data */ }
+        const operationName = body.operationName || 'AnonymousOperation';
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          data: {
+            [operationName]: operationName === 'GetGoodsList'
+              ? [{ id: 'G10001', name: '제주 상품' }]
+              : { id: 'G10001', name: '제주 상품', price: 1000 },
+          },
+        }));
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/documents/upload') {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ result: { documentId: 'DOC-10001' } }));
+      });
+      return;
+    }
+
     if (req.url?.startsWith('/fragment')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end('<section>not an api response</section>');
@@ -901,6 +932,63 @@ async function verifySessionResultRegistration(extensionPage, targetPage, regist
     request.body.tools.some((tool) => tool.method === 'POST' && tool.templatedPath === '/api/member/v1/me'),
     `registration should include member tool: ${JSON.stringify(request.body.tools)}`,
   );
+  const graphqlTools = request.body.tools.filter(
+    (tool) => tool.captureMetadata?.protocol === 'graphql',
+  );
+  assert.equal(
+    graphqlTools.length,
+    2,
+    `registration should preserve distinct GraphQL operations: ${JSON.stringify(request.body.tools)}`,
+  );
+  assert.deepEqual(
+    new Set(graphqlTools.map((tool) => tool.captureMetadata?.graphql?.operationName)),
+    new Set(['GetGoodsList', 'GetGoodsDetail']),
+  );
+  const multipartTool = request.body.tools.find(
+    (tool) => tool.templatedPath === '/api/documents/upload',
+  );
+  assert.ok(
+    multipartTool?.captureMetadata?.requestBodyKinds?.includes('multipart'),
+    `registration should preserve multipart contract evidence: ${JSON.stringify(multipartTool)}`,
+  );
+}
+
+async function verifyCaptureObservationStopped(
+  extensionPage,
+  targetPage,
+  commandResults,
+) {
+  await targetPage.bringToFront();
+  await targetPage.evaluate(async () => {
+    const response = await fetch('/api/goods/v1/search?keyword=after-stop');
+    if (!response.ok) throw new Error(`post-stop fixture fetch failed: ${response.status}`);
+    await response.json();
+  });
+  await wait(200);
+
+  const tabId = await findTabIdByUrl(extensionPage, '/workspace/details$');
+  const requestId = `verify-capture-disabled-${Date.now()}`;
+  const relayed = await sendExtensionMessage(extensionPage, {
+    type: 'RELAY_COMMAND',
+    tabId,
+    event: {
+      type: 'page_command',
+      requestId,
+      action: 'get_captured_apis',
+      params: {},
+    },
+  });
+  assert.equal(relayed?.ok, true, `capture status relay failed: ${JSON.stringify(relayed)}`);
+  const callback = await waitForCommandResult(
+    commandResults,
+    requestId,
+    'Capture observation stop',
+  );
+  assert.equal(
+    callback.body?.result?.total,
+    0,
+    `API hook should not capture after session stop: ${JSON.stringify(callback.body)}`,
+  );
 }
 
 async function verifySessionResultMergeConflict(
@@ -1051,9 +1139,48 @@ async function main() {
           xhr.onerror = () => reject(new Error('fixture xhr failed'));
           xhr.send(JSON.stringify({ includeGrade: true }));
         });
+
+        const graphqlOperations = [
+          {
+            operationName: 'GetGoodsList',
+            query: 'query GetGoodsList($keyword: String!) { goods(keyword: $keyword) { id name } }',
+            variables: { keyword: 'jeju' },
+          },
+          {
+            operationName: 'GetGoodsDetail',
+            query: 'query GetGoodsDetail($id: ID!) { goodsDetail(id: $id) { id name price } }',
+            variables: { id: 'G10001' },
+          },
+        ];
+        for (const operation of graphqlOperations) {
+          const graphql = await fetch('/graphql', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(operation),
+          });
+          if (!graphql.ok) throw new Error(`fixture GraphQL failed: ${graphql.status}`);
+          await graphql.json();
+        }
+
+        const form = new FormData();
+        form.append('title', 'runtime fixture');
+        form.append(
+          'attachment',
+          new File(['not-persisted-file-content'], 'private-customer-name.pdf', {
+            type: 'application/pdf',
+          }),
+        );
+        const upload = await fetch('/api/documents/upload', { method: 'POST', body: form });
+        if (!upload.ok) throw new Error(`fixture upload failed: ${upload.status}`);
+        await upload.json();
       });
     }, 'fetch+xhr capture', distractorPage);
     await verifySessionResultRegistration(extensionPage, targetPage, registrationRequests);
+    await verifyCaptureObservationStopped(
+      extensionPage,
+      targetPage,
+      commandResults,
+    );
 
     const searchApi = findApi(firstApis, 'GET', '/api/goods/v1/search?keyword=jeju');
     assert.ok(searchApi, `captured search API not found in ${JSON.stringify(firstApis)}`);
@@ -1062,6 +1189,24 @@ async function main() {
     const memberApi = findApi(firstApis, 'POST', '/api/member/v1/me');
     assert.ok(memberApi, `captured XHR API not found in ${JSON.stringify(firstApis)}`);
     assert.match(memberApi.requestBody || '', /includeGrade/);
+    const graphqlApis = firstApis.filter((api) => api.method === 'POST' && api.url.endsWith('/graphql'));
+    assert.equal(graphqlApis.length, 2, `GraphQL operations should be captured: ${JSON.stringify(firstApis)}`);
+    assert.deepEqual(
+      new Set(graphqlApis.map((api) => api.requestMetadata?.graphql?.operationName)),
+      new Set(['GetGoodsList', 'GetGoodsDetail']),
+    );
+    const uploadApi = findApi(firstApis, 'POST', '/api/documents/upload');
+    assert.ok(uploadApi, `multipart upload not captured: ${JSON.stringify(firstApis)}`);
+    assert.equal(uploadApi.requestMetadata?.bodyKind, 'multipart');
+    assert.equal(uploadApi.requestMetadata?.fileFields?.[0]?.fieldPath, 'attachment');
+    assert.ok(
+      !JSON.stringify(uploadApi).includes('not-persisted-file-content'),
+      'multipart file bytes must not be captured',
+    );
+    assert.ok(
+      !JSON.stringify(uploadApi).includes('private-customer-name.pdf'),
+      'multipart file names must not be captured',
+    );
     assert.ok(!firstApis.some((api) => api.url.includes('/fragment')), 'HTML fetch should be ignored');
 
     const mergeApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {

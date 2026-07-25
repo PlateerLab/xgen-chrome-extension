@@ -1,5 +1,35 @@
 // ── API Hook: 캡처된 API 요청 ──
 
+export type CapturedBodyKind =
+  | 'none'
+  | 'json'
+  | 'graphql'
+  | 'form_urlencoded'
+  | 'multipart'
+  | 'text'
+  | 'binary'
+  | 'unknown';
+
+export interface CapturedFileField {
+  fieldPath: string;
+  fileName?: string;
+  contentType?: string;
+  size?: number;
+}
+
+export interface CapturedGraphqlOperation {
+  operationType: 'query' | 'mutation' | 'subscription' | 'unknown';
+  operationName?: string;
+}
+
+export interface CapturedRequestMetadata {
+  bodyKind: CapturedBodyKind;
+  fieldPaths: string[];
+  fileFields: CapturedFileField[];
+  graphql?: CapturedGraphqlOperation;
+  limitations?: string[];
+}
+
 export interface CapturedApi {
   id: string;
   tabId: number;
@@ -8,6 +38,8 @@ export interface CapturedApi {
   method: string;
   requestHeaders: Record<string, string>;
   requestBody: string | null;
+  requestContentType?: string;
+  requestMetadata?: CapturedRequestMetadata;
   responseStatus: number;
   responseHeaders: Record<string, string>;
   responseBody: string | null;

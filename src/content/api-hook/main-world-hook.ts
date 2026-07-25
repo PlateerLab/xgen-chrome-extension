@@ -3,8 +3,12 @@
  * chrome.scripting.executeScript({ world: 'MAIN', func }) 로 주입된다.
  */
 export function mainWorldHookFunction() {
-  // 중복 주입 방지
-  if ((window as any).__xgenApiHookActive) return;
+  // 이미 wrapper가 설치돼 있으면 다시 감싸지 않고 관찰만 재개한다.
+  if ((window as any).__xgenApiHookInstalled) {
+    (window as any).__xgenApiHookActive = true;
+    return;
+  }
+  (window as any).__xgenApiHookInstalled = true;
   (window as any).__xgenApiHookActive = true;
 
   const MAX_BODY = 100 * 1024; // 100KB
@@ -58,6 +62,182 @@ export function mainWorldHookFunction() {
     return result;
   }
 
+  function headerValue(headers: Record<string, string>, name: string): string {
+    const target = name.toLowerCase();
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.toLowerCase() === target) return value;
+    }
+    return '';
+  }
+
+  function inferStringBodyKind(contentType: string, value: string): string {
+    const ct = contentType.toLowerCase();
+    if (ct.includes('application/graphql')) return 'graphql';
+    if (ct.includes('application/x-www-form-urlencoded')) return 'form_urlencoded';
+    if (ct.includes('json') || /^[\s]*[{[]/.test(value)) return 'json';
+    return 'text';
+  }
+
+  function collectFieldPaths(value: unknown, max = 100): string[] {
+    const paths: string[] = [];
+    const seen = new Set<string>();
+    const addPath = (path: string) => {
+      if (!path || seen.has(path) || paths.length >= max) return;
+      seen.add(path);
+      paths.push(path);
+    };
+    const walk = (node: unknown, path: string, depth: number) => {
+      if (paths.length >= max || depth > 8 || node == null) return;
+      if (Array.isArray(node)) {
+        for (const item of node.slice(0, 5)) walk(item, `${path}[]`, depth + 1);
+        return;
+      }
+      if (typeof node === 'object') {
+        for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+          const childPath = path ? `${path}.${key}` : key;
+          if (child != null && typeof child === 'object') walk(child, childPath, depth + 1);
+          else addPath(childPath);
+          if (paths.length >= max) return;
+        }
+        return;
+      }
+      addPath(path);
+    };
+    walk(value, '', 0);
+    return paths;
+  }
+
+  function parseGraphqlMetadata(value: unknown): Record<string, unknown> | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const body = value as Record<string, unknown>;
+    if (typeof body.query !== 'string') return undefined;
+    if (!/^\s*(?:(?:query|mutation|subscription)\b|{)/.test(body.query)) return undefined;
+    const match = body.query.match(/\b(query|mutation|subscription)\b\s*([_A-Za-z][_0-9A-Za-z]*)?/);
+    return {
+      operationType: match?.[1] || 'unknown',
+      ...(typeof body.operationName === 'string' && body.operationName
+        ? { operationName: body.operationName }
+        : match?.[2]
+          ? { operationName: match[2] }
+          : {}),
+    };
+  }
+
+  function appendFormValue(target: Record<string, unknown>, key: string, value: unknown): void {
+    if (!(key in target)) {
+      target[key] = value;
+      return;
+    }
+    target[key] = Array.isArray(target[key])
+      ? [...target[key] as unknown[], value]
+      : [target[key], value];
+  }
+
+  function serializeRequestBody(
+    body: BodyInit | null | undefined,
+    contentType: string,
+  ): {
+    requestBody: string | null;
+    requestMetadata: Record<string, unknown>;
+  } {
+    if (body == null) {
+      return {
+        requestBody: null,
+        requestMetadata: { bodyKind: 'none', fieldPaths: [], fileFields: [] },
+      };
+    }
+
+    if (body instanceof FormData) {
+      const sample: Record<string, unknown> = {};
+      const fileFields: Record<string, unknown>[] = [];
+      for (const [key, value] of body.entries()) {
+        if (value instanceof File) {
+          const file = {
+            $file: true,
+            contentType: value.type,
+            size: value.size,
+          };
+          appendFormValue(sample, key, file);
+          fileFields.push({
+            fieldPath: key,
+            contentType: value.type,
+            size: value.size,
+          });
+        } else {
+          appendFormValue(sample, key, value);
+        }
+      }
+      return {
+        requestBody: JSON.stringify(sample),
+        requestMetadata: {
+          bodyKind: 'multipart',
+          fieldPaths: collectFieldPaths(sample),
+          fileFields,
+        },
+      };
+    }
+
+    if (body instanceof URLSearchParams) {
+      const sample: Record<string, unknown> = {};
+      for (const [key, value] of body.entries()) appendFormValue(sample, key, value);
+      return {
+        requestBody: JSON.stringify(sample),
+        requestMetadata: {
+          bodyKind: 'form_urlencoded',
+          fieldPaths: collectFieldPaths(sample),
+          fileFields: [],
+        },
+      };
+    }
+
+    if (body instanceof Blob) {
+      return {
+        requestBody: null,
+        requestMetadata: {
+          bodyKind: 'binary',
+          fieldPaths: [],
+          fileFields: [{
+            fieldPath: '$body',
+            contentType: body.type,
+            size: body.size,
+          }],
+          limitations: ['binary_body_not_captured'],
+        },
+      };
+    }
+
+    if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+      return {
+        requestBody: null,
+        requestMetadata: {
+          bodyKind: 'binary',
+          fieldPaths: [],
+          fileFields: [],
+          limitations: ['binary_body_not_captured'],
+        },
+      };
+    }
+
+    const text = typeof body === 'string' ? body : String(body);
+    const bodyKind = inferStringBodyKind(contentType, text);
+    let parsed: unknown = null;
+    if (bodyKind === 'json') {
+      try { parsed = JSON.parse(text); } catch { /* malformed JSON remains text */ }
+    } else if (bodyKind === 'form_urlencoded') {
+      parsed = Object.fromEntries(new URLSearchParams(text).entries());
+    }
+    const graphql = parseGraphqlMetadata(parsed);
+    return {
+      requestBody: text,
+      requestMetadata: {
+        bodyKind: graphql ? 'graphql' : bodyKind,
+        fieldPaths: collectFieldPaths(parsed),
+        fileFields: [],
+        ...(graphql ? { graphql } : {}),
+      },
+    };
+  }
+
   function dispatch(detail: any) {
     window.dispatchEvent(new CustomEvent('xgen:api-captured', { detail }));
   }
@@ -65,6 +245,9 @@ export function mainWorldHookFunction() {
   // ── fetch 후킹 ──
   const originalFetch = window.fetch;
   window.fetch = async function (input: RequestInfo | URL, init?: RequestInit) {
+    if (!(window as any).__xgenApiHookActive) {
+      return originalFetch.call(this, input, init);
+    }
     const startTime = Date.now();
     const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
     // 상대 경로를 절대 URL로 변환
@@ -75,14 +258,20 @@ export function mainWorldHookFunction() {
     }
 
     const method = init?.method || (input instanceof Request ? input.method : 'GET');
-    let requestBody: string | null = null;
-    if (init?.body) {
-      try {
-        requestBody = typeof init.body === 'string' ? init.body : JSON.stringify(init.body);
-      } catch { requestBody = '[unserializable]'; }
-    }
-
     const requestHeaders = headersToObject(init?.headers || (input instanceof Request ? input.headers : undefined));
+    const requestContentType = headerValue(requestHeaders, 'content-type');
+    let serializedRequest = serializeRequestBody(init?.body ?? null, requestContentType);
+    if (init?.body == null && input instanceof Request && !['GET', 'HEAD'].includes(method.toUpperCase())) {
+      try {
+        const requestText = await input.clone().text();
+        serializedRequest = serializeRequestBody(requestText || null, requestContentType);
+      } catch {
+        serializedRequest.requestMetadata = {
+          ...serializedRequest.requestMetadata,
+          limitations: ['request_object_body_unavailable'],
+        };
+      }
+    }
 
     try {
       const response = await originalFetch.call(this, input, init);
@@ -104,36 +293,44 @@ export function mainWorldHookFunction() {
         return response;
       }
 
-      dispatch({
-        id: crypto.randomUUID(),
-        timestamp: startTime,
-        url,
-        method: method.toUpperCase(),
-        requestHeaders,
-        requestBody: truncate(requestBody),
-        responseStatus: response.status,
-        responseHeaders,
-        responseBody: truncate(responseBody),
-        contentType: response.headers.get('content-type') || '',
-        duration,
-      });
+      if ((window as any).__xgenApiHookActive) {
+        dispatch({
+          id: crypto.randomUUID(),
+          timestamp: startTime,
+          url,
+          method: method.toUpperCase(),
+          requestHeaders,
+          requestBody: truncate(serializedRequest.requestBody),
+          requestContentType,
+          requestMetadata: serializedRequest.requestMetadata,
+          responseStatus: response.status,
+          responseHeaders,
+          responseBody: truncate(responseBody),
+          contentType: response.headers.get('content-type') || '',
+          duration,
+        });
+      }
 
       return response;
     } catch (err) {
       const duration = Date.now() - startTime;
-      dispatch({
-        id: crypto.randomUUID(),
-        timestamp: startTime,
-        url,
-        method: method.toUpperCase(),
-        requestHeaders,
-        requestBody: truncate(requestBody),
-        responseStatus: 0,
-        responseHeaders: {},
-        responseBody: `[fetch error: ${(err as Error).message}]`,
-        contentType: '',
-        duration,
-      });
+      if ((window as any).__xgenApiHookActive) {
+        dispatch({
+          id: crypto.randomUUID(),
+          timestamp: startTime,
+          url,
+          method: method.toUpperCase(),
+          requestHeaders,
+          requestBody: truncate(serializedRequest.requestBody),
+          requestContentType,
+          requestMetadata: serializedRequest.requestMetadata,
+          responseStatus: 0,
+          responseHeaders: {},
+          responseBody: `[fetch error: ${(err as Error).message}]`,
+          contentType: '',
+          duration,
+        });
+      }
       throw err;
     }
   };
@@ -164,17 +361,13 @@ export function mainWorldHookFunction() {
 
   XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
     const meta = (this as any).__xgen;
-    if (!meta || shouldIgnore(meta.url)) {
+    if (!(window as any).__xgenApiHookActive || !meta || shouldIgnore(meta.url)) {
       return originalSend.call(this, body);
     }
 
     meta.startTime = Date.now();
-    let requestBody: string | null = null;
-    if (body) {
-      try {
-        requestBody = typeof body === 'string' ? body : JSON.stringify(body);
-      } catch { requestBody = '[unserializable]'; }
-    }
+    const requestContentType = headerValue(meta.requestHeaders, 'content-type');
+    const serializedRequest = serializeRequestBody(body as BodyInit | null, requestContentType);
 
     this.addEventListener('loadend', function () {
       const duration = Date.now() - meta.startTime;
@@ -189,14 +382,16 @@ export function mainWorldHookFunction() {
 
       // HTML/이미지 등 비-API 응답 제외
       const xhrContentType = this.getResponseHeader('content-type') || '';
-      if (!shouldSkipResponse(xhrContentType)) {
+      if ((window as any).__xgenApiHookActive && !shouldSkipResponse(xhrContentType)) {
         dispatch({
           id: crypto.randomUUID(),
           timestamp: meta.startTime,
           url: meta.url,
           method: meta.method,
           requestHeaders: meta.requestHeaders,
-          requestBody: truncate(requestBody),
+          requestBody: truncate(serializedRequest.requestBody),
+          requestContentType,
+          requestMetadata: serializedRequest.requestMetadata,
           responseStatus: this.status,
           responseHeaders,
           responseBody: truncate(this.responseText || null),
@@ -217,6 +412,5 @@ export function mainWorldHookFunction() {
  */
 export function mainWorldUnhookFunction() {
   (window as any).__xgenApiHookActive = false;
-  // 원본 복원은 불가능 (참조를 잃음), 페이지 새로고침으로 해제
-  console.log('[XGEN API Hook] 후킹 비활성화 (페이지 새로고침 시 완전 해제)');
+  console.log('[XGEN API Hook] 관찰 비활성화');
 }
