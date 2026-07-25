@@ -150,6 +150,48 @@
         "needle": "collectionDeleteRequests.push"
       },
       "devProbe": false
+    },
+    {
+      "id": "mcp_session_list",
+      "method": "GET",
+      "path": "/api/mcp/sessions",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function fetchMCPStationSessions("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/mcp/sessions'"
+      },
+      "devProbe": true
+    },
+    {
+      "id": "collection_mcp_source_preview",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/mcp-sources/preview",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function previewMCPCollectionSource("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "const mcpPreviewMatch"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_mcp_source_add",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/mcp-sources",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function addMCPCollectionSource("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "const mcpSourceMatch"
+      },
+      "devProbe": false
     }
   ]
 }

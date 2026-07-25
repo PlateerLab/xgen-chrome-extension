@@ -297,6 +297,9 @@ function startFixtureServer() {
   const sourcePreviewRequests = [];
   const sourceAddRequests = [];
   const collectionDeleteRequests = [];
+  const mcpSessionRequests = [];
+  const mcpSourcePreviewRequests = [];
+  const mcpSourceAddRequests = [];
   const registrationMode = { conflictNext: false };
   const sourceAddMode = { failNext: false };
   const server = createServer((req, res) => {
@@ -339,6 +342,87 @@ function startFixtureServer() {
           source_count: 1,
         },
       ]));
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/api/mcp/sessions') {
+      mcpSessionRequests.push({ headers: req.headers });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify([
+        {
+          session_id: 'session-customer-crm',
+          session_name: 'Customer Relationship Management',
+          server_type: 'node',
+          status: 'running',
+          tool_count: 128,
+          is_shared: true,
+        },
+        {
+          session_id: 'session-stopped',
+          session_name: 'Stopped session',
+          server_type: 'python',
+          status: 'stopped',
+          tool_count: 3,
+        },
+      ]));
+      return;
+    }
+
+    const mcpPreviewMatch = req.url?.match(
+      /^\/api\/tools\/api-collections\/([^/]+)\/mcp-sources\/preview$/,
+    );
+    if (req.method === 'POST' && mcpPreviewMatch) {
+      const collectionId = decodeURIComponent(mcpPreviewMatch[1]);
+      readJsonRequest(req, (body) => {
+        mcpSourcePreviewRequests.push({
+          collectionId,
+          headers: req.headers,
+          body,
+        });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          incoming_tool_count: 128,
+          conflicts: [],
+          existing_total: 3,
+          ingest_supported: true,
+          ingest_stats: { generated_tool_count: 128 },
+          ingest_result: {
+            adapter: 'mcp-tools',
+            ready: true,
+            issues: [],
+            api_collection_execution_supported: true,
+          },
+          source_context: {
+            session_count: 1,
+            session_ids: ['session-customer-crm'],
+          },
+        }));
+      });
+      return;
+    }
+
+    const mcpSourceMatch = req.url?.match(
+      /^\/api\/tools\/api-collections\/([^/]+)\/mcp-sources$/,
+    );
+    if (req.method === 'POST' && mcpSourceMatch) {
+      const collectionId = decodeURIComponent(mcpSourceMatch[1]);
+      readJsonRequest(req, (body) => {
+        mcpSourceAddRequests.push({
+          collectionId,
+          headers: req.headers,
+          body,
+        });
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          collection_id: collectionId,
+          tool_count: 131,
+          source_count: 2,
+          ingest_result: {
+            adapter: 'mcp-tools',
+            ready: true,
+          },
+        }));
+      });
       return;
     }
 
@@ -704,6 +788,9 @@ function startFixtureServer() {
         sourcePreviewRequests,
         sourceAddRequests,
         collectionDeleteRequests,
+        mcpSessionRequests,
+        mcpSourcePreviewRequests,
+        mcpSourceAddRequests,
         registrationMode,
         sourceAddMode,
       });
@@ -1546,6 +1633,77 @@ async function verifyPostmanImportUi(
   await panel.waitFor({ state: 'detached' });
 }
 
+async function verifyMcpCollectionSourceUi(
+  extensionPage,
+  targetPage,
+  mcpSessionRequests,
+  mcpSourcePreviewRequests,
+  mcpSourceAddRequests,
+) {
+  const sessionStart = mcpSessionRequests.length;
+  await clickSidepanelButton(
+    extensionPage,
+    targetPage,
+    'MCP source menu',
+    /메뉴 열기/,
+  );
+  await extensionPage.getByRole('dialog', { name: '사이드 메뉴' }).waitFor();
+  await extensionPage.getByRole('button', { name: /MCP 도구 연결/ }).click();
+
+  const panel = extensionPage.getByTestId('mcp-collection-source');
+  await panel.waitFor();
+  await waitForItem(
+    mcpSessionRequests,
+    (_entry, index) => index >= sessionStart,
+    'MCP Station session list',
+  );
+  assert.equal(
+    mcpSessionRequests.at(-1)?.headers.authorization,
+    'Bearer verify-token',
+  );
+  await panel.getByText('Customer Relationship Management').waitFor();
+  assert.equal(
+    await panel.getByText('Stopped session').count(),
+    0,
+    'stopped MCP sessions must not be selectable',
+  );
+
+  await panel.getByRole('checkbox').check();
+  const previewStart = mcpSourcePreviewRequests.length;
+  await panel.getByRole('button', { name: '미리보기' }).click();
+  await panel.getByText('사용 가능').waitFor();
+  await waitForItem(
+    mcpSourcePreviewRequests,
+    (_entry, index) => index >= previewStart,
+    'MCP source preview',
+  );
+  const preview = mcpSourcePreviewRequests.at(-1);
+  assert.equal(preview.collectionId, 'fixture-existing');
+  assert.equal(preview.headers.authorization, 'Bearer verify-token');
+  assert.deepEqual(preview.body.session_ids, ['session-customer-crm']);
+  assert.deepEqual(preview.body.required_capabilities, ['input_schema']);
+  assert.equal(preview.body.label, 'mcp-station');
+
+  const addStart = mcpSourceAddRequests.length;
+  await panel.getByRole('button', { name: '등록 / 갱신' }).click();
+  await panel.getByText('128개 MCP 도구를 등록했습니다.').waitFor();
+  await waitForItem(
+    mcpSourceAddRequests,
+    (_entry, index) => index >= addStart,
+    'MCP source add',
+  );
+  const added = mcpSourceAddRequests.at(-1);
+  assert.equal(added.collectionId, 'fixture-existing');
+  assert.equal(added.headers.authorization, 'Bearer verify-token');
+  assert.deepEqual(added.body.session_ids, ['session-customer-crm']);
+  assert.equal(
+    await panel.getByRole('button', { name: '등록 / 갱신' }).isDisabled(),
+    true,
+    'successful registration must require another preview before retry',
+  );
+  await panel.getByRole('button', { name: '채팅으로 돌아가기' }).click();
+}
+
 async function verifyOpenApiImportUi(
   extensionPage,
   targetPage,
@@ -2010,6 +2168,9 @@ async function main() {
     collectionDeleteRequests,
     registrationMode,
     sourceAddMode,
+    mcpSessionRequests,
+    mcpSourcePreviewRequests,
+    mcpSourceAddRequests,
   } = await startFixtureServer();
   let context;
   let runtimeError;
@@ -2104,6 +2265,13 @@ async function main() {
       collectionCreateRequests,
       sourcePreviewRequests,
       sourceAddRequests,
+    );
+    await verifyMcpCollectionSourceUi(
+      extensionPage,
+      targetPage,
+      mcpSessionRequests,
+      mcpSourcePreviewRequests,
+      mcpSourceAddRequests,
     );
     await wait(2_200);
 
@@ -2241,6 +2409,7 @@ async function main() {
       'OpenAPI URL/YAML import and rollback verified',
       'manual tool contract preview and registration verified',
       'privacy-safe Postman Collection import verified',
+      'MCP Station source preview and registration verified',
       'capture result registration verified',
       'capture result merge conflict verified',
       'privacy-safe HAR import verified',

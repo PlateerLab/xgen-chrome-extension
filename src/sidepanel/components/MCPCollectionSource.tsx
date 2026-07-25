@@ -172,7 +172,10 @@ export function MCPCollectionSource({ onBack }: Props) {
   );
 
   return (
-    <section className="flex flex-col h-full bg-gray-50">
+    <section
+      className="flex flex-col h-full bg-gray-50"
+      data-testid="mcp-collection-source"
+    >
       <header className="flex items-center gap-2 border-b border-gray-200 bg-white px-3 py-2">
         <button
           onClick={onBack}
