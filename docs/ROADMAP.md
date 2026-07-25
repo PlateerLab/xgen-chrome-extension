@@ -100,7 +100,8 @@ npm run verify:pathfinder
 목표: 캡처한 API가 실제 XGEN에서 Collection build, 검색, plan 및 read-only 실행까지 이어지는 것을 검증한다.
 
 - [ ] capture → Collection create/merge dev 검증
-- [ ] auth profile 자동 연결과 갱신
+- [x] 명시적 Collection host 매핑 우선 auth profile 자동 연결과 관리 profile 갱신
+- [ ] 로그인 사용자 세션으로 실제 dev auth profile read execute
 - [x] Collection 등록 직후 graph build status 추적
 - [x] readiness, semantic summary 및 edge quality 표시
 - [ ] Quality Lab search/plan/read-only execute

@@ -174,6 +174,11 @@ export function CollectionBuildStatus({
         graph-tool-call {detail.graph_tool_call_version || '미확인'}
         {' · '}graph v{detail.collection_graph_version ?? '미확인'}
       </div>
+      <div className="mt-0.5 break-all text-[9px] opacity-80">
+        인증 {detail.auth_profile_id
+          ? `연결됨 (${detail.auth_profile_id})`
+          : '프로필 없음'}
+      </div>
       <div className="mt-0.5 text-[9px] opacity-80">
         action {percent(semantic.canonical_action_known_rate)}
         {' · '}resource {percent(semantic.primary_resource_assigned_rate)}

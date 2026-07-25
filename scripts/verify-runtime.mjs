@@ -91,11 +91,11 @@ function scrubRuntimeLog(value) {
   return String(value)
     .replace(/\bBearer\s+[^\s"',}]+/gi, 'Bearer [REDACTED]')
     .replace(
-      /([?&](?:access[_-]?token|refresh[_-]?token|token|api[_-]?key|session|secret)=)[^&\s]+/gi,
+      /([?&](?:authorization|cookie|password|passwd|pwd|access[_-]?token|refresh[_-]?token|token|api[_-]?key|session|secret|client[_-]?secret)=)[^&\s]+/gi,
       '$1[REDACTED]',
     )
     .replace(
-      /((?:authorization|cookie|access[_-]?token|refresh[_-]?token|token|api[_-]?key|secret)["']?\s*[:=]\s*["']?)[^"',}\s]+/gi,
+      /((?:authorization|cookie|password|passwd|pwd|access[_-]?token|refresh[_-]?token|token|api[_-]?key|secret|client[_-]?secret)["']?\s*[:=]\s*["']?)[^"',}\s]+/gi,
       '$1[REDACTED]',
     );
 }
@@ -300,6 +300,15 @@ function startFixtureServer() {
   const mcpSessionRequests = [];
   const mcpSourcePreviewRequests = [];
   const mcpSourceAddRequests = [];
+  const authProfiles = [
+    {
+      service_id: '127_local_profile',
+      name: '127 local profile',
+      description: 'operator managed fixture profile',
+      status: 'active',
+    },
+  ];
+  const authProfileMutations = [];
   const registrationMode = { conflictNext: false };
   const sourceAddMode = { failNext: false };
   const collectionDetailMode = { failNext: false };
@@ -327,9 +336,56 @@ function startFixtureServer() {
 
     if (req.method === 'GET' && req.url === '/api/session-station/v1/auth-profiles') {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify([
-        { service_id: '127_local_profile', name: '127 local profile', status: 'active' },
-      ]));
+      res.end(JSON.stringify(authProfiles));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/session-station/v1/auth-profiles') {
+      readJsonRequest(req, (body) => {
+        authProfileMutations.push({
+          method: 'POST',
+          serviceId: String(body.service_id || ''),
+          managed: String(body.description || '').includes('[pathfinder:auto]'),
+          hasLoginConfig: Boolean(body.login_config),
+          extractionRuleCount: Array.isArray(body.extraction_rules)
+            ? body.extraction_rules.length
+            : 0,
+        });
+        authProfiles.push({
+          service_id: String(body.service_id || ''),
+          name: String(body.name || ''),
+          description: String(body.description || ''),
+          status: 'active',
+        });
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          service_id: body.service_id,
+          status: 'active',
+        }));
+      });
+      return;
+    }
+
+    const authProfileUpdateMatch = req.url?.match(
+      /^\/api\/session-station\/v1\/auth-profiles\/([^/]+)$/,
+    );
+    if (req.method === 'PUT' && authProfileUpdateMatch) {
+      readJsonRequest(req, (body) => {
+        authProfileMutations.push({
+          method: 'PUT',
+          serviceId: decodeURIComponent(authProfileUpdateMatch[1]),
+          managed: String(body.description || '').includes('[pathfinder:auto]'),
+          hasLoginConfig: Boolean(body.login_config),
+          extractionRuleCount: Array.isArray(body.extraction_rules)
+            ? body.extraction_rules.length
+            : 0,
+        });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          service_id: decodeURIComponent(authProfileUpdateMatch[1]),
+          status: 'active',
+        }));
+      });
       return;
     }
 
@@ -341,6 +397,8 @@ function startFixtureServer() {
           name: 'Fixture Existing',
           tool_count: 3,
           source_count: 1,
+          domain_patterns: ['127.0.0.1'],
+          auth_profile_id: '127_local_profile',
         },
       ]));
       return;
@@ -532,9 +590,10 @@ function startFixtureServer() {
         res.end(JSON.stringify({ detail: 'fixture collection detail unsupported' }));
         return;
       }
+      const collectionId = decodeURIComponent(collectionDetailMatch[1]);
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
-        collection_id: decodeURIComponent(collectionDetailMatch[1]),
+        collection_id: collectionId,
         name: 'Fixture Collection',
         tool_count: 256,
         edge_count: 12,
@@ -557,6 +616,9 @@ function startFixtureServer() {
           strong_deterministic_evidence_rate: 0.75,
           visual_edge_candidate_count: 9,
         },
+        auth_profile_id: collectionId === 'graphql-customer-test'
+          ? null
+          : '127_local_profile',
         workspace_status: 'ready',
       }));
       return;
@@ -748,6 +810,19 @@ function startFixtureServer() {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/api/login') {
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          data: {
+            access_token: 'runtime-auth-response-secret',
+          },
+        }));
+      });
+      return;
+    }
+
     if (req.url?.startsWith('/fragment')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end('<section>not an api response</section>');
@@ -838,6 +913,7 @@ function startFixtureServer() {
         mcpSessionRequests,
         mcpSourcePreviewRequests,
         mcpSourceAddRequests,
+        authProfileMutations,
         registrationMode,
         sourceAddMode,
         collectionDetailMode,
@@ -1173,6 +1249,23 @@ async function runCaptureSessionViaSidepanel(extensionPage, targetPage, action, 
 
 function findApi(apis, method, pathPart) {
   return apis.find((api) => api.method === method && api.url.includes(pathPart));
+}
+
+function captureSummary(apis) {
+  return apis.map((api) => {
+    let endpoint = '(invalid URL)';
+    try {
+      const parsed = new URL(api.url);
+      endpoint = `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      // Keep malformed URLs opaque so query credentials cannot reach artifacts.
+    }
+    return {
+      method: api.method,
+      endpoint,
+      responseStatus: api.responseStatus,
+    };
+  });
 }
 
 async function verifyPageAgent(extensionPage, targetPage) {
@@ -2195,6 +2288,9 @@ async function verifySessionResultRegistration(extensionPage, targetPage, regist
   await extensionPage.waitForFunction(() => document.body.innerText.includes('컬렉션으로 등록'));
   await clickSidepanelButton(extensionPage, targetPage, 'Session result registration', /컬렉션으로 등록/);
   await extensionPage.waitForFunction(() => document.body.innerText.includes('컬렉션 등록 완료'));
+  const buildStatus = extensionPage.getByTestId('collection-build-status');
+  await buildStatus.getByText('graph build 완료').waitFor();
+  await buildStatus.getByText('인증 연결됨 (127_local_profile)').waitFor();
 
   const request = await waitForItem(
     registrationRequests,
@@ -2349,6 +2445,7 @@ async function main() {
     registrationMode,
     sourceAddMode,
     collectionDetailMode,
+    authProfileMutations,
     mcpSessionRequests,
     mcpSourcePreviewRequests,
     mcpSourceAddRequests,
@@ -2466,6 +2563,25 @@ async function main() {
 
     const firstApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
       await targetPage.evaluate(async () => {
+        const logins = await Promise.all([
+          'runtime-login-request-secret',
+          'runtime-login-concurrent-secret',
+        ].map(async (password) => {
+          const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              username: 'runtime-user',
+              password,
+            }),
+          });
+          if (!response.ok) {
+            throw new Error(`fixture login failed: ${response.status}`);
+          }
+          return response.json();
+        }));
+        if (logins.length !== 2) throw new Error('fixture concurrent login failed');
+
         const search = await fetch('/api/goods/v1/search?keyword=jeju');
         if (!search.ok) throw new Error(`fixture fetch failed: ${search.status}`);
         await search.json();
@@ -2518,6 +2634,19 @@ async function main() {
         await upload.json();
       });
     }, 'fetch+xhr capture', distractorPage);
+    const createdAuthProfile = await waitForItem(
+      authProfileMutations,
+      (entry) => entry.method === 'POST' && entry.serviceId === '127_0_0_1',
+      'Pathfinder managed auth profile create',
+    );
+    assert.equal(createdAuthProfile.managed, true);
+    assert.equal(createdAuthProfile.hasLoginConfig, true);
+    assert.ok(createdAuthProfile.extractionRuleCount >= 1);
+    await waitForItem(
+      authProfileMutations,
+      (entry) => entry.method === 'PUT' && entry.serviceId === '127_0_0_1',
+      'serialized concurrent auth profile refresh',
+    );
     await verifySessionResultRegistration(extensionPage, targetPage, registrationRequests);
     await verifyCaptureObservationStopped(
       extensionPage,
@@ -2526,20 +2655,33 @@ async function main() {
     );
 
     const searchApi = findApi(firstApis, 'GET', '/api/goods/v1/search?keyword=jeju');
-    assert.ok(searchApi, `captured search API not found in ${JSON.stringify(firstApis)}`);
+    assert.ok(
+      searchApi,
+      `captured search API not found in ${JSON.stringify(captureSummary(firstApis))}`,
+    );
     assert.equal(searchApi.responseStatus, 200);
     assert.match(searchApi.responseBody || '', /987654/);
     const memberApi = findApi(firstApis, 'POST', '/api/member/v1/me');
-    assert.ok(memberApi, `captured XHR API not found in ${JSON.stringify(firstApis)}`);
+    assert.ok(
+      memberApi,
+      `captured XHR API not found in ${JSON.stringify(captureSummary(firstApis))}`,
+    );
     assert.match(memberApi.requestBody || '', /includeGrade/);
     const graphqlApis = firstApis.filter((api) => api.method === 'POST' && api.url.endsWith('/graphql'));
-    assert.equal(graphqlApis.length, 2, `GraphQL operations should be captured: ${JSON.stringify(firstApis)}`);
+    assert.equal(
+      graphqlApis.length,
+      2,
+      `GraphQL operations should be captured: ${JSON.stringify(captureSummary(firstApis))}`,
+    );
     assert.deepEqual(
       new Set(graphqlApis.map((api) => api.requestMetadata?.graphql?.operationName)),
       new Set(['GetGoodsList', 'GetGoodsDetail']),
     );
     const uploadApi = findApi(firstApis, 'POST', '/api/documents/upload');
-    assert.ok(uploadApi, `multipart upload not captured: ${JSON.stringify(firstApis)}`);
+    assert.ok(
+      uploadApi,
+      `multipart upload not captured: ${JSON.stringify(captureSummary(firstApis))}`,
+    );
     assert.equal(uploadApi.requestMetadata?.bodyKind, 'multipart');
     assert.equal(uploadApi.requestMetadata?.fileFields?.[0]?.fieldPath, 'attachment');
     assert.ok(
@@ -2552,13 +2694,40 @@ async function main() {
     );
     assert.ok(!firstApis.some((api) => api.url.includes('/fragment')), 'HTML fetch should be ignored');
 
+    const authRefreshStart = authProfileMutations.length;
     const mergeApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
       await targetPage.evaluate(async () => {
+        const login = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            username: 'runtime-user',
+            password: 'runtime-login-refresh-secret',
+          }),
+        });
+        if (!login.ok) throw new Error(`fixture login refresh failed: ${login.status}`);
+        await login.json();
+
         const detail = await fetch('/api/goods/v1/detail?goodsNo=987654&siteNo=1000');
         if (!detail.ok) throw new Error(`fixture detail fetch failed: ${detail.status}`);
         await detail.json();
       });
     }, 'registration conflict merge capture', distractorPage);
+    const updatedAuthProfile = await waitForItem(
+      authProfileMutations,
+      (entry, index) => index >= authRefreshStart
+        && entry.method === 'PUT'
+        && entry.serviceId === '127_0_0_1',
+      'Pathfinder managed auth profile refresh',
+    );
+    assert.equal(updatedAuthProfile.managed, true);
+    assert.equal(updatedAuthProfile.hasLoginConfig, true);
+    assert.ok(
+      !authProfileMutations.some(
+        (entry) => entry.serviceId === '127_local_profile',
+      ),
+      'Pathfinder must not overwrite an operator-managed linked auth profile',
+    );
     await verifySessionResultMergeConflict(
       extensionPage,
       targetPage,
@@ -2567,7 +2736,10 @@ async function main() {
       mergeRequests,
     );
     const mergeDetailApi = findApi(mergeApis, 'GET', '/api/goods/v1/detail?goodsNo=987654&siteNo=1000');
-    assert.ok(mergeDetailApi, `captured merge detail API not found in ${JSON.stringify(mergeApis)}`);
+    assert.ok(
+      mergeDetailApi,
+      `captured merge detail API not found in ${JSON.stringify(captureSummary(mergeApis))}`,
+    );
 
     const secondApis = await runCaptureSession(extensionPage, targetPage, async () => {
       await targetPage.goto(`${url}after-navigation`);
@@ -2581,13 +2753,33 @@ async function main() {
     }, 'navigation reinjection');
 
     const detailApi = findApi(secondApis, 'GET', '/api/goods/v1/detail?goodsNo=987654&siteNo=1000');
-    assert.ok(detailApi, `captured post-navigation API not found in ${JSON.stringify(secondApis)}`);
-    assert.equal(secondApis.length, 1, `navigation session should reset old captures: ${JSON.stringify(secondApis)}`);
+    assert.ok(
+      detailApi,
+      `captured post-navigation API not found in ${JSON.stringify(captureSummary(secondApis))}`,
+    );
+    assert.equal(
+      secondApis.length,
+      1,
+      `navigation session should reset old captures: ${JSON.stringify(captureSummary(secondApis))}`,
+    );
 
     const extraStop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
     assert.equal(extraStop?.ok, false, `STOP_CAPTURE_SESSION without active session should fail: ${JSON.stringify(extraStop)}`);
     assert.match(extraStop?.error || '', /No active session/);
     await verifyOptionalPermissionLifecycle(extensionPage, context, targetPage, url);
+
+    const runtimeLogText = runtimeLogs.join('\n');
+    for (const [index, secret] of [
+      'runtime-login-request-secret',
+      'runtime-login-concurrent-secret',
+      'runtime-login-refresh-secret',
+      'runtime-auth-response-secret',
+    ].entries()) {
+      assert.ok(
+        !runtimeLogText.includes(secret),
+        `runtime log leaked synthetic auth secret #${index + 1}`,
+      );
+    }
 
     console.log([
       `PathFinder runtime verification passed: extension loaded (${extensionId})`,
@@ -2600,6 +2792,7 @@ async function main() {
       'manual tool contract preview and registration verified',
       'privacy-safe Postman Collection import verified',
       'MCP Station source preview and registration verified',
+      'auth profile explicit link, managed create, and refresh verified',
       'capture result registration verified',
       'capture result merge conflict verified',
       'privacy-safe HAR import verified',

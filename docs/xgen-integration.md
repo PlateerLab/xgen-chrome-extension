@@ -41,6 +41,19 @@ Pathfinder는 XGEN origin별 token을 분리한다. 서버 URL은 XGEN origin으
 
 대상 API 실행 인증은 XGEN auth profile과 현재 대상 페이지의 live cookie를 사용한다. trace에 포함된 오래된 cookie 값을 실행 인증으로 신뢰하지 않는다.
 
+auth profile 자동 연결 우선순위는 다음과 같다.
+
+1. 같은 host에 명시적으로 연결된 기존 Collection의 `auth_profile_id`
+2. 정규화한 host와 `service_id` 또는 자동 생성 profile 이름이 정확히 일치
+3. 캡처된 로그인 request/response contract로 Pathfinder 관리 profile 생성
+
+이름 일부가 우연히 같은 profile은 자동 연결하지 않는다. 같은 우선순위에서 서로
+다른 profile이 발견되면 `ambiguous`로 중단한다. 로그인 재캡처 시
+`[pathfinder:auto]` marker가 있는 관리 profile만 갱신하고, 운영자가 만든 profile은
+연결만 하며 설정을 덮어쓰지 않는다. JWT에서 숫자 user id를 확인할 수 있으면
+Session Station 요청에 `X-User-ID`를 함께 전달하지만 token이나 로그인 payload는
+로그에 남기지 않는다.
+
 ## Collection 등록
 
 등록 payload는 다음 정보를 포함할 수 있다.

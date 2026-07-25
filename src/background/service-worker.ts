@@ -18,6 +18,16 @@ import {
   originPatternForUrl,
   requestHostPermission,
 } from '../shared/permissions';
+import {
+  canonicalAuthServiceId,
+  isPathfinderManagedProfile,
+  matchCollectionAuthProfile,
+  matchExactAuthProfile,
+  PATHFINDER_MANAGED_MARKER,
+  xgenAuthHeaders,
+  type AuthProfileSummary,
+  type CollectionAuthSummary,
+} from './auth-profile-resolution';
 
 // ── State ──
 // origin별 토큰 저장 — 멀티 인스턴스 (xgen.x2bee.com / jeju-xgen.x2bee.com) 동시 사용 지원
@@ -31,6 +41,10 @@ const hookedTabs = new Set<number>();
 const contentScriptTabs = new Set<number>();
 const contentScriptOriginPatterns = new Map<number, string>();
 const capturedApisByTab = new Map<number, CapturedApi[]>();
+const authProfileUpsertsByDomain = new Map<
+  string,
+  Promise<AuthProfileResolution>
+>();
 const CAPTURE_TAB_MAX = 500;
 const CONTENT_SCRIPT_BUNDLE = 'pathfinder-content.js';
 const CONTENT_SCRIPT_ORIGINS_KEY = 'runtime:content-script-origins';
@@ -651,11 +665,14 @@ chrome.runtime.onMessage.addListener(
               sendResponse({ ok: false, error: 'no XGEN auth' });
               return;
             }
-            // autoMatchAuthProfile은 api_url 인자를 받음 — 도메인만 알면 충분하니 dummy URL.
-            const profileId = await autoMatchAuthProfile(
+            const resolution = await autoMatchAuthProfile(
               serverUrl, authToken, `https://${message.host}/`,
             );
-            sendResponse({ ok: true, authProfileId: profileId || null });
+            sendResponse({
+              ok: true,
+              authProfileId: resolution.authProfileId || null,
+              authReadiness: resolution,
+            });
           } catch (err) {
             console.warn('[XGEN SW] LOOKUP_AUTH_PROFILE_FOR_HOST failed:', err);
             sendResponse({ ok: false, error: String(err) });
@@ -1397,8 +1414,12 @@ async function handleApiHookAction(
         // 인증 프로필 자동 매칭: api_url 도메인과 일치하는 auth profile 찾기
         let authProfileId = toolData.auth_profile_id as string | undefined;
         if (!authProfileId) {
-          const matchResult = await autoMatchAuthProfile(serverUrl, authToken, toolData.api_url as string);
-          if (matchResult === 'LOGIN_REQUIRED') {
+          const resolution = await autoMatchAuthProfile(
+            serverUrl,
+            authToken,
+            toolData.api_url as string,
+          );
+          if (resolution.status === 'login_required') {
             return {
               success: false,
               action,
@@ -1407,7 +1428,14 @@ async function handleApiHookAction(
                 `해결 방법: (1) start_api_hook이 켜져 있는지 확인 후, (2) 로그아웃 → 재로그인으로 토큰을 재발급받은 다음, (3) register_tool을 다시 시도하세요.`,
             };
           }
-          authProfileId = matchResult || undefined;
+          if (resolution.status === 'ambiguous') {
+            return {
+              success: false,
+              action,
+              error: '여러 인증 프로필이 동일 host 후보로 확인되었습니다. XGEN Collection에서 인증 프로필을 명시적으로 선택해주세요.',
+            };
+          }
+          authProfileId = resolution.authProfileId;
         }
 
         // ── 캡처된 원본 request body로 static_body/api_body 보정 ──
@@ -1509,7 +1537,6 @@ async function handleApiHookAction(
           },
         };
 
-        console.log(`[XGEN SW] register_tool savePayload auth_profile_id: ${(savePayload.content as any).auth_profile_id ?? 'NONE'}`);
         const response = await fetch(`${serverUrl}/api/tools/storage/save`, {
           method: 'POST',
           headers: {
@@ -1551,126 +1578,222 @@ async function handleApiHookAction(
 /**
  * api_url의 도메인과 일치하는 auth profile을 찾거나, 없으면 캡처된 인증 헤더로 자동 생성.
  */
+type AuthResolutionStatus =
+  | 'linked_collection'
+  | 'matched_exact'
+  | 'created'
+  | 'updated'
+  | 'missing'
+  | 'ambiguous'
+  | 'login_required'
+  | 'profile_inactive'
+  | 'backend_error';
+
+interface AuthProfileResolution {
+  status: AuthResolutionStatus;
+  authProfileId?: string;
+  source?: 'collection' | 'profile' | 'capture';
+  collectionId?: string;
+  candidateIds?: string[];
+}
+
+async function fetchAuthProfiles(
+  serverUrl: string,
+  authToken: string,
+): Promise<AuthProfileSummary[]> {
+  const response = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
+    headers: xgenAuthHeaders(authToken),
+  });
+  if (!response.ok) {
+    throw new Error(`auth profile list failed: ${response.status}`);
+  }
+  const payload = await response.json();
+  return Array.isArray(payload) ? payload as AuthProfileSummary[] : [];
+}
+
+async function fetchApiCollectionsForAuth(
+  serverUrl: string,
+  authToken: string,
+): Promise<CollectionAuthSummary[]> {
+  const response = await fetch(`${serverUrl}/api/tools/api-collections`, {
+    headers: xgenAuthHeaders(authToken),
+  });
+  if (!response.ok) return [];
+  const payload = await response.json();
+  return Array.isArray(payload) ? payload as CollectionAuthSummary[] : [];
+}
+
+async function upsertCapturedLoginProfileUnlocked(
+  serverUrl: string,
+  authToken: string,
+  apiDomain: string,
+  capturedLogin: CapturedLogin,
+): Promise<AuthProfileResolution> {
+  const profiles = await fetchAuthProfiles(serverUrl, authToken);
+  const serviceId = canonicalAuthServiceId(apiDomain);
+  const profileData = buildAuthProfileFromLogin(
+    serviceId,
+    apiDomain,
+    capturedLogin,
+  );
+  const existing = profiles.find(
+    (profile) => profile.service_id.toLowerCase() === serviceId.toLowerCase(),
+  );
+
+  if (existing) {
+    if ((existing.status ?? 'active') !== 'active') {
+      return { status: 'profile_inactive', source: 'profile' };
+    }
+    if (!isPathfinderManagedProfile(existing, apiDomain)) {
+      return {
+        status: 'matched_exact',
+        source: 'profile',
+        authProfileId: existing.service_id,
+      };
+    }
+    const { service_id: _serviceId, ...updateData } = profileData;
+    const updateResponse = await fetch(
+      `${serverUrl}/api/session-station/v1/auth-profiles/${encodeURIComponent(existing.service_id)}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...xgenAuthHeaders(authToken),
+        },
+        body: JSON.stringify(updateData),
+      },
+    );
+    if (!updateResponse.ok) {
+      return { status: 'backend_error', source: 'capture' };
+    }
+    return {
+      status: 'updated',
+      source: 'capture',
+      authProfileId: existing.service_id,
+    };
+  }
+
+  const createResponse = await fetch(
+    `${serverUrl}/api/session-station/v1/auth-profiles`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...xgenAuthHeaders(authToken),
+      },
+      body: JSON.stringify(profileData),
+    },
+  );
+  if (createResponse.ok || createResponse.status === 409) {
+    return {
+      status: createResponse.ok ? 'created' : 'matched_exact',
+      source: 'capture',
+      authProfileId: serviceId,
+    };
+  }
+  return { status: 'backend_error', source: 'capture' };
+}
+
+async function upsertCapturedLoginProfile(
+  serverUrl: string,
+  authToken: string,
+  apiDomain: string,
+  capturedLogin: CapturedLogin,
+): Promise<AuthProfileResolution> {
+  const key = `${serverUrl}\n${apiDomain.toLowerCase()}`;
+  const previous = authProfileUpsertsByDomain.get(key);
+  const current = (previous ?? Promise.resolve({ status: 'missing' } as AuthProfileResolution))
+    .catch(() => ({ status: 'backend_error' } as AuthProfileResolution))
+    .then(() => upsertCapturedLoginProfileUnlocked(
+      serverUrl,
+      authToken,
+      apiDomain,
+      capturedLogin,
+    ));
+  authProfileUpsertsByDomain.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (authProfileUpsertsByDomain.get(key) === current) {
+      authProfileUpsertsByDomain.delete(key);
+    }
+  }
+}
+
 async function autoMatchAuthProfile(
   serverUrl: string,
   authToken: string,
   apiUrl: string,
-): Promise<string | undefined> {
+): Promise<AuthProfileResolution> {
   try {
     let apiDomain: string;
-    let apiOrigin: string;
     try {
       const u = new URL(apiUrl);
       apiDomain = u.hostname;
-      apiOrigin = u.origin;
     } catch {
-      return undefined;
+      return { status: 'missing' };
     }
+    if (apiDomain === 'localhost') return { status: 'missing' };
 
-    if (apiDomain === 'localhost') return undefined;
-
-    // 1) 기존 프로필에서 도메인 매칭
-    console.log(`[XGEN SW] autoMatchAuthProfile: serverUrl=${serverUrl}, apiDomain=${apiDomain}, token=${authToken?.slice(0, 20)}...`);
-    const resp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
-      headers: { Authorization: `Bearer ${authToken}` },
-    });
-    console.log(`[XGEN SW] auth-profiles response: ${resp.status}`);
-
-    if (resp.ok) {
-      const profiles = await resp.json() as Array<{
-        service_id: string;
-        name: string;
-        status: string;
-      }>;
-
-      const domainParts = apiDomain.replace('www.', '').split('.');
-      const domainKey = domainParts[0];
-
-      const matched = profiles.find((p) =>
-        p.status === 'active' && (
-          p.service_id.toLowerCase().includes(domainKey) ||
-          p.name.toLowerCase().includes(domainKey)
-        )
+    const [collections, profiles] = await Promise.all([
+      fetchApiCollectionsForAuth(serverUrl, authToken),
+      fetchAuthProfiles(serverUrl, authToken),
+    ]);
+    const collectionMatch = matchCollectionAuthProfile(apiDomain, collections);
+    if (collectionMatch.status === 'ambiguous') {
+      return {
+        status: 'ambiguous',
+        source: 'collection',
+        candidateIds: collectionMatch.candidateIds,
+      };
+    }
+    if (collectionMatch.status === 'matched' && collectionMatch.authProfileId) {
+      const linked = profiles.find(
+        (profile) => profile.service_id === collectionMatch.authProfileId,
       );
-
-      if (matched) {
-        console.log(`[XGEN SW] Auto-matched auth profile: ${matched.service_id} for ${apiDomain}`);
-        return matched.service_id;
+      if (!linked) return { status: 'missing', source: 'collection' };
+      if ((linked.status ?? 'active') !== 'active') {
+        return { status: 'profile_inactive', source: 'collection' };
       }
+      return {
+        status: 'linked_collection',
+        source: 'collection',
+        authProfileId: linked.service_id,
+        collectionId: collectionMatch.collectionId,
+      };
     }
 
-    // 2) 매칭 실패 → 캡처된 로그인 요청으로 auth profile 자동 생성
-    const serviceId = apiDomain.replace('www.', '').replace(/\./g, '_');
+    const profileMatch = matchExactAuthProfile(apiDomain, profiles);
+    if (profileMatch.status === 'ambiguous') {
+      return {
+        status: 'ambiguous',
+        source: 'profile',
+        candidateIds: profileMatch.candidateIds,
+      };
+    }
+    if (profileMatch.status === 'matched' && profileMatch.authProfileId) {
+      return {
+        status: 'matched_exact',
+        source: 'profile',
+        authProfileId: profileMatch.authProfileId,
+      };
+    }
 
     const capturedLogin = findCapturedLoginForDomain(apiDomain);
-    if (!capturedLogin) {
-      // 2-a) autoCreateAuthProfileFromCapture는 API_CAPTURED 시점에 fire-and-forget으로 실행됨.
-      //      레이스로 인해 첫 조회에서 프로필이 아직 안 만들어졌을 수 있으므로
-      //      짧게 한 번 대기 후 서버 프로필 목록을 재조회하여 구제한다.
-      await new Promise(r => setTimeout(r, 500));
-      try {
-        const retryResp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-        if (retryResp.ok) {
-          const retryProfiles = await retryResp.json() as Array<{
-            service_id: string; name: string; status: string;
-          }>;
-          const domainParts = apiDomain.replace('www.', '').split('.');
-          const domainKey = domainParts[0];
-          const matched = retryProfiles.find((p) =>
-            p.status === 'active' && (
-              p.service_id.toLowerCase().includes(domainKey) ||
-              p.name.toLowerCase().includes(domainKey)
-            )
-          );
-          if (matched) {
-            console.log(`[XGEN SW] Auto-matched auth profile on retry: ${matched.service_id} for ${apiDomain}`);
-            return matched.service_id;
-          }
-        }
-      } catch (e) {
-        console.warn('[XGEN SW] retry profile fetch failed:', e);
-      }
-
-      const capturedAuth = findCapturedAuthForDomain(apiDomain);
-      if (capturedAuth) {
-        // Authorization 헤더 있지만 로그인 미캡처 → 로그인 필요
-        return 'LOGIN_REQUIRED';
-      }
-      // Authorization 헤더 없음 — 하지만 같은 도메인에 로그인 API가 존재하면
-      // 쿠키 기반 인증일 수 있으므로 로그인 필요로 판단
-      // (로그인 API는 이전 캡처 세션에서 남아있을 수 있음)
-      return undefined;
+    if (capturedLogin) {
+      return upsertCapturedLoginProfile(
+        serverUrl,
+        authToken,
+        apiDomain,
+        capturedLogin,
+      );
     }
-
-    const profileData = buildAuthProfileFromLogin(serviceId, apiDomain, capturedLogin);
-
-    const createResp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${authToken}`,
-      },
-      body: JSON.stringify(profileData),
-    });
-
-    if (createResp.ok) {
-      console.log(`[XGEN SW] Auto-created auth profile: ${serviceId} for ${apiDomain}`);
-      return serviceId;
-    }
-
-    // 409 (already exists) — 이미 있으면 그 service_id 반환
-    if (createResp.status === 409) {
-      return serviceId;
-    }
-
-    const err = await createResp.text();
-    console.warn(`[XGEN SW] Failed to create auth profile: ${createResp.status} ${err}`);
-    return undefined;
+    return findCapturedAuthForDomain(apiDomain)
+      ? { status: 'login_required', source: 'capture' }
+      : { status: 'missing' };
   } catch (e) {
     console.warn('[XGEN SW] autoMatchAuthProfile error:', e);
-    return undefined;
+    return { status: 'backend_error' };
   }
 }
 
@@ -1695,7 +1818,7 @@ function findCapturedLoginForDomain(domain: string): CapturedLogin | null {
       if (api.method !== 'POST') continue;
 
       try {
-        if (!new URL(api.url).hostname.includes(domain.replace('www.', ''))) continue;
+        if (new URL(api.url).hostname.toLowerCase() !== domain.toLowerCase()) continue;
       } catch { continue; }
 
       if (!loginUrlPatterns.test(api.url)) continue;
@@ -1745,7 +1868,12 @@ function findCapturedLoginForDomain(domain: string): CapturedLogin | null {
       const ct = api.requestHeaders['content-type'] || api.requestHeaders['Content-Type'];
       if (ct) headers['Content-Type'] = ct;
 
-      console.log(`[XGEN SW] Found login request: ${api.method} ${api.url}, tokens: ${tokenFields.map(f => f.name).join(', ')}`);
+      const parsedLoginUrl = new URL(api.url);
+      console.log(
+        `[XGEN SW] Found login request: ${api.method} `
+        + `${parsedLoginUrl.origin}${parsedLoginUrl.pathname}, `
+        + `token fields: ${tokenFields.map((field) => field.name).join(', ')}`,
+      );
 
       return {
         url: api.url,
@@ -1792,7 +1920,7 @@ function buildAuthProfileFromLogin(
   return {
     service_id: serviceId,
     name: `${domain} (자동 생성)`,
-    description: `캡처된 로그인 요청으로 자동 생성된 인증 프로필. 토큰 만료 시 자동 갱신됩니다.`,
+    description: `${PATHFINDER_MANAGED_MARKER} 캡처된 로그인 요청으로 자동 생성된 인증 프로필. 토큰 만료 시 자동 갱신됩니다.`,
     auth_type: 'bearer',
     login_config: {
       url: login.url,
@@ -1815,7 +1943,7 @@ function findCapturedAuthForDomain(domain: string): { type: string; key: string;
   for (const [, apis] of capturedApisByTab) {
     for (const api of apis) {
       try {
-        if (!new URL(api.url).hostname.includes(domain.replace('www.', ''))) continue;
+        if (new URL(api.url).hostname.toLowerCase() !== domain.toLowerCase()) continue;
       } catch { continue; }
 
       for (const [key, value] of Object.entries(api.requestHeaders)) {
@@ -1835,55 +1963,6 @@ function findCapturedAuthForDomain(domain: string): { type: string; key: string;
   return null;
 }
 
-/**
- * 캡처된 인증 정보로 auth profile 생성 데이터를 구성한다.
- * login_config는 플레이스홀더 — 사용자가 나중에 실제 로그인 URL/자격증명을 설정해야 자동 갱신 가능.
- * 우선은 캡처된 토큰을 fixed 값으로 injection하여 즉시 사용 가능하게 한다.
- */
-function buildAuthProfileFromCaptured(
-  serviceId: string,
-  domain: string,
-  serverUrl: string,
-  auth: { type: string; key: string; value: string },
-) {
-  // 토큰 값 추출 (예: "Bearer xxx" → "xxx")
-  const tokenValue = auth.value.includes(' ') ? auth.value.split(' ').slice(1).join(' ') : auth.value;
-  const prefix = auth.value.includes(' ') ? auth.value.split(' ')[0] + ' ' : '';
-
-  return {
-    service_id: serviceId,
-    name: `${domain} (자동 생성)`,
-    description: `Element Picker에서 자동 생성된 인증 프로필. 로그인 자동 갱신을 위해 login_config를 업데이트하세요.`,
-    auth_type: auth.type,
-    login_config: {
-      // gateway health 엔드포인트로 200 응답 보장 — fixed extraction은 응답 내용 무관
-      url: `${serverUrl}/api/health`,
-      method: 'GET',
-      headers: {},
-      payload: {},
-      timeout: 10,
-    },
-    extraction_rules: [
-      {
-        name: 'access_token',
-        source: 'fixed',
-        value: tokenValue,
-      },
-    ],
-    injection_rules: [
-      {
-        source_field: 'access_token',
-        target: 'header',
-        key: auth.key,
-        value_template: `${prefix}{access_token}`,
-        required: true,
-      },
-    ],
-    ttl: 3600,
-    refresh_before_expire: 300,
-  };
-}
-
 // ── 로그인 캡처 시 auth profile 즉시 생성 ──
 
 async function autoCreateAuthProfileFromCapture(loginUrl: string, tabId?: number) {
@@ -1895,40 +1974,14 @@ async function autoCreateAuthProfileFromCapture(loginUrl: string, tabId?: number
     const authToken = tokensByOrigin[serverUrl] || await getStoredToken(serverUrl);
     if (!authToken) return;
 
-    // 이미 프로필 있는지 확인
-    const resp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
-      headers: { Authorization: `Bearer ${authToken}` },
-    });
-    if (resp.ok) {
-      const profiles = await resp.json() as Array<{ service_id: string; status: string }>;
-      const serviceId = apiDomain.replace('www.', '').replace(/\./g, '_');
-      if (profiles.some((p) => p.service_id === serviceId)) {
-        console.log(`[XGEN SW] Auth profile already exists: ${serviceId}`);
-        return;
-      }
-    }
-
-    // 로그인 캡처 찾기
     const capturedLogin = findCapturedLoginForDomain(apiDomain);
     if (!capturedLogin) return;
-
-    const serviceId = apiDomain.replace('www.', '').replace(/\./g, '_');
-    const profileData = buildAuthProfileFromLogin(serviceId, apiDomain, capturedLogin);
-
-    const createResp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${authToken}`,
-      },
-      body: JSON.stringify(profileData),
-    });
-
-    if (createResp.ok) {
-      console.log(`[XGEN SW] Auto-created auth profile on login capture: ${serviceId}`);
-    } else if (createResp.status === 409) {
-      console.log(`[XGEN SW] Auth profile already exists: ${serviceId}`);
-    }
+    await upsertCapturedLoginProfile(
+      serverUrl,
+      authToken,
+      apiDomain,
+      capturedLogin,
+    );
   } catch (e) {
     console.warn('[XGEN SW] autoCreateAuthProfileFromCapture error:', e);
   }

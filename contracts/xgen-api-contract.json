@@ -54,6 +54,34 @@
       "devProbe": true
     },
     {
+      "id": "auth_profile_create",
+      "method": "POST",
+      "path": "/api/session-station/v1/auth-profiles",
+      "client": {
+        "file": "src/background/service-worker.ts",
+        "needle": "upsertCapturedLoginProfile("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.method === 'POST' && req.url === '/api/session-station/v1/auth-profiles'"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "auth_profile_update",
+      "method": "PUT",
+      "path": "/api/session-station/v1/auth-profiles/{serviceId}",
+      "client": {
+        "file": "src/background/service-worker.ts",
+        "needle": "method: 'PUT'"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "const authProfileUpdateMatch"
+      },
+      "devProbe": false
+    },
+    {
       "id": "collection_from_trace",
       "method": "POST",
       "path": "/api/tools/api-collections/from-trace",

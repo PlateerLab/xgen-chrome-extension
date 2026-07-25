@@ -345,6 +345,144 @@ async function loadApiClient() {
   };
 }
 
+async function loadAuthProfileResolution() {
+  const sourcePath = path.join(
+    repoRoot,
+    'src/background/auth-profile-resolution.ts',
+  );
+  const source = await readFile(sourcePath, 'utf8');
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+      verbatimModuleSyntax: true,
+    },
+    fileName: sourcePath,
+  });
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-auth-'));
+  const outputPath = path.join(tmpDir, 'auth-profile-resolution.mjs');
+  await writeFile(outputPath, compiled.outputText, 'utf8');
+  const mod = await import(pathToFileURL(outputPath).href);
+  return {
+    canonicalAuthServiceId: mod.canonicalAuthServiceId,
+    jwtUserId: mod.jwtUserId,
+    xgenAuthHeaders: mod.xgenAuthHeaders,
+    matchCollectionAuthProfile: mod.matchCollectionAuthProfile,
+    matchExactAuthProfile: mod.matchExactAuthProfile,
+    isPathfinderManagedProfile: mod.isPathfinderManagedProfile,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
+function testAuthProfileResolution({
+  canonicalAuthServiceId,
+  jwtUserId,
+  xgenAuthHeaders,
+  matchCollectionAuthProfile,
+  matchExactAuthProfile,
+  isPathfinderManagedProfile,
+}) {
+  assert.equal(
+    canonicalAuthServiceId('https://api-bo-dev.x2bee.com:443/path'),
+    'api-bo-dev_x2bee_com',
+  );
+
+  const jwtPayload = Buffer.from(JSON.stringify({ sub: '27' }))
+    .toString('base64url');
+  const token = `header.${jwtPayload}.signature`;
+  assert.equal(jwtUserId(token), '27');
+  assert.deepEqual(xgenAuthHeaders(token), {
+    Authorization: `Bearer ${token}`,
+    'X-User-ID': '27',
+  });
+  assert.equal(jwtUserId('opaque-token'), undefined);
+
+  const linked = matchCollectionAuthProfile('api.customer.example', [
+    {
+      collection_id: 'wildcard',
+      domain_patterns: ['*.customer.example'],
+      auth_profile_id: 'wildcard_profile',
+    },
+    {
+      collection_id: 'exact',
+      domain_patterns: ['api.customer.example'],
+      auth_profile_id: 'exact_profile',
+    },
+  ]);
+  assert.equal(linked.status, 'matched');
+  assert.equal(linked.authProfileId, 'exact_profile');
+  assert.equal(linked.collectionId, 'exact');
+
+  const ambiguous = matchCollectionAuthProfile('api.customer.example', [
+    {
+      collection_id: 'first',
+      domain_patterns: ['api.customer.example'],
+      auth_profile_id: 'first_profile',
+    },
+    {
+      collection_id: 'second',
+      domain_patterns: ['api.customer.example'],
+      auth_profile_id: 'second_profile',
+    },
+  ]);
+  assert.equal(ambiguous.status, 'ambiguous');
+  assert.deepEqual(ambiguous.candidateIds, ['first_profile', 'second_profile']);
+
+  const exact = matchExactAuthProfile('api-bo-dev.x2bee.com', [
+    {
+      service_id: 'api_other_system',
+      name: 'api other system',
+      status: 'active',
+    },
+    {
+      service_id: 'api-bo-dev_x2bee_com',
+      name: 'api-bo-dev.x2bee.com (자동 생성)',
+      status: 'active',
+    },
+  ]);
+  assert.equal(exact.status, 'matched');
+  assert.equal(exact.authProfileId, 'api-bo-dev_x2bee_com');
+
+  assert.equal(
+    matchExactAuthProfile('api-bo-dev.x2bee.com', [{
+      service_id: 'api_unrelated',
+      name: 'API shared profile',
+      status: 'active',
+    }]).status,
+    'missing',
+    'a generic shared prefix must not auto-link an unrelated auth profile',
+  );
+  assert.equal(
+    matchExactAuthProfile('api-bo-dev.x2bee.com', [{
+      service_id: 'operator_profile',
+      name: 'api-bo-dev.x2bee.com (운영자 관리)',
+      status: 'active',
+    }]).status,
+    'missing',
+    'an operator-named profile must not be mistaken for the legacy auto profile',
+  );
+  assert.equal(
+    matchExactAuthProfile('api.customer.example', [{
+      service_id: 'customer_example',
+      name: 'customer.example (자동 생성)',
+      status: 'active',
+    }]).status,
+    'missing',
+    'a parent-domain profile must not auto-link to an arbitrary subdomain',
+  );
+  assert.equal(isPathfinderManagedProfile({
+    service_id: 'api-bo-dev_x2bee_com',
+    name: 'api-bo-dev.x2bee.com (자동 생성)',
+    status: 'active',
+  }, 'api-bo-dev.x2bee.com'), true);
+  assert.equal(isPathfinderManagedProfile({
+    service_id: 'api-bo-dev_x2bee_com',
+    name: '운영자 프로필',
+    description: 'do not overwrite',
+    status: 'active',
+  }, 'api-bo-dev.x2bee.com'), false);
+}
+
 function testTraceFiltering(analyzeTrace) {
   const analysis = analyzeTrace([
     captured({
@@ -2029,7 +2167,12 @@ async function main() {
     deleteApiCollection,
     cleanup: cleanupApi,
   } = await loadApiClient();
+  const {
+    cleanup: cleanupAuthProfileResolution,
+    ...authProfileResolution
+  } = await loadAuthProfileResolution();
   try {
+    testAuthProfileResolution(authProfileResolution);
     testTraceFiltering(analyzeTrace);
     testAnalyticsHeavyCaptureKeepsPrimaryApiHost(analyzeTrace);
     testAuthHostDoesNotStealPrimaryHost(analyzeTrace);
@@ -2077,6 +2220,7 @@ async function main() {
     await cleanupPostmanImporter();
     await cleanupGraphQLImporter();
     await cleanupApi();
+    await cleanupAuthProfileResolution();
   }
 
   console.log(
