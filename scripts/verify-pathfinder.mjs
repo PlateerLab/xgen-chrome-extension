@@ -165,6 +165,51 @@ async function loadHarImporter() {
   };
 }
 
+async function loadManualToolContractBuilder() {
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-manual-contract-'));
+  const registrationSourcePath = path.join(
+    repoRoot,
+    'src/sidepanel/lib/trace-registration.ts',
+  );
+  const builderSourcePath = path.join(
+    repoRoot,
+    'src/sidepanel/lib/manual-tool-contract.ts',
+  );
+  const compilerOptions = {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2022,
+    verbatimModuleSyntax: true,
+  };
+  const registration = ts.transpileModule(
+    await readFile(registrationSourcePath, 'utf8'),
+    { compilerOptions, fileName: registrationSourcePath },
+  );
+  const builder = ts.transpileModule(
+    await readFile(builderSourcePath, 'utf8'),
+    { compilerOptions, fileName: builderSourcePath },
+  );
+  await writeFile(
+    path.join(tmpDir, 'trace-registration.mjs'),
+    registration.outputText,
+    'utf8',
+  );
+  await writeFile(
+    path.join(tmpDir, 'manual-tool-contract.mjs'),
+    builder.outputText.replace(
+      /from ['"]\.\/trace-registration['"]/g,
+      "from './trace-registration.mjs'",
+    ),
+    'utf8',
+  );
+  const mod = await import(
+    pathToFileURL(path.join(tmpDir, 'manual-tool-contract.mjs')).href
+  );
+  return {
+    buildManualToolContractSource: mod.buildManualToolContractSource,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
 async function loadApiClient() {
   const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-api-'));
 
@@ -954,6 +999,183 @@ function testHarImportValidationAndCaps(importHarArchive) {
   assert.equal(oversized.summary.truncated, true);
 }
 
+function testManualToolContractBuilder(buildManualToolContractSource) {
+  const source = buildManualToolContractSource({
+    endpointUrl: 'https://api.example.com/orders/{orderId}',
+    method: 'GET',
+    operationId: 'getOrderDetail',
+    summary: '주문 상세를 조회합니다.',
+    parameters: [
+      {
+        name: 'includeItems',
+        location: 'query',
+        schemaType: 'boolean',
+        required: false,
+      },
+    ],
+    responseSchemaText: JSON.stringify({
+      type: 'object',
+      required: ['orderId', 'items'],
+      properties: {
+        orderId: { type: 'string' },
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              sku: { type: 'string' },
+            },
+          },
+        },
+      },
+    }),
+    authType: 'bearer',
+  });
+
+  assert.equal(source.host, 'api.example.com');
+  assert.equal(source.baseUrl, 'https://api.example.com');
+  assert.equal(source.operationId, 'getOrderDetail');
+  const operation = source.spec.paths['/orders/{orderId}'].get;
+  assert.equal(operation.operationId, 'getOrderDetail');
+  assert.deepEqual(
+    operation.parameters.map((parameter) => ({
+      name: parameter.name,
+      in: parameter.in,
+      required: parameter.required,
+      type: parameter.schema.type,
+    })),
+    [
+      { name: 'includeItems', in: 'query', required: false, type: 'boolean' },
+      { name: 'orderId', in: 'path', required: true, type: 'string' },
+    ],
+  );
+  assert.equal(
+    operation.responses['200'].content['application/json'].schema
+      .properties.items.items.properties.sku.type,
+    'string',
+  );
+  assert.deepEqual(operation.security, [{ pathfinderManualAuth: [] }]);
+  assert.deepEqual(
+    source.spec.components.securitySchemes.pathfinderManualAuth,
+    { type: 'http', scheme: 'bearer' },
+  );
+  assert.equal(operation['x-pathfinder-source'].sample_values_persisted, false);
+  assert.deepEqual(operation['x-pathfinder-source'], {
+    kind: 'manual_contract',
+    version: 1,
+    sample_values_persisted: false,
+  });
+
+  const requestSource = buildManualToolContractSource({
+    endpointUrl: 'https://api.example.com/orders',
+    method: 'POST',
+    summary: '주문을 생성합니다.',
+    requestSchemaText: JSON.stringify({
+      type: 'object',
+      properties: {
+        sku: { type: 'string', example: 'SKU-1' },
+        quantity: { type: 'integer', default: 1 },
+      },
+    }),
+    responseSchemaText: JSON.stringify({ type: 'object' }),
+    responseStatus: '201',
+    authType: 'apiKeyHeader',
+    authName: 'X-API-Key',
+  });
+  const createOperation = requestSource.spec.paths['/orders'].post;
+  assert.equal(requestSource.operationId, 'postOrders');
+  assert.equal(
+    createOperation.requestBody.content['application/json'].schema
+      .properties.sku.example,
+    undefined,
+  );
+  assert.equal(
+    createOperation.requestBody.content['application/json'].schema
+      .properties.quantity.default,
+    undefined,
+  );
+  assert.equal(requestSource.warnings.length, 1);
+  assert.deepEqual(
+    requestSource.spec.components.securitySchemes.pathfinderManualAuth,
+    { type: 'apiKey', in: 'header', name: 'X-API-Key' },
+  );
+
+  assert.throws(
+    () => buildManualToolContractSource({
+      endpointUrl: 'https://api.example.com/orders?token=secret',
+      method: 'GET',
+      summary: '주문 조회',
+    }),
+    /query 값을 넣지 말고 parameter/,
+  );
+  assert.throws(
+    () => buildManualToolContractSource({
+      endpointUrl: 'https://api.example.com/orders',
+      method: 'GET',
+      summary: '문의: customer@example.com',
+    }),
+    /개인정보 또는 인증정보/,
+  );
+  assert.throws(
+    () => buildManualToolContractSource({
+      endpointUrl: 'https://api.example.com/orders',
+      method: 'GET',
+      summary: 'token sk-proj-abcdefghijklmnopqrst',
+    }),
+    /개인정보 또는 인증정보/,
+  );
+  assert.throws(
+    () => buildManualToolContractSource({
+      endpointUrl: 'https://api.example.com/reset/Bearer%20abcdefghijk',
+      method: 'GET',
+      summary: '재설정 상태 조회',
+    }),
+    /개인정보 또는 인증정보/,
+  );
+  assert.throws(
+    () => buildManualToolContractSource({
+      endpointUrl: 'https://api.example.com/orders',
+      method: 'GET',
+      summary: '주문 조회',
+      responseSchemaText: '{"type":"object"',
+    }),
+    /JSON Schema 파싱 실패/,
+  );
+  assert.throws(
+    () => buildManualToolContractSource({
+      endpointUrl: 'https://api.example.com/orders',
+      method: 'GET',
+      summary: '주문 조회',
+      responseSchemaText: JSON.stringify({
+        $ref: 'https://schemas.example.com/order.json',
+      }),
+    }),
+    /외부 \$ref/,
+  );
+  assert.throws(
+    () => buildManualToolContractSource({
+      endpointUrl: 'https://api.example.com/orders/{orderId}',
+      method: 'GET',
+      summary: '주문 조회',
+      parameters: [{
+        name: 'otherId',
+        location: 'path',
+        schemaType: 'string',
+      }],
+    }),
+    /endpoint path에 없습니다/,
+  );
+  assert.throws(
+    () => buildManualToolContractSource({
+      endpointUrl: 'https://api.example.com/orders',
+      method: 'GET',
+      operationId: '주문조회',
+      summary: '주문 조회',
+    }),
+    /operationId는 영문/,
+  );
+}
+
 async function withMockFetch(handler, fn) {
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -1186,6 +1408,10 @@ async function main() {
     cleanup: cleanupHarImporter,
   } = await loadHarImporter();
   const {
+    buildManualToolContractSource,
+    cleanup: cleanupManualToolContract,
+  } = await loadManualToolContractBuilder();
+  const {
     createCollectionFromTrace,
     mergeCollectionFromTrace,
     listApiCollections,
@@ -1216,6 +1442,7 @@ async function main() {
       buildTraceRegistrationPayload,
     );
     testHarImportValidationAndCaps(importHarArchive);
+    testManualToolContractBuilder(buildManualToolContractSource);
     await testCollectionFromTraceApi(createCollectionFromTrace, mergeCollectionFromTrace);
     await testOpenApiCollectionApi({
       listApiCollections,
@@ -1228,6 +1455,7 @@ async function main() {
     await cleanup();
     await cleanupRegistration();
     await cleanupHarImporter();
+    await cleanupManualToolContract();
     await cleanupApi();
   }
 

@@ -9,6 +9,7 @@ import { useElementPicker, PickerResultPanel } from './components/ElementPickerB
 import { SessionResultPanel } from './components/SessionResultPanel';
 import { SourceImportButton } from './components/SourceImportButton';
 import { OpenApiImportPanel } from './components/OpenApiImportPanel';
+import { ManualToolContractPanel } from './components/ManualToolContractPanel';
 import { MenuDrawer } from './components/MenuDrawer';
 import { ProductInbox } from './components/ProductInbox';
 import type { SessionResult } from './hooks/useCaptureSession';
@@ -37,6 +38,7 @@ export function App() {
   const [importedResult, setImportedResult] = useState<SessionResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [openApiImportOpen, setOpenApiImportOpen] = useState(false);
+  const [manualToolOpen, setManualToolOpen] = useState(false);
   const [authCapturing, setAuthCapturing] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [view, setView] = useState<SidePanelView>('chat');
@@ -228,16 +230,26 @@ export function App() {
               captureSession.active
               || captureSession.pending
               || openApiImportOpen
+              || manualToolOpen
             }
             onOpenApiRequested={() => {
               setImportedResult(null);
               captureSession.dismissResult();
               setImportError(null);
+              setManualToolOpen(false);
               setOpenApiImportOpen(true);
+            }}
+            onManualRequested={() => {
+              setImportedResult(null);
+              captureSession.dismissResult();
+              setImportError(null);
+              setOpenApiImportOpen(false);
+              setManualToolOpen(true);
             }}
             onImported={(result) => {
               setImportError(null);
               setOpenApiImportOpen(false);
+              setManualToolOpen(false);
               captureSession.dismissResult();
               setImportedResult(result);
             }}
@@ -308,6 +320,13 @@ export function App() {
         <OpenApiImportPanel
           targetTabId={targetTabId}
           onDismiss={() => setOpenApiImportOpen(false)}
+        />
+      )}
+      {manualToolOpen && (
+        <ManualToolContractPanel
+          targetTabId={targetTabId}
+          targetTabUrl={targetTabUrl}
+          onDismiss={() => setManualToolOpen(false)}
         />
       )}
 

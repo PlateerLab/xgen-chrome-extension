@@ -124,7 +124,7 @@ npm run verify:pathfinder
 - [ ] GraphQL introspection
 - [ ] Postman Collection
 - [ ] MCP tool catalog
-- [ ] 수동 contract 작성 및 수정 UI
+- [x] 수동 contract 작성, 수정, preview 및 Collection 등록 UI
 
 모든 importer가 만들어야 하는 공통 결과:
 

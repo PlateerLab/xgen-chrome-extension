@@ -19,6 +19,10 @@ import {
 interface Props {
   targetTabId?: number | null;
   onDismiss: () => void;
+  initialSource?: PreparedOpenApiSource;
+  heading?: string;
+  onEditSource?: () => void;
+  sourceWarnings?: string[];
 }
 
 interface XgenConfig {
@@ -56,15 +60,29 @@ function previewIssues(preview: OpenApiPreviewResult): Array<{
   ];
 }
 
-export function OpenApiImportPanel({ targetTabId, onDismiss }: Props) {
+export function OpenApiImportPanel({
+  targetTabId,
+  onDismiss,
+  initialSource,
+  heading = 'OpenAPI 가져오기',
+  onEditSource,
+  sourceWarnings = [],
+}: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
-  const [sourceMode, setSourceMode] = useState<SourceMode>('url');
+  const sourceLocked = Boolean(initialSource);
+  const initialCollectionId = initialSource
+    ? openApiSlug(initialSource.host || initialSource.name, 'openapi-collection')
+    : '';
+  const initialSourceLabel = initialSource
+    ? openApiSlug(initialSource.name, 'openapi').slice(0, 100)
+    : 'openapi';
+  const [sourceMode, setSourceMode] = useState<SourceMode>(initialSource ? 'file' : 'url');
   const [targetMode, setTargetMode] = useState<TargetMode>('new');
   const [sourceUrl, setSourceUrl] = useState('');
-  const [prepared, setPrepared] = useState<PreparedOpenApiSource | null>(null);
-  const [sourceLabel, setSourceLabel] = useState('openapi');
-  const [collectionId, setCollectionId] = useState('');
-  const [collectionName, setCollectionName] = useState('');
+  const [prepared, setPrepared] = useState<PreparedOpenApiSource | null>(initialSource || null);
+  const [sourceLabel, setSourceLabel] = useState(initialSourceLabel);
+  const [collectionId, setCollectionId] = useState(initialCollectionId);
+  const [collectionName, setCollectionName] = useState(initialSource?.name || '');
   const [existingId, setExistingId] = useState('');
   const [collections, setCollections] = useState<ApiCollectionSummary[]>([]);
   const [preview, setPreview] = useState<OpenApiPreviewResult | null>(null);
@@ -102,6 +120,10 @@ export function OpenApiImportPanel({ targetTabId, onDismiss }: Props) {
   const currentTargetId = targetMode === 'existing' ? existingId : undefined;
 
   const prepareCurrentSource = async (): Promise<PreparedOpenApiSource> => {
+    if (sourceLocked) {
+      if (!prepared?.spec) throw new Error('수동 contract를 다시 작성해주세요.');
+      return prepared;
+    }
     if (sourceMode === 'file') {
       if (!prepared?.spec) throw new Error('OpenAPI JSON/YAML 파일을 선택해주세요.');
       return prepared;
@@ -238,91 +260,124 @@ export function OpenApiImportPanel({ targetTabId, onDismiss }: Props) {
       aria-busy={Boolean(busy)}
     >
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-[11px] font-medium text-gray-700">OpenAPI 가져오기</span>
-        <button
-          type="button"
-          disabled={importLocked}
-          onClick={onDismiss}
-          className="text-[10px] text-gray-400 hover:text-gray-600 disabled:text-gray-300"
-        >
-          닫기
-        </button>
-      </div>
-
-      <div className="mb-2 flex gap-1">
-        {(['url', 'file'] as SourceMode[]).map((mode) => (
-          <button
-            key={mode}
-            type="button"
-            disabled={importLocked}
-            onClick={() => {
-              setSourceMode(mode);
-              setPreview(null);
-              setError(null);
-            }}
-            className={`px-2 py-1 text-[10px] ${
-              sourceMode === mode
-                ? 'bg-gray-800 text-white'
-                : 'border border-gray-200 bg-white text-gray-600'
-            }`}
-          >
-            {mode === 'url' ? 'URL' : 'JSON/YAML 파일'}
-          </button>
-        ))}
-      </div>
-
-      {sourceMode === 'url' ? (
-        <input
-          type="url"
-          disabled={importLocked}
-          value={sourceUrl}
-          onChange={(event) => {
-            setSourceUrl(event.target.value);
-            setPrepared(null);
-            setPreview(null);
-          }}
-          placeholder="https://service.example/openapi.json 또는 Swagger UI URL"
-          className="mb-2 w-full border border-gray-200 bg-white px-2 py-1.5 text-[11px] outline-none focus:border-blue-400"
-          data-testid="openapi-url-input"
-        />
-      ) : (
-        <div className="mb-2 flex items-center gap-2">
+        <span className="text-[11px] font-medium text-gray-700">{heading}</span>
+        <div className="flex items-center gap-2">
+          {sourceLocked && onEditSource && (
+            <button
+              type="button"
+              disabled={importLocked}
+              onClick={onEditSource}
+              className="text-[10px] text-blue-600 hover:text-blue-700 disabled:text-gray-300"
+            >
+              contract 수정
+            </button>
+          )}
           <button
             type="button"
             disabled={importLocked}
-            onClick={() => fileRef.current?.click()}
-            className="border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-700 hover:bg-gray-50"
+            onClick={onDismiss}
+            className="text-[10px] text-gray-400 hover:text-gray-600 disabled:text-gray-300"
           >
-            파일 선택
+            닫기
           </button>
-          <span className="min-w-0 flex-1 truncate text-[10px] text-gray-500">
-            {prepared?.spec ? prepared.name : '5MB 이하 OpenAPI/Swagger 문서'}
-          </span>
-          <input
-            ref={fileRef}
-            type="file"
-            disabled={importLocked}
-            accept=".json,.yaml,.yml,application/json,application/yaml,text/yaml"
-            className="hidden"
-            data-testid="openapi-file-input"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              setBusy('loading');
-              prepareOpenApiFile(file)
-                .then(applyIdentity)
-                .catch((fileError) => {
-                  setPrepared(null);
-                  setPreview(null);
-                  setError(fileError instanceof Error ? fileError.message : String(fileError));
-                })
-                .finally(() => {
-                  setBusy(null);
-                  if (fileRef.current) fileRef.current.value = '';
-                });
-            }}
-          />
         </div>
+      </div>
+
+      {sourceLocked ? (
+        <div className="mb-2 border-l-2 border-violet-400 bg-white px-2 py-1.5">
+          <div className="truncate text-[10px] font-medium text-gray-700">
+            {prepared?.name}
+          </div>
+          <div className="truncate font-mono text-[9px] text-gray-500">
+            {prepared?.baseUrl}
+          </div>
+          <div className="mt-0.5 text-[9px] text-gray-400">
+            실제 request/response 값 없이 schema와 security 요구사항만 등록합니다.
+          </div>
+          {sourceWarnings.map((warning) => (
+            <div key={warning} className="mt-0.5 text-[9px] text-amber-700">
+              {warning}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <>
+          <div className="mb-2 flex gap-1">
+            {(['url', 'file'] as SourceMode[]).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                disabled={importLocked}
+                onClick={() => {
+                  setSourceMode(mode);
+                  setPreview(null);
+                  setError(null);
+                }}
+                className={`px-2 py-1 text-[10px] ${
+                  sourceMode === mode
+                    ? 'bg-gray-800 text-white'
+                    : 'border border-gray-200 bg-white text-gray-600'
+                }`}
+              >
+                {mode === 'url' ? 'URL' : 'JSON/YAML 파일'}
+              </button>
+            ))}
+          </div>
+
+          {sourceMode === 'url' ? (
+            <input
+              type="url"
+              disabled={importLocked}
+              value={sourceUrl}
+              onChange={(event) => {
+                setSourceUrl(event.target.value);
+                setPrepared(null);
+                setPreview(null);
+              }}
+              placeholder="https://service.example/openapi.json 또는 Swagger UI URL"
+              className="mb-2 w-full border border-gray-200 bg-white px-2 py-1.5 text-[11px] outline-none focus:border-blue-400"
+              data-testid="openapi-url-input"
+            />
+          ) : (
+            <div className="mb-2 flex items-center gap-2">
+              <button
+                type="button"
+                disabled={importLocked}
+                onClick={() => fileRef.current?.click()}
+                className="border border-gray-300 bg-white px-2 py-1 text-[10px] text-gray-700 hover:bg-gray-50"
+              >
+                파일 선택
+              </button>
+              <span className="min-w-0 flex-1 truncate text-[10px] text-gray-500">
+                {prepared?.spec ? prepared.name : '5MB 이하 OpenAPI/Swagger 문서'}
+              </span>
+              <input
+                ref={fileRef}
+                type="file"
+                disabled={importLocked}
+                accept=".json,.yaml,.yml,application/json,application/yaml,text/yaml"
+                className="hidden"
+                data-testid="openapi-file-input"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (!file) return;
+                  setBusy('loading');
+                  prepareOpenApiFile(file)
+                    .then(applyIdentity)
+                    .catch((fileError) => {
+                      setPrepared(null);
+                      setPreview(null);
+                      setError(fileError instanceof Error ? fileError.message : String(fileError));
+                    })
+                    .finally(() => {
+                      setBusy(null);
+                      if (fileRef.current) fileRef.current.value = '';
+                    });
+                }}
+              />
+            </div>
+          )}
+        </>
       )}
 
       <div className="mb-2 flex gap-1">
@@ -447,7 +502,9 @@ export function OpenApiImportPanel({ targetTabId, onDismiss }: Props) {
 
       <div className="flex items-center justify-between">
         <span className="text-[9px] text-gray-400">
-          미리보기와 등록은 XGEN의 동일한 OpenAPI parser를 사용합니다.
+          {sourceLocked
+            ? '수동 contract도 XGEN의 동일한 OpenAPI parser와 품질 게이트를 사용합니다.'
+            : '미리보기와 등록은 XGEN의 동일한 OpenAPI parser를 사용합니다.'}
         </span>
         <button
           type="button"

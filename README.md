@@ -12,6 +12,7 @@
 | [아키텍처](docs/architecture.md) | 확장 컨텍스트와 API 캡처 흐름 |
 | [메시지 프로토콜](docs/message-protocol.md) | Side Panel, Service Worker, Content Script 계약 |
 | [검증 가이드](docs/verification.md) | Playwright 자동화와 실제 환경 검증 계층 |
+| [수동 Tool Contract](docs/manual-tool-contract.md) | endpoint와 schema로 단일 API 도구 등록 |
 | [XGEN 연동](docs/xgen-integration.md) | endpoint, 인증 및 Collection 등록 |
 | [고객사 환경](docs/customer-environment.md) | 내부망, VPN, CA, SSO 및 acceptance |
 | [보안](docs/security.md) | 권한, 민감정보 및 로그 정책 |
@@ -80,6 +81,12 @@ LangGraph `create_react_agent`를 수동 ReAct 루프로 교체하여 전체 제
 - **컨텍스트 연속성**: 대화 요약 자동 생성 + DOM 재스캔 + canvas state 캐싱
 - **실시간 스트리밍**: SSE 기반 LLM 응답 + 마크다운 렌더링
 - **다크/라이트 모드**: 시스템 설정 연동
+
+### 10. 범용 API 입력
+- 브라우저 fetch/XHR 캡처와 개인정보 보호형 HAR import
+- OpenAPI/Swagger URL 또는 JSON/YAML 파일 import
+- endpoint, parameter, request/response JSON Schema 기반 수동 Tool Contract
+- 모든 입력은 XGEN API Collection preview와 readiness 검사를 거쳐 등록
 
 ## 아키텍처
 

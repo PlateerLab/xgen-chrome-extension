@@ -8,6 +8,7 @@ interface Props {
   targetTabId?: number | null;
   disabled?: boolean;
   onOpenApiRequested: () => void;
+  onManualRequested: () => void;
   onImported: (result: SessionResult) => void;
   onError: (message: string) => void;
 }
@@ -16,6 +17,7 @@ export function SourceImportButton({
   targetTabId,
   disabled = false,
   onOpenApiRequested,
+  onManualRequested,
   onImported,
   onError,
 }: Props) {
@@ -104,6 +106,19 @@ export function SourceImportButton({
             OpenAPI
             <span className="mt-0.5 block text-[9px] text-gray-400">
               URL 또는 JSON/YAML 파일
+            </span>
+          </button>
+          <button
+            type="button"
+            className="block w-full rounded px-2 py-1.5 text-left text-[11px] text-gray-700 hover:bg-gray-50"
+            onClick={() => {
+              setMenuOpen(false);
+              onManualRequested();
+            }}
+          >
+            수동 Tool Contract
+            <span className="mt-0.5 block text-[9px] text-gray-400">
+              endpoint와 request/response schema 작성
             </span>
           </button>
         </div>

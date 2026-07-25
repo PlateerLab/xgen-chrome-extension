@@ -1278,6 +1278,127 @@ async function openOpenApiImport(extensionPage, targetPage) {
   await extensionPage.getByTestId('openapi-import-panel').waitFor();
 }
 
+async function openManualToolContract(extensionPage, targetPage) {
+  await clickSidepanelButton(
+    extensionPage,
+    targetPage,
+    'Open source import menu',
+    /소스 가져오기/,
+  );
+  await extensionPage.getByRole('button', { name: /수동 Tool Contract/ }).click();
+  await extensionPage.getByTestId('manual-tool-contract-panel').waitFor();
+}
+
+async function verifyManualToolContractUi(
+  extensionPage,
+  targetPage,
+  fixtureUrl,
+  collectionCreateRequests,
+  sourcePreviewRequests,
+  sourceAddRequests,
+) {
+  await openManualToolContract(extensionPage, targetPage);
+  const editor = extensionPage.getByTestId('manual-tool-contract-panel');
+  const endpoint = `${new URL(fixtureUrl).origin}/api/orders/{orderId}`;
+  await editor.getByLabel('HTTP method').selectOption('POST');
+  await editor.getByTestId('manual-endpoint-input').fill(endpoint);
+  await editor.locator('input[placeholder^="operationId"]').fill('createOrderFromManual');
+  await editor.getByTestId('manual-summary-input').fill('주문을 생성합니다.');
+  await editor.getByRole('button', { name: '+ parameter' }).click();
+  await editor.getByLabel('parameter 1 이름').fill('dryRun');
+  await editor.getByLabel('parameter 1 위치').selectOption('query');
+  await editor.getByLabel('parameter 1 타입').selectOption('boolean');
+  await editor.getByTestId('manual-request-schema').fill(JSON.stringify({
+    type: 'object',
+    required: ['sku', 'quantity'],
+    properties: {
+      sku: { type: 'string', example: 'MUST-NOT-PERSIST' },
+      quantity: { type: 'integer', minimum: 1 },
+    },
+  }));
+  const previewStart = sourcePreviewRequests.length;
+  await editor.getByTestId('manual-response-schema').fill('{"type":"object"');
+  await editor.getByRole('button', { name: 'contract 검증' }).click();
+  await editor.getByText(/응답 JSON Schema 파싱 실패/).waitFor();
+  assert.equal(
+    sourcePreviewRequests.length,
+    previewStart,
+    'invalid manual schema must not reach XGEN preview',
+  );
+  await editor.getByTestId('manual-response-schema').fill(JSON.stringify({
+    type: 'object',
+    required: ['orderId'],
+    properties: {
+      orderId: { type: 'string' },
+      accepted: { type: 'boolean' },
+    },
+  }));
+  await editor.getByLabel('인증 요구사항').selectOption('bearer');
+  await editor.getByRole('button', { name: 'contract 검증' }).click();
+
+  const panel = extensionPage.getByTestId('openapi-import-panel');
+  await panel.waitFor();
+  await panel.getByText(/example\/default 값은 개인정보 보호를 위해 제외/).waitFor();
+  await panel.getByRole('button', { name: '미리보기' }).click();
+  await panel.getByText(/준비도 95/).waitFor();
+
+  const preview = await waitForItem(
+    sourcePreviewRequests,
+    (entry) => (
+      entry.body?.spec?.paths?.['/api/orders/{orderId}']?.post
+        ?.operationId === 'createOrderFromManual'
+    ),
+    'manual tool contract preview request',
+  );
+  assert.equal(sourcePreviewRequests.length, previewStart + 1);
+  assert.equal(preview.body.format_hint, 'openapi');
+  assert.equal(preview.body.spec.openapi, '3.1.0');
+  const operation = preview.body.spec.paths['/api/orders/{orderId}'].post;
+  assert.equal(operation.summary, '주문을 생성합니다.');
+  assert.equal(operation.parameters[0].name, 'dryRun');
+  assert.equal(operation.parameters[0].in, 'query');
+  assert.equal(operation.parameters[1].name, 'orderId');
+  assert.equal(operation.parameters[1].required, true);
+  assert.equal(
+    operation.requestBody.content['application/json'].schema.properties.sku.example,
+    undefined,
+  );
+  assert.equal(
+    operation.responses['200'].content['application/json'].schema
+      .properties.orderId.type,
+    'string',
+  );
+  assert.deepEqual(operation.security, [{ pathfinderManualAuth: [] }]);
+  assert.equal(operation['x-pathfinder-source'].sample_values_persisted, false);
+  assert.ok(!JSON.stringify(preview.body).includes('MUST-NOT-PERSIST'));
+
+  await panel.locator('input[placeholder="collection-id"]').fill('manual-runtime');
+  await panel.locator('input[placeholder="Collection 이름"]').fill('Manual Runtime');
+  await panel.getByRole('button', { name: 'Collection에 등록' }).click();
+  await panel.getByText(/Collection 등록 완료: manual-runtime/).waitFor();
+
+  const created = await waitForItem(
+    collectionCreateRequests,
+    (entry) => entry.body?.collection_id === 'manual-runtime',
+    'manual contract Collection create request',
+  );
+  assert.equal(created.body.base_url, new URL(fixtureUrl).origin);
+  assert.deepEqual(created.body.domain_patterns, [new URL(fixtureUrl).hostname]);
+  const source = await waitForItem(
+    sourceAddRequests,
+    (entry) => entry.collectionId === 'manual-runtime',
+    'manual contract source add request',
+  );
+  assert.equal(
+    source.body.spec.paths['/api/orders/{orderId}'].post.operationId,
+    'createOrderFromManual',
+  );
+  assert.ok(!JSON.stringify(source.body).includes('MUST-NOT-PERSIST'));
+
+  await panel.getByRole('button', { name: '닫기' }).click();
+  await panel.waitFor({ state: 'detached' });
+}
+
 async function verifyOpenApiImportUi(
   extensionPage,
   targetPage,
@@ -1821,6 +1942,14 @@ async function main() {
       collectionDeleteRequests,
       sourceAddMode,
     );
+    await verifyManualToolContractUi(
+      extensionPage,
+      targetPage,
+      url,
+      collectionCreateRequests,
+      sourcePreviewRequests,
+      sourceAddRequests,
+    );
     await wait(2_200);
 
     const firstApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
@@ -1955,6 +2084,7 @@ async function main() {
       'page_command relay callback verified',
       'sidepanel chat relay verified',
       'OpenAPI URL/YAML import and rollback verified',
+      'manual tool contract preview and registration verified',
       'capture result registration verified',
       'capture result merge conflict verified',
       'privacy-safe HAR import verified',
