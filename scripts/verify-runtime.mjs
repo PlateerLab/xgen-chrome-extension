@@ -540,11 +540,14 @@ async function runCaptureSession(extensionPage, targetPage, action, label) {
   const stop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
   assert.equal(stop?.ok, true, `${label}: STOP_CAPTURE_SESSION failed: ${JSON.stringify(stop)}`);
   assert.ok(stop.count >= 1, `${label}: expected at least one captured API, got ${stop.count}`);
+  assert.equal(stop.bufferedCount, 0, `${label}: tab capture buffer was not released after stop`);
 
   const cached = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
   assert.equal(cached?.ok, true, `${label}: GET_CAPTURE_RESULT failed: ${JSON.stringify(cached)}`);
   const apis = cached?.result?.apis || [];
   assert.equal(apis.length, stop.count, `${label}: cached result count mismatch`);
+  const consumed = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
+  assert.equal(consumed?.result, null, `${label}: consumed capture result should be released`);
   return apis;
 }
 
@@ -1105,6 +1108,7 @@ async function main() {
       'sidepanel chat relay verified',
       'capture result registration verified',
       'capture result merge conflict verified',
+      'capture payload memory release verified',
       `fetch/xhr captured ${firstApis.length} API request(s)`,
       `navigation reinjection captured ${secondApis.length} API request(s)`,
     ].join('; '));

@@ -43,7 +43,11 @@ export interface AnalyzedEdge {
   toToolId: string;
   source: 'observed';                           // Phase 2는 observed만. inferred(이름매칭)는 Phase 4 이후.
   confidence: number;                           // 같은 (from→to) 쌍에서 값 일치 관찰된 횟수
-  sampleSharedValue: string;                    // 어떤 값이 흘렀는지 한 예시
+  valueEvidence: {
+    sourceFieldPath: string;
+    targetFieldPath: string;
+    valueType: 'string' | 'number';
+  };
 }
 
 export interface DroppedReason {
@@ -542,41 +546,75 @@ function dropPolling(captures: CapturedApi[]): { kept: CapturedApi[]; droppedCou
 
 // ── 값 흐름 엣지 추정 ──
 
-function collectLeafValues(node: unknown, out: Set<string>): void {
+interface CapturedValueEvidence {
+  fieldPath: string;
+  valueType: 'string' | 'number';
+}
+
+type CapturedValueMap = Map<string, CapturedValueEvidence>;
+
+function addCapturedValue(
+  out: CapturedValueMap,
+  value: string,
+  evidence: CapturedValueEvidence,
+): void {
+  if (!out.has(value)) out.set(value, evidence);
+}
+
+function collectLeafValues(node: unknown, out: CapturedValueMap, fieldPath: string): void {
   if (node == null) return;
   if (typeof node === 'string') {
-    if (node.length >= 5) out.add(node);              // 너무 짧은 값(true, ok 등) 제외
+    if (node.length >= 5) {
+      addCapturedValue(out, node, { fieldPath, valueType: 'string' });
+    }
     return;
   }
   if (typeof node === 'number') {
-    if (node >= 100) out.add(String(node));           // 너무 작은 숫자 제외 (ID는 보통 큼)
+    if (node >= 100) {
+      addCapturedValue(out, String(node), { fieldPath, valueType: 'number' });
+    }
     return;
   }
-  if (Array.isArray(node)) { for (const x of node) collectLeafValues(x, out); return; }
+  if (Array.isArray(node)) {
+    for (const item of node) collectLeafValues(item, out, `${fieldPath}[]`);
+    return;
+  }
   if (typeof node === 'object') {
-    for (const v of Object.values(node)) collectLeafValues(v, out);
+    for (const [key, value] of Object.entries(node)) {
+      collectLeafValues(value, out, `${fieldPath}.${key}`);
+    }
   }
 }
 
-function valuesFromCaptureRequest(api: CapturedApi): Set<string> {
-  const out = new Set<string>();
+function valuesFromCaptureRequest(api: CapturedApi): CapturedValueMap {
+  const out: CapturedValueMap = new Map();
   const u = tryParseUrl(api.url);
   if (u) {
     // path segment + query
-    for (const seg of u.pathname.split('/').filter(Boolean)) {
-      if (seg.length >= 5 || /^\d{3,}$/.test(seg)) out.add(seg);
+    for (const [index, segment] of u.pathname.split('/').filter(Boolean).entries()) {
+      if (segment.length >= 5 || /^\d{3,}$/.test(segment)) {
+        addCapturedValue(out, segment, {
+          fieldPath: `path.segment[${index}]`,
+          valueType: 'string',
+        });
+      }
     }
-    for (const v of u.searchParams.values()) {
-      if (v.length >= 5 || /^\d{3,}$/.test(v)) out.add(v);
+    for (const [key, value] of u.searchParams.entries()) {
+      if (value.length >= 5 || /^\d{3,}$/.test(value)) {
+        addCapturedValue(out, value, {
+          fieldPath: `query.${key}`,
+          valueType: 'string',
+        });
+      }
     }
   }
-  collectLeafValues(safeJsonParse(api.requestBody), out);
+  collectLeafValues(safeJsonParse(api.requestBody), out, 'requestBody');
   return out;
 }
 
-function valuesFromCaptureResponse(api: CapturedApi): Set<string> {
-  const out = new Set<string>();
-  collectLeafValues(safeJsonParse(api.responseBody), out);
+function valuesFromCaptureResponse(api: CapturedApi): CapturedValueMap {
+  const out: CapturedValueMap = new Map();
+  collectLeafValues(safeJsonParse(api.responseBody), out, 'responseBody');
   return out;
 }
 
@@ -603,10 +641,12 @@ function detectEdges(captures: CaptureWithTool[]): AnalyzedEdge[] {
       if (sorted[i].toolId === sorted[j].toolId) continue; // 자기 자신과의 엣지 스킵
       const reqVals = requestValues[j];
       let shared: string | null = null;
-      for (const v of reqVals) {
+      for (const v of reqVals.keys()) {
         if (respVals.has(v)) { shared = v; break; }
       }
       if (!shared) continue;
+      const sourceEvidence = respVals.get(shared)!;
+      const targetEvidence = reqVals.get(shared)!;
       const key = `${sorted[i].toolId}=>${sorted[j].toolId}`;
       const existing = edgeMap.get(key);
       if (existing) {
@@ -617,7 +657,11 @@ function detectEdges(captures: CaptureWithTool[]): AnalyzedEdge[] {
           toToolId: sorted[j].toolId,
           source: 'observed',
           confidence: 1,
-          sampleSharedValue: shared,
+          valueEvidence: {
+            sourceFieldPath: sourceEvidence.fieldPath,
+            targetFieldPath: targetEvidence.fieldPath,
+            valueType: sourceEvidence.valueType,
+          },
         });
       }
     }

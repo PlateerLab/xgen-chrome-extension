@@ -14,7 +14,7 @@
 | `cookies` | XGEN token 및 대상 host live cookie 해석 |
 | `<all_urls>` | 다양한 고객사 host에서 API 관찰 |
 
-`<all_urls>`와 `cookies`는 강한 권한이다. 배포 전에 조직 보안 검토를 받아야 하며, 캡처는 사용자 동작으로 시작하고 현재 대상 탭으로 제한해야 한다.
+`<all_urls>`와 `cookies`는 강한 권한이다. 배포 전에 조직 보안 검토를 받아야 하며, 캡처는 사용자 동작으로 시작하고 현재 대상 탭으로 제한해야 한다. optional permission 전환의 제약과 단계별 구현안은 [Optional Permissions 설계](design/optional-permissions.md)에 정리한다.
 
 ## 신뢰 경계
 
@@ -29,26 +29,26 @@
 Collection 등록 전에 다음을 적용한다.
 
 - request/query/body sample에서 authorization, cookie, password, secret, token, API key 계열 key redaction
+- 평범한 key 아래의 이메일, 전화번호, 주민번호형 식별자, 긴 숫자 및 JWT 값 패턴 redaction
 - 민감 query parameter 제외
 - 문자열, 배열, 객체 key, depth 및 전체 JSON 크기 제한
 - 최대 tool/edge 수 제한
 - 선택된 tool 사이의 edge만 전송
+- 관계 edge에는 실제 공유값 대신 source/target field path와 value type만 전송
+- 등록 화면에서 request/response sample 전송을 끄고 필드 구조만 등록 가능
+- 탭별 raw capture FIFO 500건 제한, 세션 종료 후 탭 버퍼 삭제, 미소비 결과 5분 TTL
 - XGEN origin 검증
 - 캡처 시점 cookie 대신 실행 시점 live cookie 사용
 
 ## 남는 위험
 
-캡처 세션 중에는 브라우저 요청과 응답 원문이 extension 메모리에 일시적으로 존재한다. 등록 payload를 정제하는 것만으로 캡처 단계의 노출 위험이 없어지는 것은 아니다. 민감 화면에서는 캡처를 시작하지 않고, 세션 종료 시 원본을 즉시 폐기해야 한다.
+캡처 세션 중에는 브라우저 요청과 응답 원문이 extension 메모리에 일시적으로 존재한다. 등록 payload를 정제하는 것만으로 캡처 단계의 노출 위험이 없어지는 것은 아니다. 세션 결과는 sidepanel이 소비할 때까지 또는 최대 5분 동안 메모리에 남을 수 있으므로 민감 화면에서는 캡처를 시작하지 않아야 한다.
 
-관계 edge의 `sampleSharedValue`는 현재 길이만 제한된다. 민감한 실제 값 대신 field path, type 또는 hash 기반 evidence로 교체하기 전까지 해당 값을 로그나 장기 저장소에 남기지 않아야 한다.
-
-키 이름이 평범한 개인정보나 업무 기밀은 정규식만으로 완전히 탐지할 수 없다. 예를 들어 `value`, `data`, `name` 아래의 주민번호나 전화번호는 schema와 값 패턴 검사가 추가로 필요하다.
+키 이름이 평범한 업무 기밀은 정규식만으로 완전히 탐지할 수 없다. 값 패턴 scrub이 대표적인 개인정보 형식을 제거하지만 임의 고객번호, 주문번호 또는 도메인 고유 식별자는 분류할 수 없다. 이 경우 샘플 저장을 끄거나 고객사 deny field 정책을 적용해야 한다.
 
 운영 적용 전 권장 보완:
 
-- 이메일, 전화번호, 계좌 및 식별번호 패턴 scrub
 - 고객사별 deny field 목록
-- request/response sample 저장 비활성화 옵션
 - 캡처 payload 사용자 미리보기와 필드별 제외
 - 보존 기간과 삭제 정책
 - audit event에 값이 아닌 field path만 기록
@@ -81,3 +81,15 @@ npm outdated
 ```
 
 자동 `npm audit fix --force`는 사용하지 않는다. dependency major 변경은 build, trace verification 및 browser runtime을 모두 통과한 뒤 반영한다.
+
+2026-07-26 기준으로 build-only 의존성의 기존 5건을 다음 호환 버전으로 해소했다.
+
+| 패키지 | 적용 버전 | 영향 |
+|---|---:|---|
+| `@crxjs/vite-plugin` | 2.7.1 | extension bundle 생성 시 사용하는 개발 의존성 |
+| `vite` | 6.4.3 | 개발 서버와 production build용 개발 의존성 |
+| `postcss` | 8.5.23 | CSS build용 개발 의존성 |
+| `@babel/core` | 7.29.7 | React transform의 전이 개발 의존성 |
+| `rollup` | 2.80.0 / 4.60.0 | CRXJS와 Vite의 전이 개발 의존성 |
+
+런타임 확장 bundle에 package manager나 개발 서버가 포함되는 문제는 아니었지만, 공격자가 조작한 로컬 source/source map을 빌드하는 환경에서는 파일 접근 위험이 있었다. 업데이트 후 `npm audit` 결과는 0건이며 build, trace contract, Chromium runtime을 함께 회귀 검증한다.

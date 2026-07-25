@@ -23,6 +23,16 @@ let cachedPageContextTabId: number | null = null;
 // ── API Hook State ──
 const hookedTabs = new Set<number>();
 const capturedApisByTab = new Map<number, CapturedApi[]>();
+const CAPTURE_TAB_MAX = 500;
+
+function appendCapturedApi(tabId: number, captured: CapturedApi): void {
+  const captures = capturedApisByTab.get(tabId) ?? [];
+  captures.push(captured);
+  if (captures.length > CAPTURE_TAB_MAX) {
+    captures.splice(0, captures.length - CAPTURE_TAB_MAX);
+  }
+  capturedApisByTab.set(tabId, captures);
+}
 
 // AI agent가 page_command/canvas_command로 탭을 운전 중인 윈도우.
 // 이 시간 동안 캡처된 API는 origin='ai'로 태깅되어 사용자 capture session에서 제외된다.
@@ -53,7 +63,8 @@ interface CaptureSession {
   captures: CapturedApi[];
 }
 let activeCaptureSession: CaptureSession | null = null;
-const CAPTURE_SESSION_MAX = 500; // FIFO 상한 — 5분 무활동 자동종료는 Phase 2에서 추가
+const CAPTURE_SESSION_MAX = 500;
+const CAPTURE_RESULT_TTL_MS = 5 * 60 * 1000;
 
 // 캡처 종료 후 sidepanel이 mount되기 전 broadcast가 발사되는 race를 막기 위한 캐시.
 // sidepanel이 GET_CAPTURE_RESULT로 한 번 가져가면 null로 소비.
@@ -62,6 +73,15 @@ let cachedCaptureResult: {
   tabId: number;
   durationMs: number;
 } | null = null;
+let cachedCaptureResultTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearCachedCaptureResult(): void {
+  cachedCaptureResult = null;
+  if (cachedCaptureResultTimer) {
+    clearTimeout(cachedCaptureResultTimer);
+    cachedCaptureResultTimer = null;
+  }
+}
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -122,11 +142,13 @@ function completeCaptureSession(session: CaptureSession, options: { openPanel: b
     });
   }
 
+  clearCachedCaptureResult();
   cachedCaptureResult = {
     apis: session.captures,
     tabId: session.tabId,
     durationMs,
   };
+  cachedCaptureResultTimer = setTimeout(clearCachedCaptureResult, CAPTURE_RESULT_TTL_MS);
 
   broadcastCaptureStatus({ active: false, tabId: session.tabId });
   broadcastToSidePanel({
@@ -398,10 +420,7 @@ chrome.runtime.onMessage.addListener(
         captured.tabId = tabId;
         captured.origin = isAiDriving(tabId) ? 'ai' : 'user';
 
-        if (!capturedApisByTab.has(tabId)) {
-          capturedApisByTab.set(tabId, []);
-        }
-        capturedApisByTab.get(tabId)!.push(captured);
+        appendCapturedApi(tabId, captured);
 
         // 사용자 capture session에 누적: 같은 탭 + origin='user'만
         if (
@@ -441,6 +460,7 @@ chrome.runtime.onMessage.addListener(
               return;
             }
             await handlePickerHookInject(tabId);
+            clearCachedCaptureResult();
             activeCaptureSession = { tabId, startedAt: Date.now(), captures: [] };
             broadcastCaptureStatus({ active: true, tabId, count: 0 });
             sendResponse({ ok: true, tabId });
@@ -464,7 +484,12 @@ chrome.runtime.onMessage.addListener(
         const session = activeCaptureSession;
         activeCaptureSession = null;
         completeCaptureSession(session, { openPanel: true });
-        sendResponse({ ok: true, count: session.captures.length });
+        capturedApisByTab.delete(session.tabId);
+        sendResponse({
+          ok: true,
+          count: session.captures.length,
+          bufferedCount: capturedApisByTab.get(session.tabId)?.length ?? 0,
+        });
         break;
       }
 
@@ -472,7 +497,7 @@ chrome.runtime.onMessage.addListener(
         // sidepanel이 STOP 이후 새로 열린 경우 broadcast를 놓쳤으니 직접 가져감.
         // 한 번 읽으면 소비 (다음 mount 시 재노출 방지).
         const result = cachedCaptureResult;
-        cachedCaptureResult = null;
+        clearCachedCaptureResult();
         sendResponse({ ok: true, result });
         break;
       }
@@ -1780,10 +1805,7 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
   if (!hookedTabs.has(tabId)) return;
 
   // 네비게이션 기록을 캡처 데이터에 추가
-  if (!capturedApisByTab.has(tabId)) {
-    capturedApisByTab.set(tabId, []);
-  }
-  capturedApisByTab.get(tabId)!.push({
+  appendCapturedApi(tabId, {
     id: crypto.randomUUID(),
     tabId,
     timestamp: Date.now(),

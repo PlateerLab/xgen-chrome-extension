@@ -319,7 +319,11 @@ function testObservedEdges(analyzeTrace) {
   assert.equal(analysis.edges.length, 1);
   assert.match(analysis.edges[0].fromToolId, /\/search$/);
   assert.match(analysis.edges[0].toToolId, /\/detail$/);
-  assert.equal(analysis.edges[0].sampleSharedValue, '987654');
+  assert.deepEqual(analysis.edges[0].valueEvidence, {
+    sourceFieldPath: 'responseBody.rows[].goodsNo',
+    targetFieldPath: 'query.goodsNo',
+    valueType: 'string',
+  });
 }
 
 function testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayload) {
@@ -366,7 +370,12 @@ function testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayloa
     searchTool?.aiMetadata?.produces_semantics?.some((entry) => entry.field === 'goodsNo' && entry.semantic === 'goods_no'),
     `search metadata should include goodsNo produce semantics: ${JSON.stringify(searchTool?.aiMetadata)}`,
   );
-  assert.equal(payload.edges[0].sampleSharedValue, '987654');
+  assert.equal(payload.edges[0].sampleSharedValue, undefined);
+  assert.deepEqual(payload.edges[0].valueEvidence, {
+    sourceFieldPath: 'responseBody.rows[].goodsNo',
+    targetFieldPath: 'query.goodsNo',
+    valueType: 'string',
+  });
 
   assert.throws(
     () => buildTraceRegistrationPayload({ ...analysis, primaryHost: null }, selected),
@@ -385,6 +394,8 @@ function testTraceRegistrationPayloadHardening(analyzeTrace, buildTraceRegistrat
       requestBody: {
         keyword: 'jeju',
         password: 'plain-password',
+        email: 'customer@example.com',
+        phone: '010-1234-5678',
         nested: {
           authorization: 'Bearer token-body-secret',
           keep: 'visible',
@@ -397,6 +408,7 @@ function testTraceRegistrationPayloadHardening(analyzeTrace, buildTraceRegistrat
           refreshToken: `refresh-token-${idx}`,
         })),
         description: largeDescription,
+        accountReference: '1234567890123456',
       },
     }),
   ]);
@@ -419,8 +431,30 @@ function testTraceRegistrationPayloadHardening(analyzeTrace, buildTraceRegistrat
   assert.ok(!serialized.includes('plain-password'), 'password should be redacted from payload');
   assert.ok(!serialized.includes('token-body-secret'), 'authorization value should be redacted from payload');
   assert.ok(!serialized.includes('refresh-token-0'), 'response token should be redacted from payload');
+  assert.ok(!serialized.includes('customer@example.com'), 'email should be redacted from payload');
+  assert.ok(!serialized.includes('010-1234-5678'), 'phone should be redacted from payload');
+  assert.ok(!serialized.includes('1234567890123456'), 'long numeric identifier should be redacted');
   assert.ok(serialized.includes('[REDACTED]'), 'redaction marker should remain for operator visibility');
   assert.ok(serialized.length < 25_000, `payload should be bounded, got ${serialized.length}`);
+
+  const structureOnlyPayload = buildTraceRegistrationPayload(
+    analysis,
+    analysis.tools.map((candidate) => candidate.id),
+    'bo_x2bee_com',
+    { includeSamples: false },
+  );
+  const structureOnlyTool = structureOnlyPayload.tools[0];
+  const structureOnlySerialized = JSON.stringify(structureOnlyPayload);
+
+  assert.deepEqual(structureOnlyTool.querySample, {});
+  assert.equal(structureOnlyTool.requestBodySample, undefined);
+  assert.equal(structureOnlyTool.responseSample, undefined);
+  assert.ok(
+    structureOnlyTool.queryParamKeys.includes('keyword'),
+    'structure-only registration should preserve query field names',
+  );
+  assert.ok(!structureOnlySerialized.includes('customer@example.com'));
+  assert.ok(!structureOnlySerialized.includes('010-1234-5678'));
 }
 
 function testTraceRegistrationPayloadCaps(buildTraceRegistrationPayload) {
@@ -443,7 +477,11 @@ function testTraceRegistrationPayloadCaps(buildTraceRegistrationPayload) {
     toToolId: tools[(idx + 1) % 50].id,
     source: 'observed',
     confidence: 1,
-    sampleSharedValue: `shared-${idx}`,
+    valueEvidence: {
+      sourceFieldPath: `responseBody.items[${idx}].id`,
+      targetFieldPath: 'query.id',
+      valueType: 'string',
+    },
   }));
 
   const payload = buildTraceRegistrationPayload(

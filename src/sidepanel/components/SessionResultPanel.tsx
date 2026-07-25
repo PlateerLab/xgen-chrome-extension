@@ -83,6 +83,7 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
     () => new Set(analysis.tools.filter((t) => !t.isLowPriority).map((t) => t.id)),
   );
   const [showDropped, setShowDropped] = useState(false);
+  const [includeSamples, setIncludeSamples] = useState(true);
   const [registerState, setRegisterState] = useState<RegisterState>({ status: 'idle' });
 
   const prepareRegistrationContext = async (): Promise<RegistrationContext> => {
@@ -116,7 +117,12 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
     return {
       serverUrl: config.serverUrl,
       authToken: config.authToken ?? '',
-      payload: buildTraceRegistrationPayload(analysis, selected, authProfileId),
+      payload: buildTraceRegistrationPayload(
+        analysis,
+        selected,
+        authProfileId,
+        { includeSamples },
+      ),
     };
   };
 
@@ -310,6 +316,26 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
         <div className="mt-2 px-2 py-1.5 bg-red-50 border border-red-200 rounded text-[11px] text-red-700">
           등록 실패: {registerState.message}
         </div>
+      )}
+
+      {analysis.tools.length > 0 && (
+        <label className="mt-2 flex items-start gap-2 rounded border border-gray-200 bg-white px-2 py-1.5">
+          <input
+            type="checkbox"
+            checked={includeSamples}
+            disabled={isLoading || registerState.status === 'success'}
+            onChange={(event) => setIncludeSamples(event.target.checked)}
+            className="mt-0.5 flex-none"
+          />
+          <span className="min-w-0">
+            <span className="block text-[10px] font-medium text-gray-700">
+              정제된 요청/응답 샘플 포함
+            </span>
+            <span className="block text-[9px] leading-4 text-gray-500">
+              끄면 필드 구조만 등록하며 query 값과 body 샘플은 전송하지 않습니다.
+            </span>
+          </span>
+        </label>
       )}
 
       {/* 액션 */}

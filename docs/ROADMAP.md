@@ -53,16 +53,17 @@ npm run verify:pathfinder
 
 ## P2. Security and Privacy
 
-상태: `planned`
+상태: `in progress`
 
 목표: 브라우저에서 관찰한 원본 payload가 Collection, 로그 및 test artifact에 민감값으로 남지 않게 한다.
 
-- [ ] `sampleSharedValue` 원문을 hash/field evidence로 교체
-- [ ] 이메일, 전화번호, 계정번호 및 identifier 값 패턴 scrub
-- [ ] request/response sample 저장 비활성화 옵션
-- [ ] 캡처 종료·취소·탭 종료 시 원본 payload 메모리 폐기 검증
-- [ ] `<all_urls>`와 `cookies`를 optional permission으로 축소 가능한지 prototype
-- [ ] npm audit 5건의 runtime 영향과 안전한 upgrade 경로 분석
+- [x] `sampleSharedValue` 원문을 field path/type evidence로 교체
+- [x] 이메일, 전화번호, 계정번호 및 identifier 값 패턴 scrub
+- [x] request/response sample 저장 비활성화 옵션
+- [x] 캡처 종료·탭 종료 시 원본 payload 메모리 폐기와 TTL 검증
+- [x] `<all_urls>`와 `cookies` optional permission 전환 가능성 및 마이그레이션 설계
+- [ ] optional permission prototype와 거부/revoke runtime test
+- [x] npm audit 5건의 runtime 영향 분석, 호환 업데이트 및 0건 확인
 
 완료 gate:
 

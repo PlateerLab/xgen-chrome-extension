@@ -175,7 +175,11 @@ export interface FromTraceEdge {
   fromToolId: string;
   toToolId: string;
   confidence: number;
-  sampleSharedValue?: string;
+  valueEvidence?: {
+    sourceFieldPath: string;
+    targetFieldPath: string;
+    valueType: 'string' | 'number';
+  };
 }
 
 export interface FromTraceRequest {

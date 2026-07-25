@@ -14,11 +14,37 @@ const MAX_SAMPLE_DEPTH = 8;
 const REDACTED_VALUE = '[REDACTED]';
 const TRUNCATED_VALUE = '[TRUNCATED]';
 const SENSITIVE_KEY_RE = /(^|[_-])(authorization|cookie|password|passwd|pwd|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|session|jwt|credential|client[_-]?secret)($|[_-])/i;
+const SENSITIVE_VALUE_PATTERNS = [
+  {
+    pattern: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
+    marker: '[REDACTED:EMAIL]',
+  },
+  {
+    pattern: /\b01[016789][-\s]?\d{3,4}[-\s]?\d{4}\b/g,
+    marker: '[REDACTED:PHONE]',
+  },
+  {
+    pattern: /\b\d{6}[-\s]\d{7}\b/g,
+    marker: '[REDACTED:IDENTIFIER]',
+  },
+  {
+    pattern: /\b\d{12,19}\b/g,
+    marker: '[REDACTED:LONG_NUMBER]',
+  },
+  {
+    pattern: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
+    marker: '[REDACTED:JWT]',
+  },
+] as const;
 
 interface SampleStats {
   redacted: boolean;
   truncated: boolean;
   droppedQueryKeys: Set<string>;
+}
+
+export interface TraceRegistrationOptions {
+  includeSamples?: boolean;
 }
 
 function isSensitiveKey(key: string): boolean {
@@ -29,6 +55,18 @@ function truncateString(value: string, maxChars: number, stats: SampleStats): st
   if (value.length <= maxChars) return value;
   stats.truncated = true;
   return `${value.slice(0, maxChars)}${TRUNCATED_VALUE}`;
+}
+
+function sanitizeStringValue(value: string, maxChars: number, stats: SampleStats): string {
+  let sanitized = value;
+  for (const { pattern, marker } of SENSITIVE_VALUE_PATTERNS) {
+    const replaced = sanitized.replace(pattern, marker);
+    if (replaced !== sanitized) {
+      stats.redacted = true;
+      sanitized = replaced;
+    }
+  }
+  return truncateString(sanitized, maxChars, stats);
 }
 
 function jsonLength(value: unknown): number {
@@ -47,7 +85,7 @@ function valueKind(value: unknown): string {
 
 function sanitizeSampleValue(value: unknown, stats: SampleStats, depth = 0): unknown {
   if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
-  if (typeof value === 'string') return truncateString(value, MAX_SAMPLE_STRING_CHARS, stats);
+  if (typeof value === 'string') return sanitizeStringValue(value, MAX_SAMPLE_STRING_CHARS, stats);
   if (depth >= MAX_SAMPLE_DEPTH) {
     stats.truncated = true;
     return TRUNCATED_VALUE;
@@ -120,7 +158,7 @@ function sanitizeQuery(
       safeKeySet.add(safeKey);
     }
     if (safeKeySet.has(safeKey)) {
-      safeSample[safeKey] = truncateString(String(value), MAX_QUERY_VALUE_CHARS, stats);
+      safeSample[safeKey] = sanitizeStringValue(String(value), MAX_QUERY_VALUE_CHARS, stats);
     }
   }
 
@@ -131,6 +169,7 @@ export function buildTraceRegistrationPayload(
   analysis: TraceAnalysis,
   selectedToolIds: Iterable<string>,
   authProfileId?: string,
+  options: TraceRegistrationOptions = {},
 ): FromTraceRequest {
   if (!analysis.primaryHost) {
     throw new Error('host를 식별할 수 없어 등록할 수 없습니다.');
@@ -141,6 +180,7 @@ export function buildTraceRegistrationPayload(
     .filter((tool) => selected.has(tool.id))
     .slice(0, MAX_TRACE_TOOLS);
   const includedToolIds = new Set(selectedTools.map((tool) => tool.id));
+  const includeSamples = options.includeSamples !== false;
   const selectedEdges = analysis.edges.filter(
     (edge) => includedToolIds.has(edge.fromToolId) && includedToolIds.has(edge.toToolId),
   ).slice(0, MAX_TRACE_EDGES);
@@ -153,11 +193,15 @@ export function buildTraceRegistrationPayload(
         truncated: false,
         droppedQueryKeys: new Set<string>(),
       };
-      const query = sanitizeQuery(tool.queryParamKeys, tool.querySample, stats);
-      const requestBodySample = tool.requestBodySample == null
+      const query = sanitizeQuery(
+        tool.queryParamKeys,
+        includeSamples ? tool.querySample : {},
+        stats,
+      );
+      const requestBodySample = !includeSamples || tool.requestBodySample == null
         ? undefined
         : sanitizeSample(tool.requestBodySample, stats);
-      const responseSample = tool.responseSample == null
+      const responseSample = !includeSamples || tool.responseSample == null
         ? undefined
         : sanitizeSample(tool.responseSample, stats);
       const aiMetadata = tool.aiMetadata == null
@@ -190,9 +234,7 @@ export function buildTraceRegistrationPayload(
       fromToolId: edge.fromToolId,
       toToolId: edge.toToolId,
       confidence: edge.confidence,
-      sampleSharedValue: edge.sampleSharedValue
-        ? edge.sampleSharedValue.slice(0, MAX_QUERY_VALUE_CHARS)
-        : undefined,
+      valueEvidence: edge.valueEvidence,
     })),
     ...(authProfileId ? { authProfileId } : {}),
   };
