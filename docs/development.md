@@ -42,9 +42,11 @@ Vite watch가 새 `dist/`를 만들면 `chrome://extensions`에서 Pathfinder를
 |---|---|
 | `npm run dev` | TypeScript/Vite watch build |
 | `npm run build` | typecheck 및 production build |
+| `npm run verify:pathfinder:contract` | extension client와 runtime mock의 XGEN endpoint 계약 |
 | `npm run verify:pathfinder:trace` | trace 분석·정규화·등록 계약 검증 |
 | `npm run verify:pathfinder:runtime` | Chromium에 실제 확장을 로드한 runtime 검증 |
 | `npm run verify:pathfinder` | build, trace, runtime 전체 검증 |
+| `npm run verify:xgen-dev` | 인증된 dev XGEN read-only T2 smoke |
 
 ## 개발 구조
 
@@ -68,4 +70,3 @@ docs/
 - XGEN endpoint 또는 payload 변경: mock 계약과 실제 dev integration 모두 확인
 - 권한 또는 host permission 변경: [보안 문서](security.md) 갱신
 - 고객사 인증 흐름 변경: 내부망 acceptance test 갱신
-

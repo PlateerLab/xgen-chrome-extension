@@ -7,6 +7,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 
 const steps = [
   ['npm', ['run', 'build']],
+  ['node', ['scripts/verify-xgen-contract.mjs']],
   ['node', ['scripts/verify-pathfinder.mjs']],
   ['node', ['scripts/verify-runtime.mjs']],
 ];

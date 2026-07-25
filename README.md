@@ -7,6 +7,7 @@
 | 문서 | 내용 |
 |---|---|
 | [문서 인덱스](docs/README.md) | 전체 문서 안내 및 지원 범위 |
+| [로드맵](docs/ROADMAP.md) | 현재 작업 순서, 품질 gate 및 완료 기준 |
 | [개발 환경](docs/development.md) | 로컬 설치, 빌드 및 Chrome 로딩 |
 | [아키텍처](docs/architecture.md) | 확장 컨텍스트와 API 캡처 흐름 |
 | [메시지 프로토콜](docs/message-protocol.md) | Side Panel, Service Worker, Content Script 계약 |

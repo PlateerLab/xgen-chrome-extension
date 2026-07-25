@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -11,6 +11,9 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const distDir = path.join(repoRoot, 'dist');
+const artifactDir = path.resolve(
+  process.env.PATHFINDER_ARTIFACT_DIR || path.join(repoRoot, 'artifacts/pathfinder-runtime'),
+);
 const SIDEPANEL_CHAT_COMMAND_REQUEST_ID = 'verify-sidepanel-chat-command';
 
 function loadPlaywright() {
@@ -41,6 +44,77 @@ function findTabIdByUrl(page, urlPatternSource) {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function scrubRuntimeLog(value) {
+  return String(value)
+    .replace(/\bBearer\s+[^\s"',}]+/gi, 'Bearer [REDACTED]')
+    .replace(
+      /([?&](?:access[_-]?token|refresh[_-]?token|token|api[_-]?key|session|secret)=)[^&\s]+/gi,
+      '$1[REDACTED]',
+    )
+    .replace(
+      /((?:authorization|cookie|access[_-]?token|refresh[_-]?token|token|api[_-]?key|secret)["']?\s*[:=]\s*["']?)[^"',}\s]+/gi,
+      '$1[REDACTED]',
+    );
+}
+
+function attachRuntimeLogging(context, logs) {
+  context.on('console', (message) => {
+    logs.push(`[console:${message.type()}] ${scrubRuntimeLog(message.text())}`);
+  });
+  context.on('weberror', (webError) => {
+    logs.push(`[weberror] ${scrubRuntimeLog(webError.error()?.stack || webError.error())}`);
+  });
+  const attachPage = (page) => {
+    page.on('pageerror', (error) => {
+      logs.push(`[pageerror:${scrubRuntimeLog(page.url())}] ${scrubRuntimeLog(error.stack || error)}`);
+    });
+  };
+  context.pages().forEach(attachPage);
+  context.on('page', attachPage);
+}
+
+async function writeFailureArtifacts(context, error, logs) {
+  await mkdir(artifactDir, { recursive: true });
+
+  if (context) {
+    const pages = context.pages();
+    for (let index = 0; index < pages.length; index += 1) {
+      await pages[index]
+        .screenshot({
+          path: path.join(artifactDir, `page-${index}.png`),
+          fullPage: true,
+        })
+        .catch((screenshotError) => {
+          logs.push(`[artifact] screenshot ${index} failed: ${scrubRuntimeLog(screenshotError)}`);
+        });
+    }
+    await context.tracing
+      .stop({ path: path.join(artifactDir, 'trace.zip') })
+      .catch((traceError) => {
+        logs.push(`[artifact] trace failed: ${scrubRuntimeLog(traceError)}`);
+      });
+  }
+
+  const errorText = error instanceof Error ? error.stack || error.message : String(error);
+  const summary = {
+    status: 'failed',
+    createdAt: new Date().toISOString(),
+    error: scrubRuntimeLog(errorText),
+    artifactFiles: ['runtime.log', 'runtime-summary.json', 'trace.zip', 'page-*.png'],
+  };
+  await writeFile(
+    path.join(artifactDir, 'runtime.log'),
+    `${[...logs, `[failure] ${scrubRuntimeLog(errorText)}`].join('\n')}\n`,
+    'utf8',
+  );
+  await writeFile(
+    path.join(artifactDir, 'runtime-summary.json'),
+    `${JSON.stringify(summary, null, 2)}\n`,
+    'utf8',
+  );
+  console.error(`PathFinder failure artifacts: ${artifactDir}`);
 }
 
 function sendActiveTabMessage(page, message) {
@@ -874,6 +948,8 @@ async function verifySessionResultMergeConflict(
 }
 
 async function main() {
+  await rm(artifactDir, { recursive: true, force: true });
+
   if (!existsSync(path.join(distDir, 'manifest.json'))) {
     throw new Error('dist/manifest.json not found. Run `npm run build` before runtime verification.');
   }
@@ -895,6 +971,8 @@ async function main() {
     registrationMode,
   } = await startFixtureServer();
   let context;
+  let runtimeError;
+  const runtimeLogs = [];
 
   try {
     const launchOptions = {
@@ -909,6 +987,12 @@ async function main() {
     };
 
     context = await chromium.launchPersistentContext(userDataDir, launchOptions);
+    attachRuntimeLogging(context, runtimeLogs);
+    await context.tracing.start({
+      screenshots: true,
+      snapshots: true,
+      sources: true,
+    });
 
     let extensionId = await findExtensionIdFromCdp(context);
     let serviceWorker = context.serviceWorkers()[0];
@@ -1024,7 +1108,17 @@ async function main() {
       `fetch/xhr captured ${firstApis.length} API request(s)`,
       `navigation reinjection captured ${secondApis.length} API request(s)`,
     ].join('; '));
+  } catch (error) {
+    runtimeError = error;
+    throw error;
   } finally {
+    if (runtimeError) {
+      await writeFailureArtifacts(context, runtimeError, runtimeLogs).catch((artifactError) => {
+        console.error('Failed to write PathFinder failure artifacts:', artifactError);
+      });
+    } else {
+      await context?.tracing.stop().catch(() => {});
+    }
     await context?.close().catch(() => {});
     await new Promise((resolve) => server.close(resolve));
     await rm(userDataDir, { recursive: true, force: true });

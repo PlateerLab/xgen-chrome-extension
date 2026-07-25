@@ -23,6 +23,8 @@
 
 backend route 또는 schema가 변경되면 `src/shared/api.ts`, runtime mock 및 이 표를 같은 PR에서 갱신한다.
 
+핵심 endpoint의 machine-readable 기준은 `contracts/xgen-api-contract.json`이다.
+
 ## 인증 해석
 
 Pathfinder는 XGEN origin별 token을 분리한다. 서버 URL은 XGEN origin으로 검증하고, 비-XGEN 페이지에서 발견한 token을 XGEN token으로 저장하지 않는다.
@@ -72,4 +74,3 @@ Pathfinder가 특정 고객사의 tool name이나 path를 기반으로 ranking �
 - auth profile 필드명이 backend와 일치
 - graph build 후 tool 수와 source 수가 등록 결과와 일치
 - search/plan/execute 실패가 구조화된 reason으로 표시
-

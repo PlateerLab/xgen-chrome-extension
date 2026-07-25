@@ -58,6 +58,10 @@ xvfb-run -a npm run verify:pathfinder:runtime
 - capture 결과의 Collection 등록
 - Collection 충돌 및 merge UI
 
+### XGEN endpoint contract
+
+`contracts/xgen-api-contract.json`은 extension client가 사용하는 핵심 XGEN endpoint를 고정한다. T0 검증은 client source와 runtime mock이 같은 endpoint를 포함하는지 확인한다. endpoint를 변경할 때는 contract manifest, client, runtime fixture 및 XGEN 연동 문서를 같은 PR에서 갱신한다.
+
 ## 검증 계층
 
 | 계층 | 환경 | 실행 시점 | 보장 범위 |
@@ -68,6 +72,42 @@ xvfb-run -a npm run verify:pathfinder:runtime
 | T3 고객사 acceptance | 고객사 내부망 | 릴리스 후보 | 실제 인증, 업무 페이지, 네트워크 및 CA |
 
 T1 통과는 T2나 T3 통과를 의미하지 않는다. mock endpoint는 backend의 현재 OpenAPI 또는 contract fixture와 정기적으로 비교해야 한다.
+
+## GitHub Actions
+
+`.github/workflows/pathfinder-verification.yml`은 모든 PR에서 다음 job을 실행한다.
+
+- `T0 Build and Contract`: build, XGEN endpoint contract, trace 분석 및 등록 payload
+- `T1 Chromium Runtime`: bundled Chromium에 extension을 로드한 runtime
+
+T1 실패 시 `pathfinder-runtime-*` artifact에 다음을 저장한다.
+
+- `trace.zip`
+- `page-*.png`
+- `runtime.log`
+- `runtime-summary.json`
+
+runtime log는 token/cookie 계열 값을 scrub한다. screenshot은 synthetic fixture에서만 자동 수집한다. 실제 고객사 페이지의 screenshot을 공용 CI artifact로 업로드하지 않는다.
+
+## Dev XGEN T2 Smoke
+
+T2는 PR workflow와 분리된 opt-in read-only 검증이다.
+
+```bash
+export PATHFINDER_XGEN_URL='https://dev-xgen.x2bee.com'
+export PATHFINDER_XGEN_TOKEN='...'
+export PATHFINDER_XGEN_USER_ID='...'
+npm run verify:xgen-dev
+```
+
+검증 범위:
+
+- `/api/health`
+- `/api/ai-chat/providers`
+- `/api/session-station/v1/auth-profiles`
+- 노출된 경우 `/openapi.json` 또는 `/api/openapi.json`과 endpoint contract 비교
+
+token과 user ID 원문은 출력하지 않는다. 인증 없는 공개 endpoint만 확인할 때는 `PATHFINDER_XGEN_ALLOW_ANONYMOUS=1`을 명시한다. OpenAPI 문서 노출을 필수 gate로 만들 때는 `PATHFINDER_XGEN_REQUIRE_OPENAPI=1`을 사용한다.
 
 ## XGEN dev integration 권장 시나리오
 
@@ -106,4 +146,3 @@ CI나 수동 검증 실패 시 다음 정보를 남긴다.
 - npm 10.9.4
 - Playwright 1.62.0
 - Playwright Chromium 151.0.7922.34
-

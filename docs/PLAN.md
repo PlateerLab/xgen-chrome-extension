@@ -1,4 +1,8 @@
-# XGEN Chrome Extension — Implementation Plan
+# XGEN Chrome Extension — Historical Implementation Plan
+
+> 이 문서는 초기 Chrome Extension 설계와 구현 단계를 보존하는 역사 문서다.
+> 현재 작업 우선순위, 품질 gate 및 완료 상태는 [`ROADMAP.md`](ROADMAP.md)를 기준으로 한다.
+> 이 문서의 미완료 항목을 현재 TODO로 해석하지 않는다.
 
 ## Overview
 

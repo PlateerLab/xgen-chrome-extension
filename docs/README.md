@@ -6,6 +6,7 @@
 
 | 목적 | 문서 |
 |---|---|
+| 현재 우선순위와 완료 기준 확인 | [로드맵](ROADMAP.md) |
 | 로컬에서 빌드하고 Chrome에 설치 | [개발 환경](development.md) |
 | 구조와 데이터 흐름 이해 | [아키텍처](architecture.md) |
 | 확장 내부 메시지 계약 확인 | [메시지 프로토콜](message-protocol.md) |
@@ -14,6 +15,8 @@
 | 고객사 내부망에서 설치 및 검증 | [고객사 환경](customer-environment.md) |
 | 권한, 인증정보, 캡처 데이터 보호 | [보안](security.md) |
 | 설치 및 테스트 실패 해결 | [문제 해결](troubleshooting.md) |
+
+초기 구현 과정은 [Historical Implementation Plan](PLAN.md)에 보존되어 있으며 현재 TODO로 사용하지 않는다.
 
 ## 문서 원칙
 

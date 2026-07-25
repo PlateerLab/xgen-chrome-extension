@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "endpoints": [
+    {
+      "id": "chat_stream",
+      "method": "POST",
+      "path": "/api/ai-chat/stream",
+      "client": {
+        "file": "src/shared/constants.ts",
+        "needle": "API_CHAT_ENDPOINT = '/api/ai-chat/stream'"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/ai-chat/stream'"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "command_result",
+      "method": "POST",
+      "path": "/api/ai-chat/command-result/{requestId}",
+      "client": {
+        "file": "src/background/service-worker.ts",
+        "needle": "/api/ai-chat/command-result/${requestId}"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "startsWith('/api/ai-chat/command-result/')"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "providers",
+      "method": "GET",
+      "path": "/api/ai-chat/providers",
+      "client": {
+        "file": "src/shared/constants.ts",
+        "needle": "API_PROVIDERS_ENDPOINT = '/api/ai-chat/providers'"
+      },
+      "devProbe": true
+    },
+    {
+      "id": "auth_profiles",
+      "method": "GET",
+      "path": "/api/session-station/v1/auth-profiles",
+      "client": {
+        "file": "src/background/service-worker.ts",
+        "needle": "/api/session-station/v1/auth-profiles"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/session-station/v1/auth-profiles'"
+      },
+      "devProbe": true
+    },
+    {
+      "id": "collection_from_trace",
+      "method": "POST",
+      "path": "/api/tools/api-collections/from-trace",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "/api/tools/api-collections/from-trace"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/tools/api-collections/from-trace'"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_from_trace_merge",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/from-trace/merge",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "/api/tools/api-collections/${encodedCollectionId}/from-trace/merge"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "/from-trace\\/merge$/"
+      },
+      "devProbe": false
+    }
+  ]
+}
