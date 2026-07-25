@@ -14,6 +14,7 @@
 | REST/GraphQL/multipart 캡처 범위와 한계 | [캡처 Coverage](capture-coverage.md) |
 | 브라우저 밖에서 수집한 HAR 파일 가져오기 | [HAR 가져오기](har-import.md) |
 | OpenAPI/Swagger URL 또는 파일 가져오기 | [OpenAPI 가져오기](openapi-import.md) |
+| Postman Collection v2.0/v2.1 가져오기 | [Postman 가져오기](postman-import.md) |
 | 문서나 캡처 없이 단일 API contract 작성 | [수동 Tool Contract](manual-tool-contract.md) |
 | XGEN API와 API Collection 연동 | [XGEN 연동](xgen-integration.md) |
 | 고객사 내부망에서 설치 및 검증 | [고객사 환경](customer-environment.md) |

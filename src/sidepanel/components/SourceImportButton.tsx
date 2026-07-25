@@ -9,6 +9,7 @@ interface Props {
   disabled?: boolean;
   onOpenApiRequested: () => void;
   onManualRequested: () => void;
+  onPostmanRequested: () => void;
   onImported: (result: SessionResult) => void;
   onError: (message: string) => void;
 }
@@ -18,6 +19,7 @@ export function SourceImportButton({
   disabled = false,
   onOpenApiRequested,
   onManualRequested,
+  onPostmanRequested,
   onImported,
   onError,
 }: Props) {
@@ -119,6 +121,19 @@ export function SourceImportButton({
             수동 Tool Contract
             <span className="mt-0.5 block text-[9px] text-gray-400">
               endpoint와 request/response schema 작성
+            </span>
+          </button>
+          <button
+            type="button"
+            className="block w-full rounded px-2 py-1.5 text-left text-[11px] text-gray-700 hover:bg-gray-50"
+            onClick={() => {
+              setMenuOpen(false);
+              onPostmanRequested();
+            }}
+          >
+            Postman Collection
+            <span className="mt-0.5 block text-[9px] text-gray-400">
+              v2.0/v2.1 JSON을 schema-only로 변환
             </span>
           </button>
         </div>

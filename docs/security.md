@@ -64,6 +64,13 @@ egress 정책은 XGEN 운영 경계에서 제한해야 한다. Pathfinder는 URL
 허용하지 않으며 파일 import는 5MB와 YAML alias 수를 제한한다. 자세한 흐름은
 [OpenAPI 가져오기](openapi-import.md)를 따른다.
 
+Postman Collection import는 variable, header, query, body, saved response와
+script에 민감값이 있을 수 있다고 가정한다. importer는 원본 값을 저장하지 않고
+request/response shape, parameter 이름과 auth 요구사항만 OpenAPI 3.1로
+정규화한다. pre-request/test script는 실행하거나 전송하지 않는다. collection,
+folder 및 request 표시 이름도 값 패턴 scrub을 거친다. 자세한 지원 범위는
+[Postman 가져오기](postman-import.md)를 따른다.
+
 ## 남는 위험
 
 캡처 세션 중에는 브라우저 요청과 응답 원문이 extension 메모리에 일시적으로 존재한다. 등록 payload를 정제하는 것만으로 캡처 단계의 노출 위험이 없어지는 것은 아니다. 세션 결과는 sidepanel이 소비할 때까지 또는 최대 5분 동안 메모리에 남을 수 있으므로 민감 화면에서는 캡처를 시작하지 않아야 한다.

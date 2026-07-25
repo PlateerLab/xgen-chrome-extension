@@ -44,6 +44,7 @@ xvfb-run -a npm run verify:pathfinder:runtime
 - token, cookie, authorization 및 API key 제거
 - Collection 생성 요청 계약
 - 수동 Tool Contract의 URL/schema/security 정규화와 민감 literal 차단
+- Postman v2.0/v2.1 중첩 request, auth, body/response variation과 민감값 비노출
 
 ### Browser runtime
 
@@ -59,6 +60,7 @@ xvfb-run -a npm run verify:pathfinder:runtime
 - `page_command` 결과 callback
 - Side Panel 채팅 SSE relay
 - 수동 Tool Contract 작성, XGEN preview 및 Collection source 등록
+- Postman 파일 분석, Base URL 보완, XGEN preview 및 Collection source 등록
 - capture 결과의 Collection 등록
 - Collection 충돌 및 merge UI
 - host/cookie 최초 미승인 readiness와 persisted 승인 상태

@@ -122,7 +122,7 @@ npm run verify:pathfinder
 - [x] privacy-safe HAR 1.2 import
 - [x] OpenAPI/Swagger URL 및 JSON/YAML file import
 - [ ] GraphQL introspection
-- [ ] Postman Collection
+- [x] privacy-safe Postman Collection v2.0/v2.1 import
 - [ ] MCP tool catalog
 - [x] 수동 contract 작성, 수정, preview 및 Collection 등록 UI
 

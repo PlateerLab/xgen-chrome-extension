@@ -1399,6 +1399,153 @@ async function verifyManualToolContractUi(
   await panel.waitFor({ state: 'detached' });
 }
 
+async function openPostmanImport(extensionPage, targetPage) {
+  await clickSidepanelButton(
+    extensionPage,
+    targetPage,
+    'Open source import menu',
+    /소스 가져오기/,
+  );
+  await extensionPage.getByRole('button', { name: /Postman Collection/ }).click();
+  await extensionPage.getByTestId('postman-import-panel').waitFor();
+}
+
+async function verifyPostmanImportUi(
+  extensionPage,
+  targetPage,
+  fixtureUrl,
+  collectionCreateRequests,
+  sourcePreviewRequests,
+  sourceAddRequests,
+) {
+  await openPostmanImport(extensionPage, targetPage);
+  const editor = extensionPage.getByTestId('postman-import-panel');
+  const collection = {
+    info: {
+      name: 'Postman Runtime',
+      schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',
+    },
+    auth: {
+      type: 'bearer',
+      bearer: [{ key: 'token', value: 'postman-runtime-token-must-not-persist' }],
+    },
+    event: [{
+      listen: 'prerequest',
+      script: { exec: ['console.log("runtime-secret")'] },
+    }],
+    item: [{
+      name: 'Customers',
+      item: [{
+        name: 'Get customer',
+        request: {
+          method: 'GET',
+          url: {
+            raw: '{{baseUrl}}/customers/:customerId?expand=orders&token=query-secret',
+            query: [
+              { key: 'expand', value: 'orders' },
+              { key: 'token', value: 'query-secret' },
+            ],
+            variable: [{ key: 'customerId', value: '123456789012' }],
+          },
+          header: [
+            { key: 'Authorization', value: 'Bearer header-secret' },
+            { key: 'X-Tenant', value: 'tenant-secret' },
+          ],
+        },
+        response: [{
+          code: 200,
+          status: 'OK',
+          header: [{ key: 'Content-Type', value: 'application/json' }],
+          body: JSON.stringify({
+            customerId: '123456789012',
+            email: 'runtime@example.com',
+            accessToken: 'response-secret',
+          }),
+        }],
+      }],
+    }],
+  };
+
+  await editor.getByTestId('postman-file-input').setInputFiles({
+    name: 'postman-runtime.json',
+    mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify(collection)),
+  });
+  await editor.getByText(/Base URL을 입력/).waitFor();
+  await editor.getByTestId('postman-base-url-input').fill(
+    `${new URL(fixtureUrl).origin}/api`,
+  );
+  await editor.getByRole('button', { name: '다시 분석' }).click();
+
+  const panel = extensionPage.getByTestId('openapi-import-panel');
+  await panel.waitFor();
+  await panel.getByText(/Postman v2\.1/).waitFor();
+  await panel.getByText(/scripts_not_executed/).waitFor();
+  const previewStart = sourcePreviewRequests.length;
+  await panel.getByRole('button', { name: '미리보기' }).click();
+  await panel.getByText(/준비도 95/).waitFor();
+
+  const preview = await waitForItem(
+    sourcePreviewRequests,
+    (entry) => (
+      entry.body?.spec?.info?.['x-pathfinder-import']?.kind === 'postman_collection'
+    ),
+    'Postman Collection preview request',
+  );
+  assert.equal(sourcePreviewRequests.length, previewStart + 1);
+  const operation = preview.body.spec.paths['/api/customers/{customerId}'].get;
+  assert.equal(operation.parameters.some((parameter) => (
+    parameter.name === 'expand' && parameter.in === 'query'
+  )), true);
+  assert.equal(operation.parameters.some((parameter) => parameter.name === 'token'), false);
+  assert.equal(operation.parameters.some((parameter) => (
+    parameter.name === 'X-Tenant' && parameter.in === 'header'
+  )), true);
+  assert.equal(
+    operation.responses['200'].content['application/json'].schema
+      .properties.email.type,
+    'string',
+  );
+  assert.deepEqual(operation.security, [{ postman_bearer: [] }]);
+  assert.equal(operation['x-pathfinder-source'].sample_values_persisted, false);
+  assert.equal(operation['x-pathfinder-source'].scripts_executed, false);
+
+  const serializedPreview = JSON.stringify(preview.body);
+  for (const secret of [
+    'postman-runtime-token-must-not-persist',
+    'runtime-secret',
+    'header-secret',
+    'tenant-secret',
+    'query-secret',
+    'runtime@example.com',
+    'response-secret',
+  ]) {
+    assert.ok(!serializedPreview.includes(secret), `Postman preview leaked ${secret}`);
+  }
+
+  await panel.locator('input[placeholder="collection-id"]').fill('postman-runtime');
+  await panel.getByRole('button', { name: 'Collection에 등록' }).click();
+  await panel.getByText(/Collection 등록 완료: postman-runtime/).waitFor();
+  await waitForItem(
+    collectionCreateRequests,
+    (entry) => entry.body?.collection_id === 'postman-runtime',
+    'Postman Collection create request',
+  );
+  const source = await waitForItem(
+    sourceAddRequests,
+    (entry) => entry.collectionId === 'postman-runtime',
+    'Postman source add request',
+  );
+  assert.equal(
+    source.body.spec.paths['/api/customers/{customerId}'].get
+      .operationId,
+    operation.operationId,
+  );
+  assert.ok(!JSON.stringify(source.body).includes('response-secret'));
+  await panel.getByRole('button', { name: '닫기' }).click();
+  await panel.waitFor({ state: 'detached' });
+}
+
 async function verifyOpenApiImportUi(
   extensionPage,
   targetPage,
@@ -1950,6 +2097,14 @@ async function main() {
       sourcePreviewRequests,
       sourceAddRequests,
     );
+    await verifyPostmanImportUi(
+      extensionPage,
+      targetPage,
+      url,
+      collectionCreateRequests,
+      sourcePreviewRequests,
+      sourceAddRequests,
+    );
     await wait(2_200);
 
     const firstApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
@@ -2085,6 +2240,7 @@ async function main() {
       'sidepanel chat relay verified',
       'OpenAPI URL/YAML import and rollback verified',
       'manual tool contract preview and registration verified',
+      'privacy-safe Postman Collection import verified',
       'capture result registration verified',
       'capture result merge conflict verified',
       'privacy-safe HAR import verified',

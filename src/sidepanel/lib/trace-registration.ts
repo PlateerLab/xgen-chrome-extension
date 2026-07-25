@@ -20,6 +20,10 @@ const SENSITIVE_VALUE_PATTERNS = [
     marker: '[REDACTED:EMAIL]',
   },
   {
+    pattern: /\+\d{1,3}(?:[-\s]?\d){7,14}\b/g,
+    marker: '[REDACTED:PHONE]',
+  },
+  {
     pattern: /\b01[016789][-\s]?\d{3,4}[-\s]?\d{4}\b/g,
     marker: '[REDACTED:PHONE]',
   },

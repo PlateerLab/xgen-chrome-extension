@@ -210,6 +210,49 @@ async function loadManualToolContractBuilder() {
   };
 }
 
+async function loadPostmanImporter() {
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-postman-'));
+  const registrationSourcePath = path.join(
+    repoRoot,
+    'src/sidepanel/lib/trace-registration.ts',
+  );
+  const importerSourcePath = path.join(
+    repoRoot,
+    'src/sidepanel/lib/postman-import.ts',
+  );
+  const compilerOptions = {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2022,
+    verbatimModuleSyntax: true,
+  };
+  const registration = ts.transpileModule(
+    await readFile(registrationSourcePath, 'utf8'),
+    { compilerOptions, fileName: registrationSourcePath },
+  );
+  const importer = ts.transpileModule(
+    await readFile(importerSourcePath, 'utf8'),
+    { compilerOptions, fileName: importerSourcePath },
+  );
+  await writeFile(
+    path.join(tmpDir, 'trace-registration.mjs'),
+    registration.outputText,
+    'utf8',
+  );
+  await writeFile(
+    path.join(tmpDir, 'postman-import.mjs'),
+    importer.outputText.replace(
+      /from ['"]\.\/trace-registration['"]/g,
+      "from './trace-registration.mjs'",
+    ),
+    'utf8',
+  );
+  const mod = await import(pathToFileURL(path.join(tmpDir, 'postman-import.mjs')).href);
+  return {
+    importPostmanCollection: mod.importPostmanCollection,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
 async function loadApiClient() {
   const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-api-'));
 
@@ -1176,6 +1219,337 @@ function testManualToolContractBuilder(buildManualToolContractSource) {
   );
 }
 
+function testPrivacySafePostmanImport(importPostmanCollection) {
+  const source = importPostmanCollection({
+    info: {
+      name: 'Commerce API customer@example.com',
+      schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',
+      description: 'Contact customer@example.com for access.',
+    },
+    variable: [
+      { key: 'baseUrl', value: 'https://api.customer.test/v1' },
+      { key: 'accessToken', value: 'postman-token-must-not-persist' },
+    ],
+    auth: {
+      type: 'apikey',
+      apikey: [
+        { key: 'key', value: 'X-API-Key' },
+        { key: 'value', value: 'postman-api-key-must-not-persist' },
+        { key: 'in', value: 'header' },
+      ],
+    },
+    event: [{
+      listen: 'prerequest',
+      script: { exec: ['console.log("must not persist")'] },
+    }],
+    item: [{
+      name: 'Orders +82-10-1234-5678',
+      event: [{ listen: 'test', script: { exec: ['pm.test("secret")'] } }],
+      item: [
+        {
+          name: 'Get order customer@example.com',
+          request: {
+            method: 'GET',
+            url: {
+              raw: '{{baseUrl}}/orders/:orderId?includeItems=true&accessToken=secret',
+              variable: [{ key: 'orderId', value: '123456789012' }],
+              query: [
+                { key: 'includeItems', value: 'true' },
+                { key: 'accessToken', value: 'query-secret' },
+              ],
+            },
+            header: [
+              { key: 'Accept', value: 'application/json' },
+              { key: 'Authorization', value: 'Bearer header-secret' },
+              { key: 'X-Tenant', value: 'tenant-secret' },
+            ],
+          },
+          response: [{
+            code: 200,
+            status: 'OK',
+            header: [{ key: 'Content-Type', value: 'application/json' }],
+            body: JSON.stringify({
+              orderId: '123456789012',
+              email: 'customer@example.com',
+              items: [{ sku: 'SKU-SECRET', quantity: 1 }],
+            }),
+          }],
+        },
+        {
+          name: 'Get order alternate',
+          request: {
+            method: 'GET',
+            url: '{{baseUrl}}/orders/:orderId',
+          },
+          response: [{
+            code: 200,
+            status: 'OK',
+            body: JSON.stringify({
+              orderId: '987654321098',
+              state: 'PAID',
+            }),
+          }],
+        },
+        {
+          name: 'Create order',
+          request: {
+            method: 'POST',
+            url: '{{baseUrl}}/orders',
+            header: [{ key: 'Content-Type', value: 'application/json' }],
+            body: {
+              mode: 'raw',
+              raw: JSON.stringify({
+                sku: 'SKU-MUST-NOT-PERSIST',
+                quantity: 2,
+                password: 'body-secret',
+              }),
+            },
+          },
+          response: [{
+            code: 201,
+            status: 'Created',
+            body: JSON.stringify({ orderId: '123456789012', accepted: true }),
+          }],
+        },
+        {
+          name: 'Upload attachment',
+          request: {
+            method: 'POST',
+            url: '{{baseUrl}}/orders/:orderId/files',
+            body: {
+              mode: 'formdata',
+              formdata: [
+                { key: 'title', value: 'private title', type: 'text' },
+                {
+                  key: 'attachment',
+                  src: '/home/customer/private.pdf',
+                  type: 'file',
+                  contentType: 'application/pdf',
+                },
+              ],
+            },
+          },
+          response: [],
+        },
+        {
+          name: 'Custom method',
+          request: {
+            method: 'PROPFIND',
+            url: '{{baseUrl}}/orders',
+          },
+        },
+      ],
+    }],
+  });
+
+  assert.equal(source.summary.collectionVersion, '2.1');
+  assert.equal(source.summary.totalRequests, 5);
+  assert.equal(source.summary.importedOperations, 3);
+  assert.equal(source.summary.mergedVariants, 1);
+  assert.equal(source.summary.skippedRequests, 1);
+  assert.equal(source.summary.scriptCount, 2);
+  assert.ok(source.summary.issues.some((issue) => (
+    issue.code === 'sensitive_query_parameter_omitted'
+  )));
+  assert.ok(source.summary.issues.some((issue) => (
+    issue.code === 'unsupported_http_method'
+  )));
+  assert.ok(source.summary.issues.some((issue) => issue.code === 'scripts_not_executed'));
+
+  const getOrder = source.spec.paths['/v1/orders/{orderId}'].get;
+  assert.equal(getOrder.parameters.some((parameter) => (
+    parameter.name === 'includeItems' && parameter.in === 'query'
+  )), true);
+  assert.equal(getOrder.parameters.some((parameter) => (
+    parameter.name === 'accessToken'
+  )), false);
+  assert.equal(getOrder.parameters.some((parameter) => (
+    parameter.name === 'Authorization'
+  )), false);
+  assert.equal(getOrder.parameters.some((parameter) => (
+    parameter.name === 'X-Tenant' && parameter.in === 'header'
+  )), true);
+  assert.equal(getOrder['x-postman-variants'].length, 2);
+  assert.equal(
+    getOrder.responses['200'].content['application/json'].schema.oneOf.length,
+    2,
+  );
+  assert.deepEqual(
+    source.spec.components.securitySchemes['postman_apikey-header-X-API-Key'],
+    { type: 'apiKey', in: 'header', name: 'X-API-Key' },
+  );
+
+  const createOrder = source.spec.paths['/v1/orders'].post;
+  assert.equal(
+    createOrder.requestBody.content['application/json'].schema.properties.quantity.type,
+    'integer',
+  );
+  assert.equal(
+    createOrder.requestBody.content['application/json'].schema.properties.password.type,
+    'string',
+  );
+  const upload = source.spec.paths['/v1/orders/{orderId}/files'].post;
+  assert.equal(
+    upload.requestBody.content['multipart/form-data'].schema
+      .properties.attachment.format,
+    'binary',
+  );
+  assert.equal(upload.responses.default.description.includes('not saved'), true);
+
+  const serialized = JSON.stringify(source);
+  for (const secret of [
+    'postman-token-must-not-persist',
+    'postman-api-key-must-not-persist',
+    'header-secret',
+    'tenant-secret',
+    'query-secret',
+    'SKU-MUST-NOT-PERSIST',
+    'body-secret',
+    'customer@example.com',
+    '+82-10-1234-5678',
+    '/home/customer/private.pdf',
+    'console.log',
+    'pm.test',
+  ]) {
+    assert.ok(!serialized.includes(secret), `Postman artifact leaked ${secret}`);
+  }
+
+  assert.throws(
+    () => importPostmanCollection({
+      info: {
+        name: 'Needs Environment',
+        schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',
+      },
+      item: [{
+        name: 'List items',
+        request: { method: 'GET', url: '{{missingBaseUrl}}/items' },
+      }],
+    }),
+    /Base URL을 입력/,
+  );
+  const resolved = importPostmanCollection({
+    info: {
+      name: 'Needs Environment',
+      schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',
+    },
+    item: [{
+      name: 'List items',
+      request: { method: 'GET', url: '{{missingBaseUrl}}/items' },
+    }],
+  }, {
+    baseUrlOverride: 'https://override.example/api',
+  });
+  assert.ok(resolved.spec.paths['/api/items'].get);
+
+  const v20 = importPostmanCollection({
+    info: {
+      name: 'Postman v2 compatibility',
+      schema: 'https://schema.getpostman.com/json/collection/v2.0.0/collection.json',
+    },
+    variable: [{ key: 'baseUrl', value: 'https://v20.example.test' }],
+    auth: {
+      type: 'bearer',
+      bearer: [{ key: 'token', value: 'v20-bearer-must-not-persist' }],
+    },
+    item: [
+      {
+        name: 'GraphQL customer',
+        request: {
+          method: 'POST',
+          url: '{{baseUrl}}/graphql',
+          body: {
+            mode: 'graphql',
+            graphql: {
+              query: 'query GetCustomer($id: ID!) { customer(id: $id) { id name } }',
+              variables: JSON.stringify({ id: 'customer-value-must-not-persist' }),
+            },
+          },
+        },
+      },
+      {
+        name: 'Create session',
+        request: {
+          method: 'POST',
+          url: '{{baseUrl}}/sessions',
+          body: {
+            mode: 'urlencoded',
+            urlencoded: [
+              { key: 'username', value: 'session-user-must-not-persist' },
+              { key: 'rememberMe', value: 'true' },
+            ],
+          },
+        },
+      },
+      {
+        name: 'Upload raw file',
+        request: {
+          method: 'PUT',
+          url: '{{baseUrl}}/files/:fileId',
+          body: {
+            mode: 'file',
+            file: { src: '/private/file-must-not-persist.bin' },
+          },
+        },
+      },
+    ],
+  });
+  assert.equal(v20.summary.collectionVersion, '2.0');
+  assert.equal(v20.summary.importedOperations, 3);
+  const graphql = v20.spec.paths['/graphql'].post;
+  assert.equal(graphql.operationId, 'postGetCustomer');
+  assert.equal(
+    graphql.requestBody.content['application/json'].schema
+      .properties.variables.properties.id.type,
+    'string',
+  );
+  assert.deepEqual(graphql.security, [{ postman_bearer: [] }]);
+  assert.equal(
+    v20.spec.paths['/sessions'].post.requestBody
+      .content['application/x-www-form-urlencoded'].schema
+      .properties.rememberMe.type,
+    'string',
+  );
+  assert.equal(
+    v20.spec.paths['/files/{fileId}'].put.requestBody
+      .content['application/octet-stream'].schema.format,
+    'binary',
+  );
+  const serializedV20 = JSON.stringify(v20);
+  for (const secret of [
+    'v20-bearer-must-not-persist',
+    'customer-value-must-not-persist',
+    'session-user-must-not-persist',
+    '/private/file-must-not-persist.bin',
+    'query GetCustomer',
+  ]) {
+    assert.ok(!serializedV20.includes(secret), `Postman v2 artifact leaked ${secret}`);
+  }
+
+  const bounded = importPostmanCollection({
+    info: {
+      name: 'Bounded variants',
+      schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json',
+    },
+    item: [{
+      name: 'Variant response',
+      request: { method: 'GET', url: 'https://bounded.example.test/items' },
+      response: Array.from({ length: 25 }, (_, index) => ({
+        code: 200,
+        status: 'OK',
+        body: JSON.stringify({ [`field${index}`]: index }),
+      })),
+    }],
+  });
+  assert.equal(
+    bounded.spec.paths['/items'].get.responses['200']
+      .content['application/json'].schema.oneOf.length,
+    20,
+  );
+  assert.ok(bounded.summary.issues.some((issue) => (
+    issue.code === 'schema_variation_limit_reached'
+  )));
+}
+
 async function withMockFetch(handler, fn) {
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -1412,6 +1786,10 @@ async function main() {
     cleanup: cleanupManualToolContract,
   } = await loadManualToolContractBuilder();
   const {
+    importPostmanCollection,
+    cleanup: cleanupPostmanImporter,
+  } = await loadPostmanImporter();
+  const {
     createCollectionFromTrace,
     mergeCollectionFromTrace,
     listApiCollections,
@@ -1443,6 +1821,7 @@ async function main() {
     );
     testHarImportValidationAndCaps(importHarArchive);
     testManualToolContractBuilder(buildManualToolContractSource);
+    testPrivacySafePostmanImport(importPostmanCollection);
     await testCollectionFromTraceApi(createCollectionFromTrace, mergeCollectionFromTrace);
     await testOpenApiCollectionApi({
       listApiCollections,
@@ -1456,6 +1835,7 @@ async function main() {
     await cleanupRegistration();
     await cleanupHarImporter();
     await cleanupManualToolContract();
+    await cleanupPostmanImporter();
     await cleanupApi();
   }
 
