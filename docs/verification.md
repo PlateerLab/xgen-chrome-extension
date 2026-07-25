@@ -124,6 +124,8 @@ npm run verify:xgen-dev
 - `/api/health`
 - `/api/ai-chat/providers`
 - `/api/session-station/v1/auth-profiles`
+- `/api/tools/api-collections/capabilities`의 Pathfinder contract version,
+  필수 capability 및 Collection build endpoint 계약
 - 노출된 경우 `/openapi.json` 또는 `/api/openapi.json`과 endpoint contract 비교
 
 token과 user ID 원문은 출력하지 않는다. 인증 없는 공개 endpoint만 확인할 때는 `PATHFINDER_XGEN_ALLOW_ANONYMOUS=1`을 명시한다. OpenAPI 문서 노출을 필수 gate로 만들 때는 `PATHFINDER_XGEN_REQUIRE_OPENAPI=1`을 사용한다.
@@ -167,7 +169,9 @@ npm run verify:pathfinder:xgen-dev-fixture
 ```
 
 이 fixture 통과는 실제 dev 통과를 의미하지 않는다. verifier의 request 순서,
-capability 판정, search/plan assertion, cleanup과 secret 비노출만 보장한다.
+capability manifest 형식과 필수 기능 판정, search/plan assertion, cleanup과
+secret 비노출만 보장한다. 특히 `/capabilities`가 동적 Collection 상세 route로
+잘못 처리되는 경우도 contract name 검증에서 실패해야 한다.
 
 ## XGEN dev integration 권장 시나리오
 

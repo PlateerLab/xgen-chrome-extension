@@ -59,6 +59,43 @@ const server = createServer(async (req, res) => {
     json(res, 200, []);
     return;
   }
+  if (
+    req.method === 'GET'
+    && url.pathname === '/api/tools/api-collections/capabilities'
+  ) {
+    json(res, 200, {
+      contract: {
+        name: 'xgen-pathfinder-api-collection',
+        version: 1,
+        min_client_version: 1,
+        max_client_version: 1,
+      },
+      engine: {
+        graph_tool_call_version: 'fixture',
+      },
+      capabilities: {
+        trace_collection_import: true,
+        source_preview: true,
+        universal_source_ingest: true,
+        collection_build_status: true,
+        collection_quality_summaries: true,
+        collection_search: true,
+        collection_plan: true,
+        collection_execute: true,
+        quality_lab: true,
+        learning_evidence: true,
+        auth_profile_resolution: true,
+        mcp_source_ingest: true,
+      },
+      endpoints: {
+        collection_build_status: {
+          method: 'GET',
+          path: '/api/tools/api-collections/{collection_id}',
+        },
+      },
+    });
+    return;
+  }
   if (req.method === 'GET' && ['/openapi.json', '/api/openapi.json'].includes(url.pathname)) {
     json(res, 404, { detail: 'not exposed in fixture' });
     return;
@@ -232,6 +269,11 @@ try {
   const result = JSON.parse(stdout);
   assert.equal(result.status, 'passed');
   assert.equal(result.authenticated, true);
+  assert.deepEqual(result.capabilityManifest, {
+    contractVersion: 1,
+    graphToolCallVersion: 'fixture',
+    missingDesired: [],
+  });
   assert.equal(result.collectionAcceptance.previews.openapi.adapter, 'openapi');
   assert.equal(
     result.collectionAcceptance.previews.graphql.adapter,
@@ -250,8 +292,14 @@ try {
     requests.some((entry) => entry.path.endsWith('/synthesize-plan')),
     'plan route was not exercised',
   );
+  assert.ok(
+    requests.some(
+      (entry) => entry.path === '/api/tools/api-collections/capabilities',
+    ),
+    'capability manifest route was not exercised',
+  );
   console.log(
-    'XGEN dev verifier fixture passed: OpenAPI/GraphQL preview, Collection build, search, plan, cleanup.',
+    'XGEN dev verifier fixture passed: capability contract, OpenAPI/GraphQL preview, Collection build, search, plan, cleanup.',
   );
 } finally {
   await new Promise((resolve) => server.close(resolve));

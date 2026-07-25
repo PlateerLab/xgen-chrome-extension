@@ -19,6 +19,19 @@ const runCollectionFlow = process.env.PATHFINDER_XGEN_RUN_COLLECTION_FLOW === '1
 const runExecute = process.env.PATHFINDER_XGEN_RUN_EXECUTE === '1';
 const testGraphQL = process.env.PATHFINDER_XGEN_TEST_GRAPHQL === '1';
 const keepCollection = process.env.PATHFINDER_XGEN_KEEP_COLLECTION === '1';
+const requiredBackendCapabilities = [
+  'trace_collection_import',
+  'collection_build_status',
+];
+const desiredBackendCapabilities = [
+  ...requiredBackendCapabilities,
+  'collection_quality_summaries',
+  'collection_search',
+  'collection_plan',
+  'collection_execute',
+  'quality_lab',
+  'auth_profile_resolution',
+];
 
 function normalizeServerUrl(value) {
   const parsed = new URL(value);
@@ -62,6 +75,63 @@ async function probe(pathname, { required = true } = {}) {
     assert.ok(response.ok, `${pathname}: expected 2xx, got ${response.status}`);
   }
   return { response, result };
+}
+
+async function verifyCapabilityManifest(response) {
+  const manifest = await response.json();
+  assert.equal(
+    manifest?.contract?.name,
+    'xgen-pathfinder-api-collection',
+    'capability manifest contract name is invalid',
+  );
+  assert.equal(
+    manifest?.contract?.version,
+    1,
+    'capability manifest contract version is unsupported',
+  );
+  assert.ok(
+    Number.isInteger(manifest?.contract?.min_client_version),
+    'capability manifest min_client_version is missing',
+  );
+  assert.ok(
+    Number.isInteger(manifest?.contract?.max_client_version),
+    'capability manifest max_client_version is missing',
+  );
+  assert.ok(
+    manifest.contract.min_client_version <= 1
+      && manifest.contract.max_client_version >= 1,
+    'capability manifest does not support Pathfinder contract v1',
+  );
+
+  const missingRequired = requiredBackendCapabilities.filter(
+    (capability) => manifest?.capabilities?.[capability] !== true,
+  );
+  assert.deepEqual(
+    missingRequired,
+    [],
+    `capability manifest is missing required features: ${missingRequired.join(', ')}`,
+  );
+
+  const missingDesired = desiredBackendCapabilities.filter(
+    (capability) => manifest?.capabilities?.[capability] !== true,
+  );
+  const endpointContract = manifest?.endpoints?.collection_build_status;
+  assert.equal(
+    endpointContract?.method,
+    'GET',
+    'capability manifest collection_build_status method is invalid',
+  );
+  assert.equal(
+    endpointContract?.path,
+    '/api/tools/api-collections/{collection_id}',
+    'capability manifest collection_build_status path is invalid',
+  );
+
+  return {
+    contractVersion: manifest.contract.version,
+    graphToolCallVersion: manifest?.engine?.graph_tool_call_version ?? null,
+    missingDesired,
+  };
 }
 
 async function jsonRequest(pathname, {
@@ -385,9 +455,14 @@ if (!token && !allowAnonymous) {
 const results = [];
 results.push((await probe('/api/health')).result);
 
+let capabilityManifest = null;
 if (token) {
   for (const endpoint of contract.endpoints.filter((item) => item.devProbe)) {
-    results.push((await probe(endpoint.path)).result);
+    const { response, result } = await probe(endpoint.path);
+    results.push(result);
+    if (endpoint.id === 'collection_capabilities') {
+      capabilityManifest = await verifyCapabilityManifest(response);
+    }
   }
 }
 
@@ -433,6 +508,7 @@ console.log(JSON.stringify({
   authenticated: Boolean(token),
   userIdHeaderPresent: Boolean(userId),
   openapiVerified: Boolean(openapi),
+  capabilityManifest,
   probes: results,
   collectionAcceptance,
 }, null, 2));
