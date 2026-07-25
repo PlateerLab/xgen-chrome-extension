@@ -1471,7 +1471,7 @@ async function verifyPostmanImportUi(
     mimeType: 'application/json',
     buffer: Buffer.from(JSON.stringify(collection)),
   });
-  await editor.getByText(/Base URL을 입력/).waitFor();
+  await editor.getByText(/URL host 변수를 해석할 수 없습니다:/).waitFor();
   await editor.getByTestId('postman-base-url-input').fill(
     `${new URL(fixtureUrl).origin}/api`,
   );
