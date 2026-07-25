@@ -42,6 +42,9 @@ jobs:
       - name: Verify trace analysis and registration
         run: npm run verify:pathfinder:trace
 
+      - name: Verify XGEN dev acceptance script against fixture
+        run: npm run verify:pathfinder:xgen-dev-fixture
+
   runtime:
     name: T1 Chromium Runtime
     runs-on: ubuntu-24.04

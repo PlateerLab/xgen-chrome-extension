@@ -76,3 +76,18 @@ Pathfinder가 특정 고객사의 tool name이나 path를 기반으로 ranking �
 - auth profile 필드명이 backend와 일치
 - graph build 후 tool 수와 source 수가 등록 결과와 일치
 - search/plan/execute 실패가 구조화된 reason으로 표시
+
+자동 acceptance:
+
+```bash
+PATHFINDER_XGEN_RUN_COLLECTION_FLOW=1 \
+PATHFINDER_XGEN_TEST_GRAPHQL=1 \
+npm run verify:xgen-dev
+```
+
+이 검증은 임시 Collection을 만들고 source ingest 후 반환되는
+`graph_tool_call_version`, `collection_graph_version`, `readiness_summary`,
+`semantic_summary`, `edge_quality_summary`를 확인한다. 이어서 실제
+`test-search`와 `synthesize-plan`을 호출하고 정상 종료와 실패 모두에서 임시
+Collection을 삭제한다. LLM/HTTP 실행은 `PATHFINDER_XGEN_RUN_EXECUTE=1`에서만
+추가된다.

@@ -10,6 +10,7 @@
     "verify:pathfinder": "node scripts/verify-all.mjs",
     "verify:pathfinder:contract": "node scripts/verify-xgen-contract.mjs",
     "verify:pathfinder:trace": "node scripts/verify-pathfinder.mjs",
+    "verify:pathfinder:xgen-dev-fixture": "node scripts/verify-xgen-dev-fixture.mjs",
     "verify:pathfinder:runtime": "node scripts/verify-runtime.mjs",
     "verify:xgen-dev": "node scripts/verify-xgen-dev.mjs"
   },

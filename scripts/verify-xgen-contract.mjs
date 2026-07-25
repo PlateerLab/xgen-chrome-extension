@@ -10,7 +10,7 @@ const contract = JSON.parse(await readFile(contractPath, 'utf8'));
 const validMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 const identities = new Set();
 
-assert.equal(contract.version, 1, 'unsupported XGEN API contract version');
+assert.equal(contract.version, 2, 'unsupported XGEN API contract version');
 assert.ok(Array.isArray(contract.endpoints) && contract.endpoints.length > 0, 'endpoint contract is empty');
 
 async function assertNeedle(endpoint, role, reference) {

@@ -9,6 +9,7 @@ const steps = [
   ['npm', ['run', 'build']],
   ['node', ['scripts/verify-xgen-contract.mjs']],
   ['node', ['scripts/verify-pathfinder.mjs']],
+  ['node', ['scripts/verify-xgen-dev-fixture.mjs']],
   ['node', ['scripts/verify-runtime.mjs']],
 ];
 

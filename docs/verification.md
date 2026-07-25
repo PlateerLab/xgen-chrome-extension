@@ -87,7 +87,8 @@ T1 통과는 T2나 T3 통과를 의미하지 않는다. mock endpoint는 backend
 
 `.github/workflows/pathfinder-verification.yml`은 모든 PR에서 다음 job을 실행한다.
 
-- `T0 Build and Contract`: build, XGEN endpoint contract, trace 분석 및 등록 payload
+- `T0 Build and Contract`: build, XGEN endpoint contract, trace 분석, 등록 payload,
+  T2 verifier의 synthetic Collection acceptance
 - `T1 Chromium Runtime`: bundled Chromium에 extension을 로드한 runtime
 
 T1 실패 시 `pathfinder-runtime-*` artifact에 다음을 저장한다.
@@ -101,7 +102,7 @@ runtime log는 token/cookie 계열 값을 scrub한다. screenshot은 synthetic f
 
 ## Dev XGEN T2 Smoke
 
-T2는 PR workflow와 분리된 opt-in read-only 검증이다.
+T2의 기본 probe는 PR workflow와 분리된 비파괴 검증이다.
 
 ```bash
 export PATHFINDER_XGEN_URL='https://dev-xgen.x2bee.com'
@@ -118,6 +119,47 @@ npm run verify:xgen-dev
 - 노출된 경우 `/openapi.json` 또는 `/api/openapi.json`과 endpoint contract 비교
 
 token과 user ID 원문은 출력하지 않는다. 인증 없는 공개 endpoint만 확인할 때는 `PATHFINDER_XGEN_ALLOW_ANONYMOUS=1`을 명시한다. OpenAPI 문서 노출을 필수 gate로 만들 때는 `PATHFINDER_XGEN_REQUIRE_OPENAPI=1`을 사용한다.
+
+실제 API Collection adapter와 graph/search/plan을 확인하려면 임시 read-only
+Collection acceptance를 명시적으로 켠다.
+
+```bash
+export PATHFINDER_XGEN_RUN_COLLECTION_FLOW=1
+export PATHFINDER_XGEN_TEST_GRAPHQL=1
+npm run verify:xgen-dev
+```
+
+이 모드는 다음 순서로 실행한다.
+
+1. OpenAPI fixture preview
+2. 선택 시 GraphQL introspection fixture preview
+3. 임시 Collection 생성과 OpenAPI source 등록
+4. build 결과의 tool/source 수, graph-tool-call 및 graph version 확인
+5. readiness, semantic, edge quality summary 확인
+6. health 질의 search Top-K와 deterministic plan synthesis 확인
+7. `finally`에서 임시 Collection 삭제
+
+LLM provider와 실제 HTTP runner까지 확인할 때만 다음을 추가한다.
+
+```bash
+export PATHFINDER_XGEN_RUN_EXECUTE=1
+npm run verify:xgen-dev
+```
+
+execute fixture는 현재 XGEN의 `GET /api/health`만 호출하며 `intent.parsed`,
+`plan.synthesized`, `step.completed`, `response.generated` SSE event를 모두
+요구한다. XGEN 기본 LLM provider를 사용하므로 비용과 provider readiness를
+확인한 뒤 실행한다. 실패 조사 때문에 Collection을 보존해야 할 때만
+`PATHFINDER_XGEN_KEEP_COLLECTION=1`을 사용하고, 이후 수동 삭제한다.
+
+T2 verifier 자체는 실제 credential 없이 다음 명령으로 검증한다.
+
+```bash
+npm run verify:pathfinder:xgen-dev-fixture
+```
+
+이 fixture 통과는 실제 dev 통과를 의미하지 않는다. verifier의 request 순서,
+capability 판정, search/plan assertion, cleanup과 secret 비노출만 보장한다.
 
 ## XGEN dev integration 권장 시나리오
 

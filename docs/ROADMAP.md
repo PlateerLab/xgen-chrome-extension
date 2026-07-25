@@ -105,6 +105,7 @@ npm run verify:pathfinder
 - [ ] readiness, semantic summary 및 edge quality 표시
 - [ ] Quality Lab search/plan/read-only execute
 - [ ] backend capability와 extension contract 버전 진단
+- [x] 임시 Collection preview/build/search/plan/cleanup T2 acceptance 자동화
 
 완료 gate:
 

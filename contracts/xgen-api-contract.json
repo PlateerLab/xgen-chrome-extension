@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "endpoints": [
     {
       "id": "chat_stream",
@@ -148,6 +148,46 @@
       "runtimeMock": {
         "file": "scripts/verify-runtime.mjs",
         "needle": "collectionDeleteRequests.push"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_detail",
+      "method": "GET",
+      "path": "/api/tools/api-collections/{collectionId}",
+      "client": {
+        "file": "scripts/verify-xgen-dev.mjs",
+        "needle": "jsonRequest(`/api/tools/api-collections/${encodedId}`)"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_test_search",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/test-search",
+      "client": {
+        "file": "scripts/verify-xgen-dev.mjs",
+        "needle": "/test-search`"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_synthesize_plan",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/synthesize-plan",
+      "client": {
+        "file": "scripts/verify-xgen-dev.mjs",
+        "needle": "/synthesize-plan`"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_run",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/run",
+      "client": {
+        "file": "scripts/verify-xgen-dev.mjs",
+        "needle": "/run`"
       },
       "devProbe": false
     },
