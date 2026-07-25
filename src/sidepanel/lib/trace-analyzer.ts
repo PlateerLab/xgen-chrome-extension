@@ -54,6 +54,8 @@ export interface ToolCaptureMetadata {
   responseSchemaVariants: ObservedSchemaVariant[];
   responseEnvelopePaths: string[];
   fileFields: CapturedFileField[];
+  frameKinds: Array<'top_frame' | 'subframe'>;
+  frameOrigins: string[];
   coverageScore: number;
   confidence: 'high' | 'medium' | 'low';
   issues: ToolCaptureIssue[];
@@ -695,6 +697,16 @@ function buildToolCaptureMetadata(
       }
     }
   }
+  const frameKinds = uniqueStrings(
+    members
+      .map((member) => member.captureContext?.kind)
+      .filter((value): value is 'top_frame' | 'subframe' => Boolean(value)),
+  ) as Array<'top_frame' | 'subframe'>;
+  const frameOrigins = uniqueStrings(
+    members
+      .map((member) => member.captureContext?.frameOrigin)
+      .filter((value): value is string => Boolean(value)),
+  );
 
   const issues: ToolCaptureIssue[] = [];
   const limitationCodes = new Set(
@@ -790,6 +802,8 @@ function buildToolCaptureMetadata(
     responseSchemaVariants,
     responseEnvelopePaths,
     fileFields: [...fileFieldsByPath.values()],
+    frameKinds,
+    frameOrigins,
     coverageScore,
     confidence,
     issues,
@@ -844,6 +858,14 @@ function mergeCaptureMetadata(
       ...right.responseEnvelopePaths,
     ]),
     fileFields: [...fileFields.values()],
+    frameKinds: uniqueStrings([
+      ...left.frameKinds,
+      ...right.frameKinds,
+    ]) as Array<'top_frame' | 'subframe'>,
+    frameOrigins: uniqueStrings([
+      ...left.frameOrigins,
+      ...right.frameOrigins,
+    ]),
     coverageScore,
     confidence,
     issues: [...issues.values()],

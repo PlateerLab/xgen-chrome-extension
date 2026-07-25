@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ExtensionMessage } from '../../shared/types';
-import type { CapturedApi } from '../../shared/api-hook-types';
+import type {
+  CaptureCoverage,
+  CapturedApi,
+} from '../../shared/api-hook-types';
 import type { HarImportSummary } from '../lib/har-import';
 import {
-  requestHostPermission,
+  requestHostPermissions,
   type PermissionReadinessReason,
 } from '../../shared/permissions';
 
@@ -14,6 +17,7 @@ export interface SessionResult {
   source?: 'capture' | 'har';
   sourceName?: string;
   importSummary?: HarImportSummary;
+  captureCoverage?: CaptureCoverage;
 }
 
 export interface CaptureSessionState {
@@ -41,6 +45,26 @@ function permissionError(reason: PermissionReadinessReason): string {
     return 'API 캡처는 http/https 페이지에서만 사용할 수 있습니다.';
   }
   return reason;
+}
+
+async function captureFrameUrls(
+  tabId: number | null | undefined,
+  topFrameUrl: string | null | undefined,
+): Promise<string[]> {
+  const urls = topFrameUrl ? [topFrameUrl] : [];
+  if (typeof tabId !== 'number') return urls;
+  const frames = await new Promise<chrome.webNavigation.GetAllFrameResultDetails[]>(
+    (resolve) => {
+      chrome.webNavigation.getAllFrames({ tabId }, (items) => {
+        void chrome.runtime.lastError;
+        resolve(items ?? []);
+      });
+    },
+  );
+  return [
+    ...urls,
+    ...frames.map((frame) => frame.url),
+  ];
 }
 
 export function useCaptureSession(
@@ -83,6 +107,7 @@ export function useCaptureSession(
           apis: message.apis,
           tabId: message.tabId,
           durationMs: message.durationMs,
+          captureCoverage: message.captureCoverage,
         });
       }
     };
@@ -113,7 +138,8 @@ export function useCaptureSession(
     setError(null);
     setReason(null);
     setPending(true);
-    requestHostPermission(targetTabUrl || undefined)
+    captureFrameUrls(targetTabId, targetTabUrl)
+      .then((frameUrls) => requestHostPermissions(frameUrls))
       .then((readiness) => {
         if (!readiness.ready) {
           setActive(false);

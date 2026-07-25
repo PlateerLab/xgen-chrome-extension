@@ -51,6 +51,7 @@ function captured({
   requestHeaders = {},
   responseHeaders = {},
   contentType = 'application/json',
+  captureContext,
 }) {
   return {
     id,
@@ -76,6 +77,7 @@ function captured({
     contentType,
     duration: 12,
     origin: 'user',
+    ...(captureContext ? { captureContext } : {}),
   };
 }
 
@@ -372,6 +374,68 @@ async function loadAuthProfileResolution() {
     isPathfinderManagedProfile: mod.isPathfinderManagedProfile,
     cleanup: () => rm(tmpDir, { recursive: true, force: true }),
   };
+}
+
+async function loadPermissions() {
+  const sourcePath = path.join(repoRoot, 'src/shared/permissions.ts');
+  const source = await readFile(sourcePath, 'utf8');
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+      verbatimModuleSyntax: true,
+    },
+    fileName: sourcePath,
+  });
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-permissions-'));
+  const outputPath = path.join(tmpDir, 'permissions.mjs');
+  await writeFile(outputPath, compiled.outputText, 'utf8');
+  const mod = await import(pathToFileURL(outputPath).href);
+  return {
+    requestHostPermissions: mod.requestHostPermissions,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
+async function testFramePermissionPolicy(requestHostPermissions) {
+  const originalChrome = globalThis.chrome;
+  const grantedOrigins = new Set(['https://portal.customer.example/*']);
+  globalThis.chrome = {
+    permissions: {
+      contains: async ({ origins, permissions }) => (
+        permissions?.includes('cookies')
+          ? false
+          : (origins ?? []).every((origin) => grantedOrigins.has(origin))
+      ),
+      request: async ({ origins }) => {
+        if (origins?.includes('https://portal.customer.example/*')) {
+          grantedOrigins.add('https://portal.customer.example/*');
+          return true;
+        }
+        return false;
+      },
+    },
+  };
+  try {
+    const partial = await requestHostPermissions([
+      'https://portal.customer.example/workspace',
+      'https://embedded.vendor.example/frame',
+    ]);
+    assert.equal(partial.ready, true);
+    assert.deepEqual(
+      partial.missingOriginPatterns,
+      ['https://embedded.vendor.example/*'],
+    );
+
+    grantedOrigins.clear();
+    const deniedTop = await requestHostPermissions([
+      'https://denied.customer.example/workspace',
+    ]);
+    assert.equal(deniedTop.ready, false);
+    assert.equal(deniedTop.reason, 'host_permission_required');
+  } finally {
+    globalThis.chrome = originalChrome;
+  }
 }
 
 function testAuthProfileResolution({
@@ -812,6 +876,34 @@ function testPostBodySample(analyzeTrace) {
   assert.equal(analysis.tools[0].method, 'POST');
   assert.deepEqual(analysis.tools[0].requestBodySample, { goodsNo: '987654', quantity: 2 });
   assert.equal(analysis.tools[0].querySample.siteNo, '1000');
+}
+
+function testFrameCaptureEvidence(analyzeTrace, buildTraceRegistrationPayload) {
+  const analysis = analyzeTrace([
+    captured({
+      id: 'iframe-detail',
+      timestamp: 1,
+      url: 'https://bo.x2bee.com/api/frame/v1/detail?itemId=10001',
+      responseBody: { itemId: '10001', name: 'iframe item' },
+      captureContext: {
+        kind: 'subframe',
+        frameId: 7,
+        frameOrigin: 'https://bo.x2bee.com',
+      },
+    }),
+  ]);
+  const tool = analysis.tools[0];
+  assert.deepEqual(tool.captureMetadata.frameKinds, ['subframe']);
+  assert.deepEqual(tool.captureMetadata.frameOrigins, ['https://bo.x2bee.com']);
+  const payload = buildTraceRegistrationPayload(
+    analysis,
+    analysis.tools.map((candidate) => candidate.id),
+  );
+  assert.deepEqual(payload.tools[0].captureMetadata.frameKinds, ['subframe']);
+  assert.deepEqual(
+    payload.tools[0].captureMetadata.frameOrigins,
+    ['https://bo.x2bee.com'],
+  );
 }
 
 function testObservedEdges(analyzeTrace) {
@@ -2171,7 +2263,12 @@ async function main() {
     cleanup: cleanupAuthProfileResolution,
     ...authProfileResolution
   } = await loadAuthProfileResolution();
+  const {
+    requestHostPermissions,
+    cleanup: cleanupPermissions,
+  } = await loadPermissions();
   try {
+    await testFramePermissionPolicy(requestHostPermissions);
     testAuthProfileResolution(authProfileResolution);
     testTraceFiltering(analyzeTrace);
     testAnalyticsHeavyCaptureKeepsPrimaryApiHost(analyzeTrace);
@@ -2183,6 +2280,7 @@ async function main() {
     testMultipartAndSchemaVariation(analyzeTrace);
     testPollingIsCollapsed(analyzeTrace);
     testPostBodySample(analyzeTrace);
+    testFrameCaptureEvidence(analyzeTrace, buildTraceRegistrationPayload);
     testObservedEdges(analyzeTrace);
     testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayload);
     testTraceRegistrationPayloadHardening(analyzeTrace, buildTraceRegistrationPayload);
@@ -2221,6 +2319,7 @@ async function main() {
     await cleanupGraphQLImporter();
     await cleanupApi();
     await cleanupAuthProfileResolution();
+    await cleanupPermissions();
   }
 
   console.log(

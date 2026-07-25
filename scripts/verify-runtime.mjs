@@ -309,6 +309,7 @@ function startFixtureServer() {
     },
   ];
   const authProfileMutations = [];
+  const workerApiRequests = [];
   const registrationMode = { conflictNext: false };
   const sourceAddMode = { failNext: false };
   const collectionDetailMode = { failNext: false };
@@ -823,6 +824,52 @@ function startFixtureServer() {
       return;
     }
 
+    if (req.url === '/fixture-sw.js') {
+      res.writeHead(200, {
+        'content-type': 'application/javascript; charset=utf-8',
+        'service-worker-allowed': '/',
+      });
+      res.end(`
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener('message', (event) => {
+  if (event.data === 'fetch-worker-api') {
+    event.waitUntil(fetch('/api/worker/v1/background'));
+  }
+});
+`);
+      return;
+    }
+
+    if (req.url === '/api/worker/v1/background') {
+      workerApiRequests.push({ method: req.method, url: req.url });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ accepted: true }));
+      return;
+    }
+
+    if (req.url?.startsWith('/api/iframe/v1/detail')) {
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'access-control-allow-origin': '*',
+      });
+      res.end(JSON.stringify({
+        itemId: 'IFRAME-10001',
+        itemName: 'iframe fixture item',
+      }));
+      return;
+    }
+
+    if (req.url === '/iframe-fixture' || req.url === '/iframe-blocked') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html>
+<html>
+  <head><title>PathFinder iframe fixture</title></head>
+  <body><button id="iframe-action">iframe action</button></body>
+</html>`);
+      return;
+    }
+
     if (req.url?.startsWith('/fragment')) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end('<section>not an api response</section>');
@@ -871,6 +918,11 @@ function startFixtureServer() {
       </select>
       <button id="search-button" aria-label="Run search">Run search</button>
       <button id="details-button" aria-label="Open details">Open details</button>
+      <iframe
+        id="api-frame"
+        title="API frame fixture"
+        src="http://localhost:${server.address().port}/iframe-fixture"
+      ></iframe>
       <div id="status" role="status">Idle</div>
       <button id="hidden-action" style="display:none">Hidden action</button>
       <div id="bottom-marker">Bottom marker</div>
@@ -897,7 +949,7 @@ function startFixtureServer() {
 
   return new Promise((resolve, reject) => {
     server.on('error', reject);
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(0, '0.0.0.0', () => {
       const address = server.address();
       resolve({
         server,
@@ -914,6 +966,7 @@ function startFixtureServer() {
         mcpSourcePreviewRequests,
         mcpSourceAddRequests,
         authProfileMutations,
+        workerApiRequests,
         registrationMode,
         sourceAddMode,
         collectionDetailMode,
@@ -1244,7 +1297,10 @@ async function runCaptureSessionViaSidepanel(extensionPage, targetPage, action, 
   assert.equal(cached?.ok, true, `${label}: GET_CAPTURE_RESULT failed: ${JSON.stringify(cached)}`);
   const apis = cached?.result?.apis || [];
   assert.ok(apis.length >= 1, `${label}: expected at least one captured API, got ${apis.length}`);
-  return apis;
+  return {
+    apis,
+    captureCoverage: cached?.result?.captureCoverage,
+  };
 }
 
 function findApi(apis, method, pathPart) {
@@ -2446,6 +2502,7 @@ async function main() {
     sourceAddMode,
     collectionDetailMode,
     authProfileMutations,
+    workerApiRequests,
     mcpSessionRequests,
     mcpSourcePreviewRequests,
     mcpSourceAddRequests,
@@ -2484,6 +2541,7 @@ async function main() {
       permissions: ['cookies'],
       origins: [
         `${parsedFixtureUrl.protocol}//${parsedFixtureUrl.hostname}/*`,
+        'http://localhost/*',
         'https://dev-xgen.x2bee.com/*',
       ],
     });
@@ -2561,7 +2619,14 @@ async function main() {
     );
     await wait(2_200);
 
-    const firstApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
+    await targetPage.evaluate(async () => {
+      await navigator.serviceWorker.register('/fixture-sw.js');
+      await navigator.serviceWorker.ready;
+    });
+    await targetPage.reload();
+    await targetPage.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
+
+    const firstResult = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
       await targetPage.evaluate(async () => {
         const logins = await Promise.all([
           'runtime-login-request-secret',
@@ -2633,7 +2698,33 @@ async function main() {
         if (!upload.ok) throw new Error(`fixture upload failed: ${upload.status}`);
         await upload.json();
       });
+      const apiFrame = targetPage.frames().find((frame) =>
+        frame.url().startsWith('http://localhost:')
+        && frame.url().endsWith('/iframe-fixture'));
+      assert.ok(apiFrame, 'approved cross-origin API iframe should be available');
+      await apiFrame.evaluate(async (apiUrl) => {
+        const response = await fetch(apiUrl);
+        if (!response.ok) throw new Error(`fixture iframe fetch failed: ${response.status}`);
+        await response.json();
+      }, `${url}api/iframe/v1/detail?itemId=IFRAME-10001`);
+      await targetPage.evaluate(() => {
+        navigator.serviceWorker.controller?.postMessage('fetch-worker-api');
+      });
+      await targetPage.evaluate((blockedFrameUrl) => {
+        const frame = document.createElement('iframe');
+        frame.id = 'blocked-api-frame';
+        frame.title = 'Blocked API frame fixture';
+        frame.src = blockedFrameUrl;
+        document.body.append(frame);
+      }, `http://127.0.0.2:${new URL(url).port}/iframe-blocked`);
+      await targetPage.waitForTimeout(300);
+      await waitForItem(
+        workerApiRequests,
+        (entry) => entry.url === '/api/worker/v1/background',
+        'Service Worker fixture request',
+      );
     }, 'fetch+xhr capture', distractorPage);
+    const firstApis = firstResult.apis;
     const createdAuthProfile = await waitForItem(
       authProfileMutations,
       (entry) => entry.method === 'POST' && entry.serviceId === '127_0_0_1',
@@ -2693,9 +2784,41 @@ async function main() {
       'multipart file names must not be captured',
     );
     assert.ok(!firstApis.some((api) => api.url.includes('/fragment')), 'HTML fetch should be ignored');
+    const iframeApi = findApi(firstApis, 'GET', '/api/iframe/v1/detail');
+    assert.ok(
+      iframeApi,
+      `approved cross-origin iframe API not captured: ${JSON.stringify(captureSummary(firstApis))}`,
+    );
+    assert.equal(iframeApi.captureContext?.kind, 'subframe');
+    assert.ok(
+      !firstApis.some((api) => api.url.includes('/api/worker/v1/background')),
+      'Service Worker fetch must not be mislabeled as an observed page request',
+    );
+    assert.ok(firstResult.captureCoverage, 'capture coverage should be returned');
+    assert.ok(firstResult.captureCoverage.instrumentedFrameCount >= 2);
+    assert.ok(firstResult.captureCoverage.blockedFrameCount >= 1);
+    assert.ok(
+      firstResult.captureCoverage.blockedOrigins.some(
+        (origin) => origin.startsWith('http://127.0.0.2:'),
+      ),
+      `blocked iframe origin should be reported: ${JSON.stringify(firstResult.captureCoverage)}`,
+    );
+    assert.ok(firstResult.captureCoverage.observedSubframeRequestCount >= 1);
+    assert.equal(firstResult.captureCoverage.serviceWorkerControlled, true);
+    assert.ok(
+      firstResult.captureCoverage.issues.some(
+        (issue) => issue.code === 'service_worker_fetch_not_observable',
+      ),
+      'Service Worker limitation should be explicit',
+    );
+    await extensionPage.getByText(/iframe 요청 1건/).waitFor();
+    await extensionPage.getByText('Service Worker 제어 감지').waitFor();
+    await targetPage.evaluate(() => {
+      document.querySelector('#blocked-api-frame')?.remove();
+    });
 
     const authRefreshStart = authProfileMutations.length;
-    const mergeApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
+    const mergeResult = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
       await targetPage.evaluate(async () => {
         const login = await fetch('/api/login', {
           method: 'POST',
@@ -2713,6 +2836,7 @@ async function main() {
         await detail.json();
       });
     }, 'registration conflict merge capture', distractorPage);
+    const mergeApis = mergeResult.apis;
     const updatedAuthProfile = await waitForItem(
       authProfileMutations,
       (entry, index) => index >= authRefreshStart
@@ -2793,6 +2917,7 @@ async function main() {
       'privacy-safe Postman Collection import verified',
       'MCP Station source preview and registration verified',
       'auth profile explicit link, managed create, and refresh verified',
+      'approved iframe capture, blocked iframe coverage, and worker limitation verified',
       'capture result registration verified',
       'capture result merge conflict verified',
       'privacy-safe HAR import verified',

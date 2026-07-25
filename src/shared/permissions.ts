@@ -8,6 +8,8 @@ export interface PermissionReadiness {
   ready: boolean;
   reason: PermissionReadinessReason;
   originPattern?: string;
+  originPatterns?: string[];
+  missingOriginPatterns?: string[];
   hostPermission: boolean;
   cookiePermission: boolean;
 }
@@ -63,21 +65,71 @@ export async function inspectCookiePermission(
 export async function requestHostPermission(
   url: string | undefined,
 ): Promise<PermissionReadiness> {
-  const originPattern = originPatternForUrl(url);
-  if (!originPattern) return inspectHostPermission(url);
-  const granted = await chrome.permissions.request({ origins: [originPattern] });
-  if (!granted) {
+  return requestHostPermissions([url]);
+}
+
+export async function requestHostPermissions(
+  urls: Array<string | undefined>,
+): Promise<PermissionReadiness> {
+  const originPatterns = [...new Set(
+    urls
+      .map((url) => originPatternForUrl(url))
+      .filter((pattern): pattern is string => Boolean(pattern)),
+  )];
+  const originPattern = originPatterns[0];
+  if (!originPattern) return inspectHostPermission(urls[0]);
+  let topFrameGranted = await chrome.permissions.contains({
+    origins: [originPattern],
+  });
+  if (!topFrameGranted) {
+    topFrameGranted = await chrome.permissions.request({
+      origins: [originPattern],
+    });
+  }
+  if (!topFrameGranted) {
     return {
       ready: false,
       reason: 'host_permission_required',
       originPattern,
+      originPatterns,
+      missingOriginPatterns: [originPattern],
       hostPermission: false,
       cookiePermission: await chrome.permissions.contains({
         permissions: ['cookies'],
       }),
     };
   }
-  return inspectHostPermission(url);
+
+  const optionalFramePatterns = originPatterns.slice(1);
+  const missingOptionalPatterns: string[] = [];
+  for (const pattern of optionalFramePatterns) {
+    if (!await chrome.permissions.contains({ origins: [pattern] })) {
+      missingOptionalPatterns.push(pattern);
+    }
+  }
+  if (missingOptionalPatterns.length > 0) {
+    await chrome.permissions.request({
+      origins: missingOptionalPatterns,
+    }).catch(() => false);
+  }
+  const stillMissingOptionalPatterns: string[] = [];
+  for (const pattern of missingOptionalPatterns) {
+    if (!await chrome.permissions.contains({ origins: [pattern] })) {
+      stillMissingOptionalPatterns.push(pattern);
+    }
+  }
+
+  return {
+    ready: true,
+    reason: 'ready',
+    originPattern,
+    originPatterns,
+    missingOriginPatterns: stillMissingOptionalPatterns,
+    hostPermission: true,
+    cookiePermission: await chrome.permissions.contains({
+      permissions: ['cookies'],
+    }),
+  };
 }
 
 export async function requestCookiePermission(

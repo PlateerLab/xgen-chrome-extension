@@ -9,14 +9,17 @@ import type {
   PageContext,
   SSEEvent,
 } from '../shared/types';
-import type { CapturedApi } from '../shared/api-hook-types';
+import type {
+  CaptureCoverage,
+  CapturedApi,
+} from '../shared/api-hook-types';
 import { mainWorldHookFunction, mainWorldUnhookFunction } from '../content/api-hook/main-world-hook';
 import { apiHookRelayFunction } from '../content/api-hook/relay';
 import {
   inspectCookiePermission,
   inspectHostPermission,
   originPatternForUrl,
-  requestHostPermission,
+  requestHostPermissions,
 } from '../shared/permissions';
 import {
   canonicalAuthServiceId,
@@ -41,6 +44,18 @@ const hookedTabs = new Set<number>();
 const contentScriptTabs = new Set<number>();
 const contentScriptOriginPatterns = new Map<number, string>();
 const capturedApisByTab = new Map<number, CapturedApi[]>();
+interface FrameCaptureState {
+  discoveredFrameIds: Set<number>;
+  instrumentedFrameIds: Set<number>;
+  blockedFrameIds: Set<number>;
+  failedFrameIds: Set<number>;
+  instrumentedOrigins: Set<string>;
+  blockedOrigins: Set<string>;
+  observedRequestCount: number;
+  observedSubframeRequestCount: number;
+  serviceWorkerControlled: boolean;
+}
+const frameCaptureStateByTab = new Map<number, FrameCaptureState>();
 const authProfileUpsertsByDomain = new Map<
   string,
   Promise<AuthProfileResolution>
@@ -125,6 +140,7 @@ let cachedCaptureResult: {
   apis: CapturedApi[];
   tabId: number;
   durationMs: number;
+  captureCoverage: CaptureCoverage;
 } | null = null;
 let cachedCaptureResultTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -168,6 +184,136 @@ async function getTargetTab(tabId?: number): Promise<chrome.tabs.Tab | null> {
   return tabs[0] ?? null;
 }
 
+function newFrameCaptureState(): FrameCaptureState {
+  return {
+    discoveredFrameIds: new Set(),
+    instrumentedFrameIds: new Set(),
+    blockedFrameIds: new Set(),
+    failedFrameIds: new Set(),
+    instrumentedOrigins: new Set(),
+    blockedOrigins: new Set(),
+    observedRequestCount: 0,
+    observedSubframeRequestCount: 0,
+    serviceWorkerControlled: false,
+  };
+}
+
+function safeFrameOrigin(url?: string): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+      ? parsed.origin
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function captureCoverageForTab(tabId: number): CaptureCoverage {
+  const state = frameCaptureStateByTab.get(tabId) ?? newFrameCaptureState();
+  const issues: CaptureCoverage['issues'] = [];
+  if (state.blockedFrameIds.size > 0) {
+    issues.push({
+      code: 'cross_origin_frame_permission_required',
+      severity: 'warning',
+      count: state.blockedFrameIds.size,
+      origins: [...state.blockedOrigins].slice(0, 12),
+      message: '접근 권한이 없는 iframe의 API 요청은 캡처하지 못했습니다.',
+    });
+  }
+  if (state.failedFrameIds.size > 0) {
+    issues.push({
+      code: 'frame_hook_injection_failed',
+      severity: 'warning',
+      count: state.failedFrameIds.size,
+      message: '권한이 있지만 API hook을 주입하지 못한 iframe이 있습니다.',
+    });
+  }
+  if (state.serviceWorkerControlled) {
+    issues.push({
+      code: 'service_worker_fetch_not_observable',
+      severity: 'warning',
+      message: '이 페이지는 Service Worker의 제어를 받고 있습니다. Worker 내부 fetch는 HAR/CDP 입력으로 보완해야 합니다.',
+    });
+  }
+  issues.push({
+    code: 'worker_fetch_not_observable',
+    severity: 'info',
+    message: 'Web Worker와 Shared Worker 내부 fetch는 page hook의 관찰 범위 밖입니다.',
+  });
+  return {
+    discoveredFrameCount: state.discoveredFrameIds.size,
+    instrumentedFrameCount: state.instrumentedFrameIds.size,
+    blockedFrameCount: state.blockedFrameIds.size,
+    failedFrameCount: state.failedFrameIds.size,
+    observedRequestCount: state.observedRequestCount,
+    observedSubframeRequestCount: state.observedSubframeRequestCount,
+    instrumentedOrigins: [...state.instrumentedOrigins].slice(0, 12),
+    blockedOrigins: [...state.blockedOrigins].slice(0, 12),
+    serviceWorkerControlled: state.serviceWorkerControlled,
+    workerTransportVisibility: 'not_observable',
+    issues,
+  };
+}
+
+async function frameUrlsForTab(tabId: number, fallbackUrl?: string): Promise<string[]> {
+  const frames = await chrome.webNavigation.getAllFrames({ tabId }).catch(() => null);
+  const urls = frames?.map((frame) => frame.url) ?? [];
+  if (fallbackUrl) urls.unshift(fallbackUrl);
+  return [...new Set(urls.filter(isInjectableTabUrl))];
+}
+
+async function detectServiceWorkerControl(tabId: number): Promise<boolean> {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [0] },
+    func: () => Boolean(navigator.serviceWorker?.controller),
+    world: 'ISOLATED' as any,
+  }).catch(() => []);
+  return results[0]?.result === true;
+}
+
+async function injectApiHookIntoFrame(
+  tabId: number,
+  frameId: number,
+  frameUrl: string,
+  state: FrameCaptureState,
+): Promise<void> {
+  state.discoveredFrameIds.add(frameId);
+  const frameOrigin = safeFrameOrigin(frameUrl);
+  const readiness = await inspectHostPermission(frameUrl);
+  if (!readiness.ready) {
+    state.blockedFrameIds.add(frameId);
+    state.instrumentedFrameIds.delete(frameId);
+    state.failedFrameIds.delete(frameId);
+    if (frameOrigin) state.blockedOrigins.add(frameOrigin);
+    return;
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [frameId] },
+      func: apiHookRelayFunction,
+      world: 'ISOLATED' as any,
+    });
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [frameId] },
+      func: mainWorldHookFunction,
+      world: 'MAIN' as any,
+    });
+    state.instrumentedFrameIds.add(frameId);
+    state.blockedFrameIds.delete(frameId);
+    state.failedFrameIds.delete(frameId);
+    if (frameOrigin) {
+      state.instrumentedOrigins.add(frameOrigin);
+      state.blockedOrigins.delete(frameOrigin);
+    }
+  } catch {
+    state.failedFrameIds.add(frameId);
+    state.instrumentedFrameIds.delete(frameId);
+    state.blockedFrameIds.delete(frameId);
+  }
+}
+
 async function injectApiHookIntoTab(tabId: number): Promise<void> {
   const tab = await chrome.tabs.get(tabId);
   if (!isInjectableTabUrl(tab.url)) {
@@ -179,16 +325,17 @@ async function injectApiHookIntoTab(tabId: number): Promise<void> {
   }
 
   await injectContentScriptIntoTab(tabId);
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: apiHookRelayFunction,
-    world: 'ISOLATED' as any,
-  });
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: mainWorldHookFunction,
-    world: 'MAIN' as any,
-  });
+  const state = frameCaptureStateByTab.get(tabId) ?? newFrameCaptureState();
+  frameCaptureStateByTab.set(tabId, state);
+  const frames = await chrome.webNavigation.getAllFrames({ tabId }).catch(() => null);
+  const currentFrames = frames?.filter((frame) => isInjectableTabUrl(frame.url)) ?? [{
+    frameId: 0,
+    parentFrameId: -1,
+    url: tab.url!,
+  }];
+  await Promise.all(currentFrames.map((frame) =>
+    injectApiHookIntoFrame(tabId, frame.frameId, frame.url, state)));
+  state.serviceWorkerControlled = await detectServiceWorkerControl(tabId);
   hookedTabs.add(tabId);
 }
 
@@ -212,16 +359,13 @@ async function abortTabForPermission(
   tabId: number,
   reason: 'host_permission_required' | 'host_permission_revoked',
 ): Promise<void> {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: mainWorldUnhookFunction,
-    world: 'MAIN' as any,
-  }).catch(() => {});
+  await unhookApiFrames(tabId);
   await chrome.tabs.sendMessage(tabId, {
     type: 'CONTENT_SCRIPT_SHUTDOWN',
     reason: 'host_permission_revoked',
   } satisfies ExtensionMessage).catch(() => {});
   hookedTabs.delete(tabId);
+  frameCaptureStateByTab.delete(tabId);
   contentScriptTabs.delete(tabId);
   contentScriptOriginPatterns.delete(tabId);
   await updatePersistedContentScriptOrigin(tabId, null);
@@ -242,6 +386,7 @@ async function abortTabForPermission(
 
 function completeCaptureSession(session: CaptureSession, options: { openPanel: boolean } = { openPanel: true }): void {
   const durationMs = Date.now() - session.startedAt;
+  const captureCoverage = captureCoverageForTab(session.tabId);
   if (options.openPanel) {
     chrome.sidePanel.open({ tabId: session.tabId }).catch((err) => {
       console.warn('[XGEN SW] sidePanel.open on stop failed:', err);
@@ -253,6 +398,7 @@ function completeCaptureSession(session: CaptureSession, options: { openPanel: b
     apis: session.captures,
     tabId: session.tabId,
     durationMs,
+    captureCoverage,
   };
   cachedCaptureResultTimer = setTimeout(clearCachedCaptureResult, CAPTURE_RESULT_TTL_MS);
 
@@ -262,7 +408,19 @@ function completeCaptureSession(session: CaptureSession, options: { openPanel: b
     apis: session.captures,
     tabId: session.tabId,
     durationMs,
+    captureCoverage,
   });
+}
+
+async function unhookApiFrames(tabId: number): Promise<void> {
+  const state = frameCaptureStateByTab.get(tabId);
+  const frameIds = [...(state?.instrumentedFrameIds ?? new Set([0]))];
+  await Promise.all(frameIds.map((frameId) =>
+    chrome.scripting.executeScript({
+      target: { tabId, frameIds: [frameId] },
+      func: mainWorldUnhookFunction,
+      world: 'MAIN' as any,
+    }).catch(() => {})));
 }
 
 // ── Side Panel open on icon click ──
@@ -533,8 +691,21 @@ chrome.runtime.onMessage.addListener(
       case 'API_CAPTURED': {
         const tabId = sender.tab?.id || 0;
         const captured = message.data as CapturedApi;
+        const frameId = sender.frameId ?? 0;
         captured.tabId = tabId;
         captured.origin = isAiDriving(tabId) ? 'ai' : 'user';
+        captured.captureContext = {
+          kind: frameId === 0 ? 'top_frame' : 'subframe',
+          frameId,
+          ...(safeFrameOrigin(sender.url) ? {
+            frameOrigin: safeFrameOrigin(sender.url),
+          } : {}),
+        };
+        const frameState = frameCaptureStateByTab.get(tabId);
+        if (frameState) {
+          frameState.observedRequestCount += 1;
+          if (frameId !== 0) frameState.observedSubframeRequestCount += 1;
+        }
 
         appendCapturedApi(tabId, captured);
 
@@ -586,6 +757,7 @@ chrome.runtime.onMessage.addListener(
               });
               return;
             }
+            frameCaptureStateByTab.set(tabId, newFrameCaptureState());
             await handlePickerHookInject(tabId);
             clearCachedCaptureResult();
             activeCaptureSession = { tabId, startedAt: Date.now(), captures: [] };
@@ -610,14 +782,11 @@ chrome.runtime.onMessage.addListener(
         }
         const session = activeCaptureSession;
         activeCaptureSession = null;
-        chrome.scripting.executeScript({
-          target: { tabId: session.tabId },
-          func: mainWorldUnhookFunction,
-          world: 'MAIN' as any,
-        }).catch(() => {});
+        unhookApiFrames(session.tabId).catch(() => {});
         hookedTabs.delete(session.tabId);
         completeCaptureSession(session, { openPanel: true });
         capturedApisByTab.delete(session.tabId);
+        frameCaptureStateByTab.delete(session.tabId);
         sendResponse({
           ok: true,
           count: session.captures.length,
@@ -1160,7 +1329,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   // 사이드패널은 정지 시(STOP_FLOATING_CAPTURE 핸들러)에 열어서 결과 리스트를 보여준다.
 
   try {
-    const readiness = await requestHostPermission(url);
+    const frameUrls = await frameUrlsForTab(tab.id, url);
+    const readiness = await requestHostPermissions(frameUrls);
     if (!readiness.ready) {
       broadcastCaptureStatus({
         active: false,
@@ -1169,6 +1339,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       });
       return;
     }
+    frameCaptureStateByTab.set(tab.id, newFrameCaptureState());
     await handlePickerHookInject(tab.id);
     activeCaptureSession = { tabId: tab.id, startedAt: Date.now(), captures: [] };
 
@@ -1996,6 +2167,7 @@ async function handlePickerHookInject(tabId: number) {
 // ── 탭 닫힘 시 정리 ──
 chrome.tabs.onRemoved.addListener((tabId) => {
   hookedTabs.delete(tabId);
+  frameCaptureStateByTab.delete(tabId);
   contentScriptTabs.delete(tabId);
   contentScriptOriginPatterns.delete(tabId);
   updatePersistedContentScriptOrigin(tabId, null).catch(() => {});
@@ -2012,15 +2184,36 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // ── 페이지 네비게이션 감지: 후킹된 탭에서 페이지 이동 시 자동 재주입 + 기록 ──
 chrome.webNavigation.onCompleted.addListener(async (details) => {
-  // 메인 프레임만 (iframe 무시)
-  if (details.frameId !== 0) return;
   const tabId = details.tabId;
 
   if (!hookedTabs.has(tabId)) return;
 
   const readiness = await inspectHostPermission(details.url);
   if (!readiness.ready) {
-    await abortTabForPermission(tabId, 'host_permission_required');
+    if (details.frameId === 0) {
+      await abortTabForPermission(tabId, 'host_permission_required');
+    } else {
+      const state = frameCaptureStateByTab.get(tabId) ?? newFrameCaptureState();
+      state.discoveredFrameIds.add(details.frameId);
+      state.blockedFrameIds.add(details.frameId);
+      state.instrumentedFrameIds.delete(details.frameId);
+      state.failedFrameIds.delete(details.frameId);
+      const frameOrigin = safeFrameOrigin(details.url);
+      if (frameOrigin) state.blockedOrigins.add(frameOrigin);
+      frameCaptureStateByTab.set(tabId, state);
+    }
+    return;
+  }
+
+  if (details.frameId !== 0) {
+    const state = frameCaptureStateByTab.get(tabId) ?? newFrameCaptureState();
+    frameCaptureStateByTab.set(tabId, state);
+    await injectApiHookIntoFrame(
+      tabId,
+      details.frameId,
+      details.url,
+      state,
+    );
     return;
   }
 

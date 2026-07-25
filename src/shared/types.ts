@@ -213,7 +213,13 @@ export type ExtensionMessage =
   | { type: 'START_CAPTURE_SESSION'; tabId?: number }
   | { type: 'STOP_CAPTURE_SESSION' }
   | { type: 'CAPTURE_SESSION_STATUS'; active: boolean; tabId?: number; count?: number; error?: string }
-  | { type: 'CAPTURE_SESSION_RESULT'; apis: import('./api-hook-types').CapturedApi[]; tabId: number; durationMs: number }
+  | {
+      type: 'CAPTURE_SESSION_RESULT';
+      apis: import('./api-hook-types').CapturedApi[];
+      tabId: number;
+      durationMs: number;
+      captureCoverage: import('./api-hook-types').CaptureCoverage;
+    }
   /** sidepanel이 stop 이후에 처음 열렸을 때 SW에 캐시된 마지막 결과를 직접 가져오기 위한 query. */
   | { type: 'GET_CAPTURE_RESULT' }
   | { type: 'CONTENT_SCRIPT_SHUTDOWN'; reason: 'host_permission_revoked' }

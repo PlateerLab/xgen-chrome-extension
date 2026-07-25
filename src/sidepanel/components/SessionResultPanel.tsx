@@ -76,6 +76,9 @@ function ToolRow({
           {tool.captureMetadata.requestBodyKinds.includes('multipart') && (
             <span className="text-blue-700">multipart</span>
           )}
+          {tool.captureMetadata.frameKinds.includes('subframe') && (
+            <span className="text-cyan-700">iframe</span>
+          )}
           {(tool.captureMetadata.requestSchemaVariants.length > 1
             || tool.captureMetadata.responseSchemaVariants.length > 1) && (
             <span className="text-violet-700">shape variation</span>
@@ -261,6 +264,42 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
         {analysis.qualitySummary.multipartToolCount > 0
           && ` · multipart ${analysis.qualitySummary.multipartToolCount}개`}
       </div>
+      {result.source !== 'har' && result.captureCoverage && (
+        <div className="mb-2 border-y border-gray-200 py-1.5 text-[9px] text-gray-600">
+          <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+            <span>
+              frame {result.captureCoverage.instrumentedFrameCount}/
+              {result.captureCoverage.discoveredFrameCount} 관찰
+            </span>
+            <span>
+              iframe 요청 {result.captureCoverage.observedSubframeRequestCount}건
+            </span>
+            {result.captureCoverage.blockedFrameCount > 0 && (
+              <span className="text-amber-700">
+                권한 없음 {result.captureCoverage.blockedFrameCount} frame
+              </span>
+            )}
+            {result.captureCoverage.failedFrameCount > 0 && (
+              <span className="text-red-700">
+                hook 실패 {result.captureCoverage.failedFrameCount} frame
+              </span>
+            )}
+            {result.captureCoverage.serviceWorkerControlled && (
+              <span className="text-amber-700">Service Worker 제어 감지</span>
+            )}
+          </div>
+          {result.captureCoverage.issues.some((entry) => entry.severity === 'warning') && (
+            <div
+              className="mt-0.5 truncate text-amber-700"
+              title={result.captureCoverage.issues
+                .map((entry) => entry.message)
+                .join('\n')}
+            >
+              일부 요청은 브라우저 hook 범위 밖입니다. HAR 가져오기로 보완할 수 있습니다.
+            </div>
+          )}
+        </div>
+      )}
       {result.source === 'har' && result.importSummary && (
         <div
           className="text-[9px] text-gray-500 mb-2 truncate"

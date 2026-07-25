@@ -30,6 +30,38 @@ export interface CapturedRequestMetadata {
   limitations?: string[];
 }
 
+export interface CapturedFrameContext {
+  kind: 'top_frame' | 'subframe';
+  frameId: number;
+  frameOrigin?: string;
+}
+
+export interface CaptureCoverageIssue {
+  code:
+    | 'cross_origin_frame_permission_required'
+    | 'frame_hook_injection_failed'
+    | 'service_worker_fetch_not_observable'
+    | 'worker_fetch_not_observable';
+  severity: 'info' | 'warning';
+  count?: number;
+  origins?: string[];
+  message: string;
+}
+
+export interface CaptureCoverage {
+  discoveredFrameCount: number;
+  instrumentedFrameCount: number;
+  blockedFrameCount: number;
+  failedFrameCount: number;
+  observedRequestCount: number;
+  observedSubframeRequestCount: number;
+  instrumentedOrigins: string[];
+  blockedOrigins: string[];
+  serviceWorkerControlled: boolean;
+  workerTransportVisibility: 'not_observable';
+  issues: CaptureCoverageIssue[];
+}
+
 export interface CapturedApi {
   id: string;
   tabId: number;
@@ -49,6 +81,8 @@ export interface CapturedApi {
   // 'user': 그 외 — 사용자 직접 클릭 등으로 발생
   // SW의 API_CAPTURED 핸들러에서 채움. content script는 이 필드를 모름.
   origin?: 'ai' | 'user';
+  // SW가 sender frame에서 계산한다. query/path를 포함한 frame URL은 저장하지 않는다.
+  captureContext?: CapturedFrameContext;
 }
 
 // ── XGEN Tool 정의 (saveTool API 스키마) ──

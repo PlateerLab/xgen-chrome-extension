@@ -84,6 +84,9 @@ npm run verify:pathfinder
 - [x] path parameter와 identifier 오탐 감소
 - [x] 동일 operation의 schema variation 보존 및 중복 병합
 - [x] iframe, Web Worker, Service Worker 및 streaming 요청의 관찰 범위 조사
+- [x] same-origin/승인된 iframe frame별 캡처와 출처 evidence
+- [x] Worker/Service Worker 비가시성 coverage 진단과 HAR 보완 경로
+- [ ] Worker/Service Worker 직접 transport 관찰의 권한·보안 연구
 - [x] 도구별 coverage, confidence 및 evidence 표시
 
 완료 gate:

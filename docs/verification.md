@@ -67,6 +67,8 @@ xvfb-run -a npm run verify:pathfinder:runtime
   backend의 detail endpoint 미지원 분류
 - 기존 Collection의 명시적 auth profile 연결, 로그인 캡처 기반 관리 profile 생성
   및 재로그인 후 갱신
+- same-origin/승인된 iframe API 캡처, frame 출처 evidence와 Service Worker
+  비가시성 coverage 진단
 - capture 결과의 Collection 등록
 - Collection 충돌 및 merge UI
 - host/cookie 최초 미승인 readiness와 persisted 승인 상태
