@@ -239,7 +239,8 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
     <div className="border-b border-gray-200 bg-gray-50 px-3 py-2">
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-[11px] font-medium text-gray-700">
-          캡처 분석 — {analysis.primaryHost ?? '(host 미상)'}
+          {result.source === 'har' ? 'HAR 분석' : '캡처 분석'}
+          {' — '}{analysis.primaryHost ?? '(host 미상)'}
         </span>
         <button
           onClick={onDismiss}
@@ -259,6 +260,21 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
         {analysis.qualitySummary.multipartToolCount > 0
           && ` · multipart ${analysis.qualitySummary.multipartToolCount}개`}
       </div>
+      {result.source === 'har' && result.importSummary && (
+        <div
+          className="text-[9px] text-gray-500 mb-2 truncate"
+          title={result.sourceName}
+        >
+          {result.sourceName || 'HAR'}
+          {' · '}가져옴 {result.importSummary.importedEntries}
+          {result.importSummary.skippedEntries > 0
+            && ` · 제외 ${result.importSummary.skippedEntries}`}
+          {result.importSummary.redacted && ' · 민감값 제거'}
+          {result.importSummary.droppedSensitiveQueryKeys > 0
+            && ` · query key 제외 ${result.importSummary.droppedSensitiveQueryKeys}`}
+          {result.importSummary.truncated && ' · 크기 제한 적용'}
+        </div>
+      )}
 
       {/* 도구 목록 */}
       {analysis.tools.length > 0 ? (

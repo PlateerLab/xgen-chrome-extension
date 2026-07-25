@@ -40,6 +40,13 @@ Collection 등록 전에 다음을 적용한다.
 - XGEN origin 검증
 - 캡처 시점 cookie 대신 실행 시점 live cookie 사용
 
+HAR 파일은 브라우저 개발자 도구가 인증 헤더, 쿠키 및 응답 원문을 포함해
+내보낼 수 있으므로 더 강한 입력 경계로 취급한다. 가져오는 즉시 URL userinfo,
+민감 query key, Authorization/Cookie/Set-Cookie 계열 header와 파일 이름을
+제거한다. JSON 구조만 bounded sample로 유지하며 임의 text와 binary body는
+Collection payload에 넣지 않는다. 상세한 지원 범위와 제한은
+[HAR 가져오기](har-import.md)를 따른다.
+
 ## 남는 위험
 
 캡처 세션 중에는 브라우저 요청과 응답 원문이 extension 메모리에 일시적으로 존재한다. 등록 payload를 정제하는 것만으로 캡처 단계의 노출 위험이 없어지는 것은 아니다. 세션 결과는 sidepanel이 소비할 때까지 또는 최대 5분 동안 메모리에 남을 수 있으므로 민감 화면에서는 캡처를 시작하지 않아야 한다.

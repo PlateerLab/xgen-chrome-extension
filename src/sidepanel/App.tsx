@@ -7,8 +7,10 @@ import { SettingsBar } from './components/SettingsBar';
 import { PlanQuestionPopup } from './components/PlanQuestionPopup';
 import { useElementPicker, PickerResultPanel } from './components/ElementPickerButton';
 import { SessionResultPanel } from './components/SessionResultPanel';
+import { HarImportButton } from './components/HarImportButton';
 import { MenuDrawer } from './components/MenuDrawer';
 import { ProductInbox } from './components/ProductInbox';
+import type { SessionResult } from './hooks/useCaptureSession';
 import type { SidePanelView } from './menu/items';
 import type { ExtensionMessage, PageContext } from '../shared/types';
 
@@ -30,6 +32,8 @@ export function App() {
   } = useChat(targetTabId);
   const picker = useElementPicker(targetTabId);
   const captureSession = useCaptureSession(targetTabId);
+  const [importedResult, setImportedResult] = useState<SessionResult | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
   const [authCapturing, setAuthCapturing] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [view, setView] = useState<SidePanelView>('chat');
@@ -169,7 +173,14 @@ export function App() {
 
           {/* 캡처 세션 토글 (🔴 시작 / ⏹ 종료) */}
           <button
-            onClick={() => (captureSession.active ? captureSession.stop() : captureSession.start())}
+            onClick={() => {
+              if (captureSession.active) {
+                captureSession.stop();
+              } else {
+                setImportedResult(null);
+                captureSession.start();
+              }
+            }}
             disabled={captureSession.pending}
             className={`p-1 rounded transition-colors ${
               captureSession.active
@@ -196,6 +207,17 @@ export function App() {
               </svg>
             )}
           </button>
+
+          <HarImportButton
+            targetTabId={targetTabId}
+            disabled={captureSession.active || captureSession.pending}
+            onImported={(result) => {
+              setImportError(null);
+              captureSession.dismissResult();
+              setImportedResult(result);
+            }}
+            onError={setImportError}
+          />
 
           {/* 인증 프로필 생성 */}
           <button
@@ -269,10 +291,13 @@ export function App() {
       )}
 
       {/* Capture Session 결과 패널 (세션 종료 후) */}
-      {captureSession.result && (
+      {(importedResult || captureSession.result) && (
         <SessionResultPanel
-          result={captureSession.result}
-          onDismiss={captureSession.dismissResult}
+          result={importedResult || captureSession.result!}
+          onDismiss={() => {
+            if (importedResult) setImportedResult(null);
+            else captureSession.dismissResult();
+          }}
           targetTabId={targetTabId}
         />
       )}
@@ -294,6 +319,20 @@ export function App() {
           </span>
           <button
             onClick={captureSession.dismissError}
+            className="text-[10px] text-red-500 hover:text-red-700"
+          >
+            닫기
+          </button>
+        </div>
+      )}
+
+      {importError && (
+        <div className="border-b border-red-200 bg-red-50 px-3 py-1.5 flex items-center gap-2">
+          <span className="text-[11px] text-red-700 flex-1">
+            HAR 가져오기 오류: {importError}
+          </span>
+          <button
+            onClick={() => setImportError(null)}
             className="text-[10px] text-red-500 hover:text-red-700"
           >
             닫기

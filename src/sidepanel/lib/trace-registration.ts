@@ -37,7 +37,7 @@ const SENSITIVE_VALUE_PATTERNS = [
   },
 ] as const;
 
-interface SampleStats {
+export interface SampleStats {
   redacted: boolean;
   truncated: boolean;
   droppedQueryKeys: Set<string>;
@@ -47,7 +47,15 @@ export interface TraceRegistrationOptions {
   includeSamples?: boolean;
 }
 
-function isSensitiveKey(key: string): boolean {
+export function createSampleStats(): SampleStats {
+  return {
+    redacted: false,
+    truncated: false,
+    droppedQueryKeys: new Set<string>(),
+  };
+}
+
+export function isSensitiveKey(key: string): boolean {
   return SENSITIVE_KEY_RE.test(key);
 }
 
@@ -57,7 +65,11 @@ function truncateString(value: string, maxChars: number, stats: SampleStats): st
   return `${value.slice(0, maxChars)}${TRUNCATED_VALUE}`;
 }
 
-function sanitizeStringValue(value: string, maxChars: number, stats: SampleStats): string {
+export function sanitizeStringValue(
+  value: string,
+  maxChars: number,
+  stats: SampleStats,
+): string {
   let sanitized = value;
   for (const { pattern, marker } of SENSITIVE_VALUE_PATTERNS) {
     const replaced = sanitized.replace(pattern, marker);
@@ -114,7 +126,7 @@ function sanitizeSampleValue(value: unknown, stats: SampleStats, depth = 0): unk
   return String(value);
 }
 
-function sanitizeSample(value: unknown, stats: SampleStats): unknown {
+export function sanitizeSample(value: unknown, stats: SampleStats): unknown {
   const sanitized = sanitizeSampleValue(value, stats);
   if (jsonLength(sanitized) <= MAX_SAMPLE_JSON_CHARS) return sanitized;
 
@@ -188,11 +200,7 @@ export function buildTraceRegistrationPayload(
   return {
     host: analysis.primaryHost,
     tools: selectedTools.map((tool) => {
-      const stats: SampleStats = {
-        redacted: false,
-        truncated: false,
-        droppedQueryKeys: new Set<string>(),
-      };
+      const stats = createSampleStats();
       const query = sanitizeQuery(
         tool.queryParamKeys,
         includeSamples ? tool.querySample : {},

@@ -96,6 +96,46 @@ async function loadTraceRegistration() {
   };
 }
 
+async function loadHarImporter() {
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-har-'));
+  const registrationSourcePath = path.join(
+    repoRoot,
+    'src/sidepanel/lib/trace-registration.ts',
+  );
+  const importerSourcePath = path.join(repoRoot, 'src/sidepanel/lib/har-import.ts');
+  const compilerOptions = {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2022,
+    verbatimModuleSyntax: true,
+  };
+  const registration = ts.transpileModule(
+    await readFile(registrationSourcePath, 'utf8'),
+    { compilerOptions, fileName: registrationSourcePath },
+  );
+  const importer = ts.transpileModule(
+    await readFile(importerSourcePath, 'utf8'),
+    { compilerOptions, fileName: importerSourcePath },
+  );
+  await writeFile(
+    path.join(tmpDir, 'trace-registration.mjs'),
+    registration.outputText,
+    'utf8',
+  );
+  await writeFile(
+    path.join(tmpDir, 'har-import.mjs'),
+    importer.outputText.replace(
+      /from ['"]\.\/trace-registration['"]/g,
+      "from './trace-registration.mjs'",
+    ),
+    'utf8',
+  );
+  const mod = await import(pathToFileURL(path.join(tmpDir, 'har-import.mjs')).href);
+  return {
+    importHarArchive: mod.importHarArchive,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
 async function loadApiClient() {
   const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-api-'));
 
@@ -669,6 +709,217 @@ function testTraceRegistrationPayloadCaps(buildTraceRegistrationPayload) {
   assert.ok(payload.edges.every((edge) => includedIds.has(edge.fromToolId) && includedIds.has(edge.toToolId)));
 }
 
+function testPrivacySafeHarImport(
+  importHarArchive,
+  analyzeTrace,
+  buildTraceRegistrationPayload,
+) {
+  const har = {
+    log: {
+      version: '1.2',
+      entries: [
+        {
+          startedDateTime: '2026-07-26T01:00:00.000Z',
+          time: 25,
+          request: {
+            method: 'POST',
+            url: 'https://url-user:url-password@api.customer.test/items?email=person@example.com&accessToken=query-secret',
+            headers: [
+              { name: 'Authorization', value: 'Bearer header-secret' },
+              { name: 'Cookie', value: 'session=cookie-secret' },
+              { name: 'Content-Type', value: 'application/json' },
+            ],
+            postData: {
+              mimeType: 'application/json',
+              text: JSON.stringify({
+                itemId: 'ITEM-1',
+                password: 'plain-password',
+                email: 'person@example.com',
+              }),
+            },
+          },
+          response: {
+            status: 200,
+            headers: [
+              { name: 'Content-Type', value: 'application/json' },
+              { name: 'Set-Cookie', value: 'session=response-secret' },
+            ],
+            content: {
+              mimeType: 'application/json',
+              text: JSON.stringify({
+                itemId: 'ITEM-1',
+                ownerEmail: 'owner@example.com',
+                refreshToken: 'refresh-secret',
+              }),
+            },
+          },
+        },
+        {
+          startedDateTime: '2026-07-26T01:00:01.000Z',
+          time: 15,
+          request: {
+            method: 'POST',
+            url: 'https://api.customer.test/graphql',
+            headers: [{ name: 'Content-Type', value: 'application/json' }],
+            postData: {
+              mimeType: 'application/json',
+              text: JSON.stringify({
+                operationName: 'GetItem',
+                query: 'query GetItem($id: ID!) { item(id: $id) { id name } }',
+                variables: { id: 'ITEM-1' },
+              }),
+            },
+          },
+          response: {
+            status: 200,
+            headers: [{ name: 'Content-Type', value: 'application/json' }],
+            content: {
+              mimeType: 'application/json',
+              encoding: 'base64',
+              text: Buffer.from(
+                JSON.stringify({ data: { item: { id: 'ITEM-1', name: '한글 상품' } } }),
+                'utf8',
+              ).toString('base64'),
+            },
+          },
+        },
+        {
+          startedDateTime: '2026-07-26T01:00:02.000Z',
+          time: 40,
+          request: {
+            method: 'POST',
+            url: 'https://api.customer.test/documents',
+            headers: [{ name: 'Content-Type', value: 'multipart/form-data' }],
+            postData: {
+              mimeType: 'multipart/form-data',
+              params: [
+                { name: 'title', value: 'guide' },
+                {
+                  name: 'attachment',
+                  fileName: 'private-customer-name.pdf',
+                  contentType: 'application/pdf',
+                  value: 'file-bytes-secret',
+                },
+              ],
+            },
+          },
+          response: {
+            status: 201,
+            headers: [{ name: 'Content-Type', value: 'application/json' }],
+            content: {
+              mimeType: 'application/json',
+              text: JSON.stringify({ documentId: 'DOC-1' }),
+            },
+          },
+        },
+        {
+          startedDateTime: '2026-07-26T01:00:03.000Z',
+          request: {
+            method: 'GET',
+            url: 'wss://api.customer.test/socket',
+          },
+          response: { status: 101, content: {} },
+        },
+      ],
+    },
+  };
+
+  const imported = importHarArchive(har, 77);
+  const serialized = JSON.stringify(imported);
+  assert.equal(imported.summary.totalEntries, 4);
+  assert.equal(imported.summary.importedEntries, 3);
+  assert.equal(imported.summary.skippedEntries, 1);
+  assert.equal(imported.summary.redacted, true);
+  assert.equal(imported.apis.every((api) => api.tabId === 77), true);
+  assert.ok(!serialized.includes('query-secret'));
+  assert.ok(!serialized.includes('url-user'));
+  assert.ok(!serialized.includes('url-password'));
+  assert.ok(!serialized.includes('header-secret'));
+  assert.ok(!serialized.includes('cookie-secret'));
+  assert.ok(!serialized.includes('plain-password'));
+  assert.ok(!serialized.includes('person@example.com'));
+  assert.ok(!serialized.includes('owner@example.com'));
+  assert.ok(!serialized.includes('refresh-secret'));
+  assert.ok(!serialized.includes('private-customer-name.pdf'));
+  assert.ok(!serialized.includes('file-bytes-secret'));
+  assert.equal(imported.apis[0].requestHeaders.authorization, undefined);
+  assert.equal(imported.apis[0].requestHeaders.cookie, undefined);
+  assert.equal(imported.apis[0].responseHeaders['set-cookie'], undefined);
+  assert.equal(new URL(imported.apis[0].url).username, '');
+  assert.equal(new URL(imported.apis[0].url).password, '');
+  assert.ok(serialized.includes('한글 상품'));
+  assert.equal(
+    imported.apis.find((api) => api.url.endsWith('/documents'))
+      ?.requestMetadata?.fileFields[0]?.fieldPath,
+    'attachment',
+  );
+
+  const analysis = analyzeTrace(imported.apis);
+  assert.equal(analysis.primaryHost, 'api.customer.test');
+  assert.ok(analysis.tools.length >= 3);
+  assert.equal(analysis.qualitySummary.graphqlToolCount, 1);
+  assert.equal(analysis.qualitySummary.multipartToolCount, 1);
+
+  const payload = buildTraceRegistrationPayload(
+    analysis,
+    analysis.tools.map((tool) => tool.id),
+  );
+  const payloadText = JSON.stringify(payload);
+  assert.ok(!payloadText.includes('query-secret'));
+  assert.ok(!payloadText.includes('plain-password'));
+  assert.ok(!payloadText.includes('private-customer-name.pdf'));
+}
+
+function testHarImportValidationAndCaps(importHarArchive) {
+  assert.throws(
+    () => importHarArchive({}),
+    /HAR log 객체/,
+  );
+
+  const entry = {
+    startedDateTime: '2026-07-26T01:00:00.000Z',
+    time: 1,
+    request: {
+      method: 'GET',
+      url: 'https://api.customer.test/items',
+      headers: [],
+    },
+    response: {
+      status: 200,
+      headers: [{ name: 'Content-Type', value: 'application/json' }],
+      content: {
+        mimeType: 'application/json',
+        text: JSON.stringify({ ok: true }),
+      },
+    },
+  };
+  const capped = importHarArchive({
+    log: {
+      entries: Array.from({ length: 501 }, () => entry),
+    },
+  });
+  assert.equal(capped.apis.length, 500);
+  assert.equal(capped.summary.skippedEntries, 1);
+  assert.equal(capped.summary.truncated, true);
+
+  const oversized = importHarArchive({
+    log: {
+      entries: [{
+        ...entry,
+        response: {
+          ...entry.response,
+          content: {
+            mimeType: 'application/json',
+            text: 'x'.repeat(100_001),
+          },
+        },
+      }],
+    },
+  });
+  assert.equal(oversized.apis[0].responseBody, null);
+  assert.equal(oversized.summary.truncated, true);
+}
+
 async function withMockFetch(handler, fn) {
   const originalFetch = globalThis.fetch;
   const calls = [];
@@ -770,6 +1021,10 @@ async function main() {
     cleanup: cleanupRegistration,
   } = await loadTraceRegistration();
   const {
+    importHarArchive,
+    cleanup: cleanupHarImporter,
+  } = await loadHarImporter();
+  const {
     createCollectionFromTrace,
     mergeCollectionFromTrace,
     cleanup: cleanupApi,
@@ -789,10 +1044,17 @@ async function main() {
     testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayload);
     testTraceRegistrationPayloadHardening(analyzeTrace, buildTraceRegistrationPayload);
     testTraceRegistrationPayloadCaps(buildTraceRegistrationPayload);
+    testPrivacySafeHarImport(
+      importHarArchive,
+      analyzeTrace,
+      buildTraceRegistrationPayload,
+    );
+    testHarImportValidationAndCaps(importHarArchive);
     await testCollectionFromTraceApi(createCollectionFromTrace, mergeCollectionFromTrace);
   } finally {
     await cleanup();
     await cleanupRegistration();
+    await cleanupHarImporter();
     await cleanupApi();
   }
 

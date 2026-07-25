@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ExtensionMessage } from '../../shared/types';
 import type { CapturedApi } from '../../shared/api-hook-types';
+import type { HarImportSummary } from '../lib/har-import';
 
 export interface SessionResult {
   apis: CapturedApi[];
   tabId: number;
   durationMs: number;
+  source?: 'capture' | 'har';
+  sourceName?: string;
+  importSummary?: HarImportSummary;
 }
 
 export interface CaptureSessionState {

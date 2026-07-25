@@ -115,11 +115,11 @@ npm run verify:pathfinder
 
 ## P5. Universal Inputs
 
-상태: `research`
+상태: `in progress`
 
 목표: 브라우저 runtime trace만으로 충분하지 않은 환경도 같은 Collection artifact로 수렴시킨다.
 
-- [ ] HAR import
+- [x] privacy-safe HAR 1.2 import
 - [ ] OpenAPI URL/file import
 - [ ] GraphQL introspection
 - [ ] Postman Collection

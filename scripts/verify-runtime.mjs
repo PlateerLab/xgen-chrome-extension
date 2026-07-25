@@ -772,6 +772,65 @@ async function verifyStoredServerCookieAuth(extensionPage, browserContext, targe
   );
 }
 
+async function verifyHarImportUi(extensionPage) {
+  const har = {
+    log: {
+      version: '1.2',
+      entries: [
+        {
+          startedDateTime: '2026-07-26T01:00:00.000Z',
+          time: 20,
+          request: {
+            method: 'POST',
+            url: 'https://api.customer.test/items?accessToken=runtime-secret',
+            headers: [
+              { name: 'Authorization', value: 'Bearer runtime-header-secret' },
+              { name: 'Content-Type', value: 'application/json' },
+            ],
+            postData: {
+              mimeType: 'application/json',
+              text: JSON.stringify({ itemId: 'ITEM-1', password: 'runtime-password' }),
+            },
+          },
+          response: {
+            status: 200,
+            headers: [{ name: 'Content-Type', value: 'application/json' }],
+            content: {
+              mimeType: 'application/json',
+              text: JSON.stringify({ itemId: 'ITEM-1', name: 'Runtime item' }),
+            },
+          },
+        },
+      ],
+    },
+  };
+
+  await extensionPage.locator('[data-testid="har-import-input"]').setInputFiles({
+    name: 'runtime-fixture.har',
+    mimeType: 'application/json',
+    buffer: Buffer.from(JSON.stringify(har)),
+  });
+  await extensionPage.waitForFunction(
+    () => document.body.textContent?.includes('HAR 분석'),
+    undefined,
+    { timeout: 5_000 },
+  );
+  const text = await extensionPage.locator('body').textContent();
+  assert.match(text || '', /runtime-fixture\.har/);
+  assert.match(text || '', /민감값 제거/);
+  assert.ok(!(text || '').includes('runtime-secret'));
+  assert.ok(!(text || '').includes('runtime-password'));
+
+  const analysisHeader = extensionPage.getByText(/HAR 분석 —/).first();
+  const panel = analysisHeader.locator('xpath=ancestor::div[contains(@class, "border-b")]');
+  await panel.getByRole('button', { name: '닫기' }).click();
+  await extensionPage.waitForFunction(
+    () => !document.body.textContent?.includes('HAR 분석 —'),
+    undefined,
+    { timeout: 5_000 },
+  );
+}
+
 async function verifyDevXgenOriginDetection(extensionPage, browserContext) {
   await browserContext.route('https://dev-xgen.x2bee.com/**', async (route) => {
     await route.fulfill({
@@ -1119,6 +1178,7 @@ async function main() {
     await verifyStoredServerCookieAuth(extensionPage, context, targetPage, url);
     await verifyRelayCommandBridge(extensionPage, targetPage, commandResults);
     await verifySidepanelChatRelay(extensionPage, targetPage, distractorPage, commandResults, chatRequests);
+    await verifyHarImportUi(extensionPage);
     await wait(2_200);
 
     const firstApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
@@ -1253,6 +1313,7 @@ async function main() {
       'sidepanel chat relay verified',
       'capture result registration verified',
       'capture result merge conflict verified',
+      'privacy-safe HAR import verified',
       'capture payload memory release verified',
       `fetch/xhr captured ${firstApis.length} API request(s)`,
       `navigation reinjection captured ${secondApis.length} API request(s)`,
