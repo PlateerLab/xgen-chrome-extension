@@ -297,6 +297,7 @@ function startFixtureServer() {
   const sourcePreviewRequests = [];
   const sourceAddRequests = [];
   const collectionDeleteRequests = [];
+  const capabilityRequests = [];
   const mcpSessionRequests = [];
   const mcpSourcePreviewRequests = [];
   const mcpSourceAddRequests = [];
@@ -338,6 +339,37 @@ function startFixtureServer() {
     if (req.method === 'GET' && req.url === '/api/session-station/v1/auth-profiles') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(authProfiles));
+      return;
+    }
+
+    if (
+      req.method === 'GET'
+      && req.url === '/api/tools/api-collections/capabilities'
+    ) {
+      capabilityRequests.push({ headers: req.headers });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        contract: {
+          name: 'xgen-pathfinder-api-collection',
+          version: 1,
+          min_client_version: 1,
+          max_client_version: 1,
+        },
+        engine: {
+          graph_tool_call_version: '0.33.0',
+        },
+        capabilities: {
+          trace_collection_import: true,
+          collection_build_status: true,
+          collection_quality_summaries: true,
+          collection_search: true,
+          collection_plan: true,
+          collection_execute: true,
+          quality_lab: true,
+          auth_profile_resolution: true,
+          mcp_source_ingest: true,
+        },
+      }));
       return;
     }
 
@@ -962,6 +994,7 @@ self.addEventListener('message', (event) => {
         sourcePreviewRequests,
         sourceAddRequests,
         collectionDeleteRequests,
+        capabilityRequests,
         mcpSessionRequests,
         mcpSourcePreviewRequests,
         mcpSourceAddRequests,
@@ -1463,6 +1496,21 @@ async function verifyCookiePermissionUi(extensionPage) {
   assert.match(
     await extensionPage.getByTestId('cookie-permission-status').innerText(),
     /현재 사이트 쿠키 연결됨/,
+  );
+  await extensionPage.getByTestId('settings-toggle').click();
+}
+
+async function verifyXgenCompatibilityUi(extensionPage) {
+  await extensionPage.getByTestId('settings-toggle').click();
+  await extensionPage.waitForFunction(
+    () => document.querySelector('[data-testid="xgen-compatibility-status"]')
+      ?.textContent?.includes('연동 계약 v1 · 호환'),
+    undefined,
+    { timeout: 5_000 },
+  );
+  assert.match(
+    await extensionPage.getByTestId('xgen-compatibility-status').innerText(),
+    /연동 계약 v1 · 호환/,
   );
   await extensionPage.getByTestId('settings-toggle').click();
 }
@@ -2167,7 +2215,7 @@ async function verifyGraphQLImportUi(
   collectionDetailMode.failNext = true;
   await buildStatus.getByRole('button', { name: '새로고침' }).click();
   await buildStatus.getByText(
-    '현재 XGEN backend가 Collection build 상태 조회를 지원하지 않습니다.',
+    /현재 XGEN backend가 Collection build 상태 조회 기능을 지원하지 않습니다/,
   ).waitFor();
   const created = await waitForItem(
     collectionCreateRequests,
@@ -2498,6 +2546,7 @@ async function main() {
     sourcePreviewRequests,
     sourceAddRequests,
     collectionDeleteRequests,
+    capabilityRequests,
     registrationMode,
     sourceAddMode,
     collectionDetailMode,
@@ -2574,6 +2623,13 @@ async function main() {
     await distractorPage.goto(`${url}distractor`);
     await verifyPageAgent(extensionPage, targetPage);
     await verifyStoredServerCookieAuth(extensionPage, context, targetPage, url);
+    await verifyXgenCompatibilityUi(extensionPage);
+    assert.ok(
+      capabilityRequests.some(
+        (entry) => entry.headers.authorization === 'Bearer cookie-token',
+      ),
+      'XGEN capability manifest should be requested with the active login token',
+    );
     await verifyRelayCommandBridge(extensionPage, targetPage, commandResults);
     await verifySidepanelChatRelay(extensionPage, targetPage, distractorPage, commandResults, chatRequests);
     await verifyHarImportUi(extensionPage);

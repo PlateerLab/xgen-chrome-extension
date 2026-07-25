@@ -124,6 +124,20 @@
       "devProbe": true
     },
     {
+      "id": "collection_capabilities",
+      "method": "GET",
+      "path": "/api/tools/api-collections/capabilities",
+      "client": {
+        "file": "src/shared/xgen-capabilities.ts",
+        "needle": "function diagnoseXgenCompatibility("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/tools/api-collections/capabilities'"
+      },
+      "devProbe": true
+    },
+    {
       "id": "collection_create",
       "method": "POST",
       "path": "/api/tools/api-collections",

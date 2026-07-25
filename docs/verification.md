@@ -65,6 +65,8 @@ xvfb-run -a npm run verify:pathfinder:runtime
 - GraphQL introspection 분석, XGEN preview 및 endpoint/capability 포함 source 등록
 - Collection 등록 후 graph build/readiness/semantic/edge 품질 상태와 구버전
   backend의 detail endpoint 미지원 분류
+- XGEN capability manifest 계약, 필수 기능 누락, client/backend 버전 불일치와
+  read-only legacy fallback
 - 기존 Collection의 명시적 auth profile 연결, 로그인 캡처 기반 관리 profile 생성
   및 재로그인 후 갱신
 - same-origin/승인된 iframe API 캡처, frame 출처 evidence와 Service Worker

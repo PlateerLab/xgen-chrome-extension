@@ -20,6 +20,7 @@
 | `POST /api/tools/api-collections/{id}/from-trace` | 기존 Collection과 trace 병합 |
 | `POST /api/tools/api-collections/preview` | OpenAPI/GraphQL 등 source adapter capability와 readiness 확인 |
 | `POST /api/tools/api-collections/{id}/sources` | 검증된 범용 source를 Collection에 추가 |
+| `GET /api/tools/api-collections/capabilities` | Pathfinder contract version과 기능 지원 범위 확인 |
 | `GET /api/tools/api-collections/{id}` | 등록 후 graph build, readiness 및 semantic/edge 품질 상태 확인 |
 | `POST /api/tools/api-collections/{id}/run` | Collection tool 실행 |
 | `/api/session-station/v1/auth-profiles` | 대상 host 인증 profile 조회/생성 |

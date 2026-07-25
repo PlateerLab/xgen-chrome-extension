@@ -9,6 +9,7 @@ import type {
   AiChatRequest, CollectionRunEvent, CollectionRunRequest,
   PathFinderEvent, SiteInfo, SSEEvent,
 } from './types';
+import { capabilityApiErrorMessage } from './xgen-capabilities';
 
 export interface ProviderInfo {
   provider: string;
@@ -338,7 +339,11 @@ export interface MCPSourceRequest {
   enrichLlmSpec?: string;
 }
 
-async function apiError(response: Response, fallback: string): Promise<Error> {
+async function apiError(
+  response: Response,
+  fallback: string,
+  capability?: string,
+): Promise<Error> {
   const body = await response.json().catch(() => null);
   const detail = body?.detail ?? body;
   const message = typeof detail === 'string'
@@ -348,6 +353,13 @@ async function apiError(response: Response, fallback: string): Promise<Error> {
       : typeof detail?.ingest_result?.issues?.[0]?.message === 'string'
         ? detail.ingest_result.issues[0].message
       : response.statusText;
+  if (capability && [401, 403, 404, 405].includes(response.status)) {
+    return new Error(capabilityApiErrorMessage(
+      capability,
+      response.status,
+      fallback,
+    ));
+  }
   return new Error(`${fallback}: ${response.status} ${message}`.trim());
 }
 
@@ -386,7 +398,13 @@ export async function listApiCollections(
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
   });
-  if (!response.ok) throw await apiError(response, 'Collection 목록 조회 실패');
+  if (!response.ok) {
+    throw await apiError(
+      response,
+      'Collection 목록 조회 실패',
+      'collection_build_status',
+    );
+  }
   return response.json();
 }
 
@@ -403,7 +421,13 @@ export async function getApiCollection(
       },
     },
   );
-  if (!response.ok) throw await apiError(response, 'Collection 상태 조회 실패');
+  if (!response.ok) {
+    throw await apiError(
+      response,
+      'Collection 상태 조회 실패',
+      'collection_build_status',
+    );
+  }
   return response.json();
 }
 
@@ -416,7 +440,9 @@ export async function fetchMCPStationSessions(
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
   });
-  if (!response.ok) throw await apiError(response, 'MCP 세션 목록 조회 실패');
+  if (!response.ok) {
+    throw await apiError(response, 'MCP 세션 목록 조회 실패', 'mcp_source_ingest');
+  }
   const payload = await response.json() as
     MCPStationSession[] | { sessions?: MCPStationSession[]; options?: MCPStationSession[] };
   if (Array.isArray(payload)) return payload;
@@ -447,7 +473,13 @@ export async function previewMCPCollectionSource(
       body: JSON.stringify(mcpSourceBody(payload)),
     },
   );
-  if (!response.ok) throw await apiError(response, 'MCP source 미리보기 실패');
+  if (!response.ok) {
+    throw await apiError(
+      response,
+      'MCP source 미리보기 실패',
+      'mcp_source_ingest',
+    );
+  }
   return response.json();
 }
 
@@ -465,7 +497,9 @@ export async function addMCPCollectionSource(
       body: JSON.stringify(mcpSourceBody(payload)),
     },
   );
-  if (!response.ok) throw await apiError(response, 'MCP source 등록 실패');
+  if (!response.ok) {
+    throw await apiError(response, 'MCP source 등록 실패', 'mcp_source_ingest');
+  }
   return response.json();
 }
 
@@ -487,7 +521,9 @@ export async function previewOpenApiSource(
       on_conflict: 'prefix',
     }),
   });
-  if (!response.ok) throw await apiError(response, 'OpenAPI 미리보기 실패');
+  if (!response.ok) {
+    throw await apiError(response, 'OpenAPI 미리보기 실패', 'source_preview');
+  }
   return response.json();
 }
 
@@ -509,7 +545,13 @@ export async function previewCollectionSource(
       on_conflict: 'prefix',
     }),
   });
-  if (!response.ok) throw await apiError(response, 'Collection source 미리보기 실패');
+  if (!response.ok) {
+    throw await apiError(
+      response,
+      'Collection source 미리보기 실패',
+      'source_preview',
+    );
+  }
   return response.json();
 }
 
@@ -532,7 +574,13 @@ export async function createApiCollection(
       domain_patterns: input.domainPatterns || [],
     }),
   });
-  if (!response.ok) throw await apiError(response, 'Collection 생성 실패');
+  if (!response.ok) {
+    throw await apiError(
+      response,
+      'Collection 생성 실패',
+      'universal_source_ingest',
+    );
+  }
   return response.json();
 }
 
@@ -555,7 +603,13 @@ export async function addOpenApiSource(
       }),
     },
   );
-  if (!response.ok) throw await apiError(response, 'OpenAPI source 등록 실패');
+  if (!response.ok) {
+    throw await apiError(
+      response,
+      'OpenAPI source 등록 실패',
+      'universal_source_ingest',
+    );
+  }
   return response.json();
 }
 
@@ -578,7 +632,13 @@ export async function addCollectionSource(
       }),
     },
   );
-  if (!response.ok) throw await apiError(response, 'Collection source 등록 실패');
+  if (!response.ok) {
+    throw await apiError(
+      response,
+      'Collection source 등록 실패',
+      'universal_source_ingest',
+    );
+  }
   return response.json();
 }
 
@@ -638,6 +698,13 @@ export async function createCollectionFromTrace(
     };
   }
   if (!response.ok) {
+    if ([401, 403, 404, 405].includes(response.status)) {
+      throw new Error(capabilityApiErrorMessage(
+        'trace_collection_import',
+        response.status,
+        'Collection create failed',
+      ));
+    }
     const text = await response.text().catch(() => response.statusText);
     throw new Error(`Collection create failed: ${response.status} ${text}`);
   }
@@ -663,6 +730,13 @@ export async function mergeCollectionFromTrace(
   });
 
   if (!response.ok) {
+    if ([401, 403, 404, 405].includes(response.status)) {
+      throw new Error(capabilityApiErrorMessage(
+        'trace_collection_import',
+        response.status,
+        'Collection merge failed',
+      ));
+    }
     const text = await response.text().catch(() => response.statusText);
     throw new Error(`Collection merge failed: ${response.status} ${text}`);
   }

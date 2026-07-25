@@ -318,6 +318,27 @@ async function loadApiClient() {
   });
   await writeFile(path.join(tmpDir, 'constants.mjs'), constantsCompiled.outputText, 'utf8');
 
+  const capabilitiesSourcePath = path.join(
+    repoRoot,
+    'src/shared/xgen-capabilities.ts',
+  );
+  const capabilitiesCompiled = ts.transpileModule(
+    await readFile(capabilitiesSourcePath, 'utf8'),
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.ES2022,
+        target: ts.ScriptTarget.ES2022,
+        verbatimModuleSyntax: true,
+      },
+      fileName: capabilitiesSourcePath,
+    },
+  );
+  await writeFile(
+    path.join(tmpDir, 'xgen-capabilities.mjs'),
+    capabilitiesCompiled.outputText,
+    'utf8',
+  );
+
   const apiSourcePath = path.join(repoRoot, 'src/shared/api.ts');
   const apiSource = await readFile(apiSourcePath, 'utf8');
   const apiCompiled = ts.transpileModule(apiSource, {
@@ -328,7 +349,12 @@ async function loadApiClient() {
     },
     fileName: apiSourcePath,
   });
-  const apiOutput = apiCompiled.outputText.replace("from './constants'", "from './constants.mjs'");
+  const apiOutput = apiCompiled.outputText
+    .replace("from './constants'", "from './constants.mjs'")
+    .replace(
+      "from './xgen-capabilities'",
+      "from './xgen-capabilities.mjs'",
+    );
   await writeFile(path.join(tmpDir, 'api.mjs'), apiOutput, 'utf8');
 
   const mod = await import(pathToFileURL(path.join(tmpDir, 'api.mjs')).href);
@@ -343,6 +369,28 @@ async function loadApiClient() {
     addOpenApiSource: mod.addOpenApiSource,
     addCollectionSource: mod.addCollectionSource,
     deleteApiCollection: mod.deleteApiCollection,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
+async function loadXgenCapabilities() {
+  const sourcePath = path.join(repoRoot, 'src/shared/xgen-capabilities.ts');
+  const source = await readFile(sourcePath, 'utf8');
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+      verbatimModuleSyntax: true,
+    },
+    fileName: sourcePath,
+  });
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-capabilities-'));
+  const outputPath = path.join(tmpDir, 'xgen-capabilities.mjs');
+  await writeFile(outputPath, compiled.outputText, 'utf8');
+  const mod = await import(pathToFileURL(outputPath).href);
+  return {
+    diagnoseXgenCompatibility: mod.diagnoseXgenCompatibility,
+    assertXgenCompatibility: mod.assertXgenCompatibility,
     cleanup: () => rm(tmpDir, { recursive: true, force: true }),
   };
 }
@@ -2222,6 +2270,118 @@ async function testGenericCollectionSourceApi({
   assert.equal(observed[2].body.auto_enrich, false);
 }
 
+async function testXgenCompatibilityContract({
+  diagnoseXgenCompatibility,
+  assertXgenCompatibility,
+}) {
+  const compatibleManifest = {
+    contract: {
+      name: 'xgen-pathfinder-api-collection',
+      version: 1,
+      min_client_version: 1,
+      max_client_version: 1,
+    },
+    engine: { graph_tool_call_version: '0.33.0' },
+    capabilities: {
+      trace_collection_import: true,
+      collection_build_status: true,
+      collection_quality_summaries: true,
+      collection_search: true,
+      collection_plan: true,
+      collection_execute: true,
+      quality_lab: true,
+      auth_profile_resolution: true,
+    },
+  };
+  const compatible = await diagnoseXgenCompatibility(
+    'https://xgen.example',
+    'auth-value',
+    {
+      fetchImpl: async (url, init) => {
+        assert.equal(
+          String(url),
+          'https://xgen.example/api/tools/api-collections/capabilities',
+        );
+        assert.equal(init.headers.Authorization, 'Bearer auth-value');
+        return new Response(JSON.stringify(compatibleManifest), { status: 200 });
+      },
+    },
+  );
+  assert.equal(compatible.status, 'compatible');
+  assert.equal(compatible.compatible, true);
+  assert.equal(compatible.backendContractVersion, 1);
+  assert.equal(compatible.graphToolCallVersion, '0.33.0');
+  assert.doesNotThrow(() => assertXgenCompatibility(compatible));
+
+  const missingCore = await diagnoseXgenCompatibility(
+    'https://xgen.example',
+    '',
+    {
+      fetchImpl: async () => new Response(JSON.stringify({
+        ...compatibleManifest,
+        capabilities: {
+          ...compatibleManifest.capabilities,
+          trace_collection_import: false,
+        },
+      }), { status: 200 }),
+    },
+  );
+  assert.equal(missingCore.status, 'backend_outdated');
+  assert.deepEqual(missingCore.missingRequiredCapabilities, [
+    'trace_collection_import',
+  ]);
+  assert.throws(
+    () => assertXgenCompatibility(missingCore),
+    /XGEN backend 업데이트 필요/,
+  );
+
+  const extensionOutdated = await diagnoseXgenCompatibility(
+    'https://xgen.example',
+    '',
+    {
+      fetchImpl: async () => new Response(JSON.stringify({
+        ...compatibleManifest,
+        contract: {
+          ...compatibleManifest.contract,
+          version: 2,
+          min_client_version: 2,
+          max_client_version: 2,
+        },
+      }), { status: 200 }),
+    },
+  );
+  assert.equal(extensionOutdated.status, 'extension_outdated');
+
+  const legacyRequests = [];
+  const legacy = await diagnoseXgenCompatibility(
+    'https://legacy-xgen.example',
+    '',
+    {
+      fetchImpl: async (url, init = {}) => {
+        legacyRequests.push({ url: String(url), method: init.method || 'GET' });
+        if (String(url).endsWith('/capabilities')) {
+          return new Response('', { status: 404 });
+        }
+        return new Response(JSON.stringify([]), { status: 200 });
+      },
+    },
+  );
+  assert.equal(legacy.status, 'legacy_unverified');
+  assert.equal(legacy.compatible, true);
+  assert.ok(legacyRequests.every(({ method }) => method === 'GET'));
+  assert.doesNotThrow(() => assertXgenCompatibility(legacy));
+
+  const authRequired = await diagnoseXgenCompatibility(
+    'https://xgen.example',
+    '',
+    {
+      fetchImpl: async () => new Response('', { status: 401 }),
+    },
+  );
+  assert.equal(authRequired.status, 'authentication_required');
+  assert.equal(authRequired.compatible, false);
+}
+
 async function main() {
   await testManifestPermissionContract();
   const { analyzeTrace, cleanup } = await loadTraceAnalyzer();
@@ -2267,7 +2427,16 @@ async function main() {
     requestHostPermissions,
     cleanup: cleanupPermissions,
   } = await loadPermissions();
+  const {
+    diagnoseXgenCompatibility,
+    assertXgenCompatibility,
+    cleanup: cleanupXgenCapabilities,
+  } = await loadXgenCapabilities();
   try {
+    await testXgenCompatibilityContract({
+      diagnoseXgenCompatibility,
+      assertXgenCompatibility,
+    });
     await testFramePermissionPolicy(requestHostPermissions);
     testAuthProfileResolution(authProfileResolution);
     testTraceFiltering(analyzeTrace);
@@ -2320,6 +2489,7 @@ async function main() {
     await cleanupApi();
     await cleanupAuthProfileResolution();
     await cleanupPermissions();
+    await cleanupXgenCapabilities();
   }
 
   console.log(

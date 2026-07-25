@@ -322,7 +322,7 @@ export function App() {
           </button>
 
           {/* Settings 아이콘 */}
-          <SettingsBar targetTabUrl={targetTabUrl} />
+          <SettingsBar targetTabId={targetTabId} targetTabUrl={targetTabUrl} />
 
           <div className="flex-1" />
 
