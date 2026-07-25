@@ -223,12 +223,32 @@ function waitForItem(items, predicate, label, timeoutMs = 5_000) {
   });
 }
 
+function readJsonRequest(req, callback) {
+  let rawBody = '';
+  req.setEncoding('utf8');
+  req.on('data', (chunk) => {
+    rawBody += chunk;
+  });
+  req.on('end', () => {
+    try {
+      callback(JSON.parse(rawBody || '{}'));
+    } catch {
+      callback({});
+    }
+  });
+}
+
 function startFixtureServer() {
   const commandResults = [];
   const chatRequests = [];
   const registrationRequests = [];
   const mergeRequests = [];
+  const collectionCreateRequests = [];
+  const sourcePreviewRequests = [];
+  const sourceAddRequests = [];
+  const collectionDeleteRequests = [];
   const registrationMode = { conflictNext: false };
+  const sourceAddMode = { failNext: false };
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url?.startsWith('/api/ai-chat/command-result/')) {
       const requestId = decodeURIComponent(req.url.split('/').pop() || '');
@@ -256,6 +276,119 @@ function startFixtureServer() {
       res.end(JSON.stringify([
         { service_id: '127_local_profile', name: '127 local profile', status: 'active' },
       ]));
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/api/tools/api-collections') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify([
+        {
+          collection_id: 'fixture-existing',
+          name: 'Fixture Existing',
+          tool_count: 3,
+          source_count: 1,
+        },
+      ]));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/tools/api-collections/preview') {
+      readJsonRequest(req, (body) => {
+        sourcePreviewRequests.push({ headers: req.headers, body });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          incoming_tool_count: 2,
+          conflicts: body.target_collection_id ? ['listItems'] : [],
+          edges_before: body.target_collection_id ? 1 : 0,
+          edges_after: body.target_collection_id ? 3 : 2,
+          edges_added: 2,
+          existing_total: body.target_collection_id ? 3 : 0,
+          spec_hash: 'fixture-openapi-hash',
+          ingest_stats: { inserted: 2 },
+          ingest_result: {
+            adapter: 'openapi',
+            ready: true,
+            issues: [],
+            capabilities: {
+              input_schema: true,
+              output_schema: true,
+            },
+            api_collection_execution_supported: true,
+          },
+          ingest_supported: true,
+          readiness_report: {
+            summary: {
+              readiness_score: 95,
+              status: 'ready',
+              tool_count: 2,
+            },
+            issues: [],
+          },
+        }));
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/tools/api-collections') {
+      readJsonRequest(req, (body) => {
+        collectionCreateRequests.push({ headers: req.headers, body });
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          collection_id: body.collection_id,
+          name: body.name,
+          tool_count: 0,
+          source_count: 0,
+        }));
+      });
+      return;
+    }
+
+    const sourceMatch = req.url?.match(/^\/api\/tools\/api-collections\/([^/]+)\/sources$/);
+    if (req.method === 'POST' && sourceMatch) {
+      const collectionId = decodeURIComponent(sourceMatch[1]);
+      readJsonRequest(req, (body) => {
+        sourceAddRequests.push({
+          collectionId,
+          headers: req.headers,
+          body,
+        });
+        if (sourceAddMode.failNext) {
+          sourceAddMode.failNext = false;
+          res.writeHead(422, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            detail: {
+              message: 'fixture source ingest rejected',
+              ingest_result: {
+                ready: false,
+                issues: [{ severity: 'blocker', code: 'fixture_rejected' }],
+              },
+            },
+          }));
+          return;
+        }
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          collection_id: collectionId,
+          name: 'Fixture OpenAPI Collection',
+          tool_count: 2,
+          source_count: 1,
+          ingest_result: {
+            adapter: 'openapi',
+            ready: true,
+          },
+        }));
+      });
+      return;
+    }
+
+    const deleteCollectionMatch = req.url?.match(/^\/api\/tools\/api-collections\/([^/]+)$/);
+    if (req.method === 'DELETE' && deleteCollectionMatch) {
+      collectionDeleteRequests.push({
+        collectionId: decodeURIComponent(deleteCollectionMatch[1]),
+        headers: req.headers,
+      });
+      res.writeHead(204);
+      res.end();
       return;
     }
 
@@ -517,7 +650,12 @@ function startFixtureServer() {
         chatRequests,
         registrationRequests,
         mergeRequests,
+        collectionCreateRequests,
+        sourcePreviewRequests,
+        sourceAddRequests,
+        collectionDeleteRequests,
         registrationMode,
+        sourceAddMode,
       });
     });
   });
@@ -831,6 +969,176 @@ async function verifyHarImportUi(extensionPage) {
   );
 }
 
+async function openOpenApiImport(extensionPage, targetPage) {
+  await clickSidepanelButton(
+    extensionPage,
+    targetPage,
+    'Open source import menu',
+    /소스 가져오기/,
+  );
+  await extensionPage.getByRole('button', { name: /OpenAPI/ }).click();
+  await extensionPage.getByTestId('openapi-import-panel').waitFor();
+}
+
+async function verifyOpenApiImportUi(
+  extensionPage,
+  targetPage,
+  collectionCreateRequests,
+  sourcePreviewRequests,
+  sourceAddRequests,
+  collectionDeleteRequests,
+  sourceAddMode,
+) {
+  await openOpenApiImport(extensionPage, targetPage);
+  let panel = extensionPage.getByTestId('openapi-import-panel');
+  const previewStart = sourcePreviewRequests.length;
+  await panel.getByTestId('openapi-url-input').fill(
+    'https://api.customer.test/openapi.json?apiKey=redacted',
+  );
+  await panel.getByRole('button', { name: '미리보기' }).click();
+  await panel.getByText(/민감 query key를 제거/).waitFor();
+  assert.equal(
+    sourcePreviewRequests.length,
+    previewStart,
+    'sensitive OpenAPI URL query must not reach XGEN',
+  );
+  await panel.getByTestId('openapi-url-input').fill(
+    'https://api.customer.test/openapi.json',
+  );
+  await panel.getByRole('button', { name: '미리보기' }).click();
+  await panel.getByText(/준비도 95/).waitFor();
+
+  const urlPreview = await waitForItem(
+    sourcePreviewRequests,
+    (entry) => entry.body?.source_url === 'https://api.customer.test/openapi.json',
+    'OpenAPI URL preview request',
+  );
+  assert.equal(urlPreview.body.format_hint, 'openapi');
+  assert.deepEqual(
+    urlPreview.body.required_capabilities,
+    ['input_schema', 'output_schema'],
+  );
+  assert.ok(!urlPreview.body.target_collection_id);
+
+  const createStart = collectionCreateRequests.length;
+  await panel.locator('input[placeholder="collection-id"]').fill('../invalid');
+  await panel.getByRole('button', { name: 'Collection에 등록' }).click();
+  await panel.getByText(/Collection ID는 영문 또는 숫자로 시작/).waitFor();
+  assert.equal(
+    collectionCreateRequests.length,
+    createStart,
+    'invalid Collection ID must not reach XGEN',
+  );
+  await panel.locator('input[placeholder="collection-id"]').fill('api-customer-test');
+  await panel.getByRole('button', { name: 'Collection에 등록' }).click();
+  await panel.getByText(/Collection 등록 완료: api-customer-test/).waitFor();
+  const created = await waitForItem(
+    collectionCreateRequests,
+    (entry) => entry.body?.collection_id === 'api-customer-test',
+    'OpenAPI Collection create request',
+  );
+  assert.equal(created.body.name, 'api.customer.test');
+  assert.equal(created.body.base_url, 'https://api.customer.test');
+  assert.deepEqual(created.body.domain_patterns, ['api.customer.test']);
+  const urlSource = await waitForItem(
+    sourceAddRequests,
+    (entry) => entry.collectionId === 'api-customer-test',
+    'OpenAPI URL source add request',
+  );
+  assert.equal(urlSource.body.source_url, 'https://api.customer.test/openapi.json');
+  assert.equal(urlSource.body.format_hint, 'openapi');
+  assert.equal(urlSource.body.auto_enrich, false);
+  await panel.getByRole('button', { name: '닫기' }).click();
+  await panel.waitFor({ state: 'detached' });
+
+  await openOpenApiImport(extensionPage, targetPage);
+  panel = extensionPage.getByTestId('openapi-import-panel');
+  await panel.getByRole('button', { name: 'JSON/YAML 파일' }).click();
+  await panel.getByTestId('openapi-file-input').setInputFiles({
+    name: 'sensitive-api.yaml',
+    mimeType: 'application/yaml',
+    buffer: Buffer.from(`
+openapi: 3.0.3
+info:
+  title: Sensitive URL Fixture
+  version: 1.0.0
+servers:
+  - url: https://yaml.customer.test/api?accessToken=redacted
+paths: {}
+`),
+  });
+  await panel.getByText(/문서 URL에서 민감정보를 제거/).waitFor();
+  await panel.getByTestId('openapi-file-input').setInputFiles({
+    name: 'fixture-api.yaml',
+    mimeType: 'application/yaml',
+    buffer: Buffer.from(`
+openapi: 3.0.3
+info:
+  title: Fixture YAML API
+  version: 1.0.0
+servers:
+  - url: https://yaml.customer.test/api
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+`),
+  });
+  await panel.getByText('Fixture YAML API').waitFor();
+  await panel.getByRole('button', { name: '기존 Collection' }).click();
+  await panel.locator('select').selectOption('fixture-existing');
+  await panel.getByRole('button', { name: '미리보기' }).click();
+  await panel.getByText(/이름 충돌 1/).waitFor();
+
+  const filePreview = await waitForItem(
+    sourcePreviewRequests,
+    (entry) => entry.body?.target_collection_id === 'fixture-existing',
+    'OpenAPI YAML preview request',
+  );
+  assert.equal(filePreview.body.spec?.openapi, '3.0.3');
+  assert.equal(filePreview.body.spec?.info?.title, 'Fixture YAML API');
+  assert.equal(filePreview.body.source_url, undefined);
+
+  await panel.getByRole('button', { name: 'Collection에 등록' }).click();
+  await panel.getByText(/Collection 등록 완료: fixture-existing/).waitFor();
+  const fileSource = await waitForItem(
+    sourceAddRequests,
+    (entry) => entry.collectionId === 'fixture-existing',
+    'OpenAPI YAML source add request',
+  );
+  assert.equal(fileSource.body.spec?.openapi, '3.0.3');
+  assert.equal(fileSource.body.label, 'fixture-yaml-api');
+  await panel.getByRole('button', { name: '닫기' }).click();
+  await panel.waitFor({ state: 'detached' });
+
+  await openOpenApiImport(extensionPage, targetPage);
+  panel = extensionPage.getByTestId('openapi-import-panel');
+  await panel.getByTestId('openapi-url-input').fill(
+    'https://failure.customer.test/openapi.json',
+  );
+  await panel.getByRole('button', { name: '미리보기' }).click();
+  await panel.getByText(/준비도 95/).waitFor();
+  sourceAddMode.failNext = true;
+  await panel.getByRole('button', { name: 'Collection에 등록' }).click();
+  await panel.getByText(/fixture source ingest rejected/).waitFor();
+  await waitForItem(
+    collectionDeleteRequests,
+    (entry) => entry.collectionId === 'failure-customer-test',
+    'failed OpenAPI import cleanup',
+  );
+  await panel.getByRole('button', { name: '닫기' }).click();
+  await panel.waitFor({ state: 'detached' });
+}
+
 async function verifyDevXgenOriginDetection(extensionPage, browserContext) {
   await browserContext.route('https://dev-xgen.x2bee.com/**', async (route) => {
     await route.fulfill({
@@ -1118,7 +1426,12 @@ async function main() {
     chatRequests,
     registrationRequests,
     mergeRequests,
+    collectionCreateRequests,
+    sourcePreviewRequests,
+    sourceAddRequests,
+    collectionDeleteRequests,
     registrationMode,
+    sourceAddMode,
   } = await startFixtureServer();
   let context;
   let runtimeError;
@@ -1179,6 +1492,15 @@ async function main() {
     await verifyRelayCommandBridge(extensionPage, targetPage, commandResults);
     await verifySidepanelChatRelay(extensionPage, targetPage, distractorPage, commandResults, chatRequests);
     await verifyHarImportUi(extensionPage);
+    await verifyOpenApiImportUi(
+      extensionPage,
+      targetPage,
+      collectionCreateRequests,
+      sourcePreviewRequests,
+      sourceAddRequests,
+      collectionDeleteRequests,
+      sourceAddMode,
+    );
     await wait(2_200);
 
     const firstApis = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
@@ -1311,6 +1633,7 @@ async function main() {
       'stored server cookie auth verified',
       'page_command relay callback verified',
       'sidepanel chat relay verified',
+      'OpenAPI URL/YAML import and rollback verified',
       'capture result registration verified',
       'capture result merge conflict verified',
       'privacy-safe HAR import verified',

@@ -120,7 +120,7 @@ npm run verify:pathfinder
 목표: 브라우저 runtime trace만으로 충분하지 않은 환경도 같은 Collection artifact로 수렴시킨다.
 
 - [x] privacy-safe HAR 1.2 import
-- [ ] OpenAPI URL/file import
+- [x] OpenAPI/Swagger URL 및 JSON/YAML file import
 - [ ] GraphQL introspection
 - [ ] Postman Collection
 - [ ] MCP tool catalog

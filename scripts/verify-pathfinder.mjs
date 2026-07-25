@@ -168,6 +168,11 @@ async function loadApiClient() {
   return {
     createCollectionFromTrace: mod.createCollectionFromTrace,
     mergeCollectionFromTrace: mod.mergeCollectionFromTrace,
+    listApiCollections: mod.listApiCollections,
+    previewOpenApiSource: mod.previewOpenApiSource,
+    createApiCollection: mod.createApiCollection,
+    addOpenApiSource: mod.addOpenApiSource,
+    deleteApiCollection: mod.deleteApiCollection,
     cleanup: () => rm(tmpDir, { recursive: true, force: true }),
   };
 }
@@ -1014,6 +1019,132 @@ async function testCollectionFromTraceApi(createCollectionFromTrace, mergeCollec
   });
 }
 
+async function testOpenApiCollectionApi({
+  listApiCollections,
+  previewOpenApiSource,
+  createApiCollection,
+  addOpenApiSource,
+  deleteApiCollection,
+}) {
+  const observed = [];
+  await withMockFetch(async (url, init) => {
+    const requestUrl = String(url);
+    const body = init.body ? JSON.parse(String(init.body)) : undefined;
+    observed.push({ requestUrl, init, body });
+    if (init.method === 'DELETE') return new Response(null, { status: 204 });
+    if (!init.method) {
+      return new Response(JSON.stringify([
+        { collection_id: 'existing', name: 'Existing', tool_count: 1 },
+      ]), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    if (requestUrl.endsWith('/preview')) {
+      return new Response(JSON.stringify({
+        incoming_tool_count: 1,
+        conflicts: [],
+        edges_before: 0,
+        edges_after: 0,
+        edges_added: 0,
+        existing_total: 0,
+        spec_hash: 'hash',
+        ingest_stats: {},
+        ingest_result: { adapter: 'openapi', ready: true, issues: [] },
+        ingest_supported: true,
+        readiness_report: null,
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return new Response(JSON.stringify({
+      collection_id: 'catalog',
+      name: 'Catalog',
+      tool_count: requestUrl.endsWith('/sources') ? 1 : 0,
+    }), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    });
+  }, async () => {
+    const source = {
+      spec: {
+        openapi: '3.0.3',
+        info: { title: 'Catalog', version: '1.0.0' },
+        paths: {},
+      },
+    };
+    const collections = await listApiCollections('https://xgen.example', 'auth-value');
+    assert.equal(collections[0].collection_id, 'existing');
+    await previewOpenApiSource(
+      'https://xgen.example',
+      'auth-value',
+      source,
+      { targetCollectionId: 'existing', label: 'catalog' },
+    );
+    await createApiCollection('https://xgen.example', 'auth-value', {
+      collectionId: 'catalog',
+      name: 'Catalog',
+      baseUrl: 'https://api.example',
+      authProfileId: 'profile-1',
+      domainPatterns: ['api.example'],
+    });
+    await addOpenApiSource('https://xgen.example', 'auth-value', 'catalog/name', {
+      ...source,
+      label: 'catalog',
+    });
+    await deleteApiCollection('https://xgen.example', 'auth-value', 'catalog/name');
+  });
+
+  assert.equal(observed.length, 5);
+  assert.equal(observed[0].requestUrl, 'https://xgen.example/api/tools/api-collections');
+  assert.equal(observed[0].init.headers.Authorization, 'Bearer auth-value');
+  assert.equal(
+    observed[1].requestUrl,
+    'https://xgen.example/api/tools/api-collections/preview',
+  );
+  assert.equal(observed[1].body.format_hint, 'openapi');
+  assert.deepEqual(observed[1].body.required_capabilities, [
+    'input_schema',
+    'output_schema',
+  ]);
+  assert.equal(observed[1].body.target_collection_id, 'existing');
+  assert.equal(observed[2].body.auth_profile_id, 'profile-1');
+  assert.deepEqual(observed[2].body.domain_patterns, ['api.example']);
+  assert.equal(
+    observed[3].requestUrl,
+    'https://xgen.example/api/tools/api-collections/catalog%2Fname/sources',
+  );
+  assert.equal(observed[3].body.auto_enrich, false);
+  assert.equal(observed[4].init.method, 'DELETE');
+  assert.equal(
+    observed[4].requestUrl,
+    'https://xgen.example/api/tools/api-collections/catalog%2Fname',
+  );
+
+  await withMockFetch(
+    async () => new Response(JSON.stringify({
+      detail: {
+        message: 'unsupported source',
+        ingest_result: { ready: false },
+      },
+    }), {
+      status: 422,
+      headers: { 'content-type': 'application/json' },
+    }),
+    async () => {
+      await assert.rejects(
+        () => previewOpenApiSource(
+          'https://xgen.example',
+          '',
+          { sourceUrl: 'https://api.example/swagger-ui' },
+        ),
+        /OpenAPI 미리보기 실패: 422 unsupported source/,
+      );
+    },
+  );
+}
+
 async function main() {
   const { analyzeTrace, cleanup } = await loadTraceAnalyzer();
   const {
@@ -1027,6 +1158,11 @@ async function main() {
   const {
     createCollectionFromTrace,
     mergeCollectionFromTrace,
+    listApiCollections,
+    previewOpenApiSource,
+    createApiCollection,
+    addOpenApiSource,
+    deleteApiCollection,
     cleanup: cleanupApi,
   } = await loadApiClient();
   try {
@@ -1051,6 +1187,13 @@ async function main() {
     );
     testHarImportValidationAndCaps(importHarArchive);
     await testCollectionFromTraceApi(createCollectionFromTrace, mergeCollectionFromTrace);
+    await testOpenApiCollectionApi({
+      listApiCollections,
+      previewOpenApiSource,
+      createApiCollection,
+      addOpenApiSource,
+      deleteApiCollection,
+    });
   } finally {
     await cleanup();
     await cleanupRegistration();

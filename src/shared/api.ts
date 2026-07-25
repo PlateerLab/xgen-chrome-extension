@@ -206,6 +206,192 @@ export interface FromTraceSuccess {
 
 export type FromTraceResult = FromTraceSuccess | FromTraceConflict;
 
+export interface ApiCollectionSummary {
+  collection_id: string;
+  name: string;
+  tool_count?: number;
+  source_count?: number;
+  auth_profile_id?: string | null;
+}
+
+export interface OpenApiSourceInput {
+  sourceUrl?: string;
+  spec?: Record<string, unknown>;
+}
+
+export interface OpenApiPreviewResult {
+  incoming_tool_count: number;
+  conflicts: string[];
+  edges_before: number;
+  edges_after: number;
+  edges_added: number;
+  existing_total: number;
+  spec_hash: string;
+  ingest_stats: Record<string, unknown>;
+  ingest_result: {
+    adapter?: string;
+    ready?: boolean;
+    issues?: Array<{
+      severity?: string;
+      code?: string;
+      message?: string;
+    }>;
+    capabilities?: Record<string, unknown>;
+    api_collection_execution_supported?: boolean;
+  };
+  ingest_supported: boolean;
+  readiness_report?: {
+    summary?: {
+      readiness_score?: number;
+      status?: string;
+      tool_count?: number;
+    };
+    issues?: Array<{
+      severity?: string;
+      code?: string;
+      message?: string;
+    }>;
+  } | null;
+}
+
+export interface CreateApiCollectionInput {
+  collectionId: string;
+  name: string;
+  description?: string;
+  baseUrl?: string;
+  authProfileId?: string;
+  domainPatterns?: string[];
+}
+
+export interface AddOpenApiSourceInput extends OpenApiSourceInput {
+  label: string;
+}
+
+async function apiError(response: Response, fallback: string): Promise<Error> {
+  const body = await response.json().catch(() => null);
+  const detail = body?.detail ?? body;
+  const message = typeof detail === 'string'
+    ? detail
+    : typeof detail?.message === 'string'
+      ? detail.message
+      : response.statusText;
+  return new Error(`${fallback}: ${response.status} ${message}`.trim());
+}
+
+function authenticatedJsonHeaders(token: string): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
+function openApiSourceBody(source: OpenApiSourceInput): Record<string, unknown> {
+  return {
+    ...(source.sourceUrl ? { source_url: source.sourceUrl } : {}),
+    ...(source.spec ? { spec: source.spec } : {}),
+    format_hint: 'openapi',
+    required_capabilities: ['input_schema', 'output_schema'],
+  };
+}
+
+export async function listApiCollections(
+  serverUrl: string,
+  token: string,
+): Promise<ApiCollectionSummary[]> {
+  const response = await fetch(`${serverUrl}/api/tools/api-collections`, {
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (!response.ok) throw await apiError(response, 'Collection 목록 조회 실패');
+  return response.json();
+}
+
+export async function previewOpenApiSource(
+  serverUrl: string,
+  token: string,
+  source: OpenApiSourceInput,
+  options: { targetCollectionId?: string; label?: string } = {},
+): Promise<OpenApiPreviewResult> {
+  const response = await fetch(`${serverUrl}/api/tools/api-collections/preview`, {
+    method: 'POST',
+    headers: authenticatedJsonHeaders(token),
+    body: JSON.stringify({
+      ...openApiSourceBody(source),
+      ...(options.targetCollectionId
+        ? { target_collection_id: options.targetCollectionId }
+        : {}),
+      label: options.label || 'preview',
+      on_conflict: 'prefix',
+    }),
+  });
+  if (!response.ok) throw await apiError(response, 'OpenAPI 미리보기 실패');
+  return response.json();
+}
+
+export async function createApiCollection(
+  serverUrl: string,
+  token: string,
+  input: CreateApiCollectionInput,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(`${serverUrl}/api/tools/api-collections`, {
+    method: 'POST',
+    headers: authenticatedJsonHeaders(token),
+    body: JSON.stringify({
+      collection_id: input.collectionId,
+      name: input.name,
+      description: input.description || '',
+      tags: ['pathfinder', 'openapi'],
+      base_url: input.baseUrl || '',
+      ...(input.authProfileId ? { auth_profile_id: input.authProfileId } : {}),
+      visibility: 'private',
+      domain_patterns: input.domainPatterns || [],
+    }),
+  });
+  if (!response.ok) throw await apiError(response, 'Collection 생성 실패');
+  return response.json();
+}
+
+export async function addOpenApiSource(
+  serverUrl: string,
+  token: string,
+  collectionId: string,
+  input: AddOpenApiSourceInput,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(
+    `${serverUrl}/api/tools/api-collections/${encodeURIComponent(collectionId)}/sources`,
+    {
+      method: 'POST',
+      headers: authenticatedJsonHeaders(token),
+      body: JSON.stringify({
+        ...openApiSourceBody(input),
+        label: input.label,
+        on_conflict: 'prefix',
+        auto_enrich: false,
+      }),
+    },
+  );
+  if (!response.ok) throw await apiError(response, 'OpenAPI source 등록 실패');
+  return response.json();
+}
+
+export async function deleteApiCollection(
+  serverUrl: string,
+  token: string,
+  collectionId: string,
+): Promise<void> {
+  const response = await fetch(
+    `${serverUrl}/api/tools/api-collections/${encodeURIComponent(collectionId)}`,
+    {
+      method: 'DELETE',
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    },
+  );
+  if (!response.ok) throw await apiError(response, '빈 Collection 정리 실패');
+}
+
 function buildFromTraceBody(payload: FromTraceRequest): Record<string, unknown> {
   const body: Record<string, unknown> = {
     host: payload.host,

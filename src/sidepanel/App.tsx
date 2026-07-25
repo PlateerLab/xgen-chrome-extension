@@ -7,7 +7,8 @@ import { SettingsBar } from './components/SettingsBar';
 import { PlanQuestionPopup } from './components/PlanQuestionPopup';
 import { useElementPicker, PickerResultPanel } from './components/ElementPickerButton';
 import { SessionResultPanel } from './components/SessionResultPanel';
-import { HarImportButton } from './components/HarImportButton';
+import { SourceImportButton } from './components/SourceImportButton';
+import { OpenApiImportPanel } from './components/OpenApiImportPanel';
 import { MenuDrawer } from './components/MenuDrawer';
 import { ProductInbox } from './components/ProductInbox';
 import type { SessionResult } from './hooks/useCaptureSession';
@@ -34,6 +35,7 @@ export function App() {
   const captureSession = useCaptureSession(targetTabId);
   const [importedResult, setImportedResult] = useState<SessionResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [openApiImportOpen, setOpenApiImportOpen] = useState(false);
   const [authCapturing, setAuthCapturing] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [view, setView] = useState<SidePanelView>('chat');
@@ -208,11 +210,22 @@ export function App() {
             )}
           </button>
 
-          <HarImportButton
+          <SourceImportButton
             targetTabId={targetTabId}
-            disabled={captureSession.active || captureSession.pending}
+            disabled={
+              captureSession.active
+              || captureSession.pending
+              || openApiImportOpen
+            }
+            onOpenApiRequested={() => {
+              setImportedResult(null);
+              captureSession.dismissResult();
+              setImportError(null);
+              setOpenApiImportOpen(true);
+            }}
             onImported={(result) => {
               setImportError(null);
+              setOpenApiImportOpen(false);
               captureSession.dismissResult();
               setImportedResult(result);
             }}
@@ -279,6 +292,13 @@ export function App() {
 
       {view === 'chat' && (
       <>
+      {openApiImportOpen && (
+        <OpenApiImportPanel
+          targetTabId={targetTabId}
+          onDismiss={() => setOpenApiImportOpen(false)}
+        />
+      )}
+
       {/* Picker 결과 패널 (있을 때만) */}
       {picker.result && (
         <PickerResultPanel
@@ -329,7 +349,7 @@ export function App() {
       {importError && (
         <div className="border-b border-red-200 bg-red-50 px-3 py-1.5 flex items-center gap-2">
           <span className="text-[11px] text-red-700 flex-1">
-            HAR 가져오기 오류: {importError}
+            소스 가져오기 오류: {importError}
           </span>
           <button
             onClick={() => setImportError(null)}

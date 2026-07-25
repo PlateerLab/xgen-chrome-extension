@@ -80,6 +80,76 @@
         "needle": "/from-trace$/"
       },
       "devProbe": false
+    },
+    {
+      "id": "collection_list",
+      "method": "GET",
+      "path": "/api/tools/api-collections",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function listApiCollections("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/tools/api-collections'"
+      },
+      "devProbe": true
+    },
+    {
+      "id": "collection_create",
+      "method": "POST",
+      "path": "/api/tools/api-collections",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function createApiCollection("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "collectionCreateRequests.push"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_source_preview",
+      "method": "POST",
+      "path": "/api/tools/api-collections/preview",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function previewOpenApiSource("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "sourcePreviewRequests.push"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_source_add",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/sources",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function addOpenApiSource("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "sourceAddRequests.push"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_delete",
+      "method": "DELETE",
+      "path": "/api/tools/api-collections/{collectionId}",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function deleteApiCollection("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "collectionDeleteRequests.push"
+      },
+      "devProbe": false
     }
   ]
 }

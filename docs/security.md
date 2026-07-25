@@ -47,6 +47,13 @@ HAR 파일은 브라우저 개발자 도구가 인증 헤더, 쿠키 및 응답 
 Collection payload에 넣지 않는다. 상세한 지원 범위와 제한은
 [HAR 가져오기](har-import.md)를 따른다.
 
+OpenAPI URL 가져오기는 브라우저가 문서를 직접 fetch하지 않고 인증된 XGEN
+backend의 source resolver를 사용한다. 고객사 내부망 API를 지원하기 위해 XGEN
+배포망에서 접근 가능한 private host도 대상이 될 수 있으므로, URL import 권한과
+egress 정책은 XGEN 운영 경계에서 제한해야 한다. Pathfinder는 URL userinfo를
+허용하지 않으며 파일 import는 5MB와 YAML alias 수를 제한한다. 자세한 흐름은
+[OpenAPI 가져오기](openapi-import.md)를 따른다.
+
 ## 남는 위험
 
 캡처 세션 중에는 브라우저 요청과 응답 원문이 extension 메모리에 일시적으로 존재한다. 등록 payload를 정제하는 것만으로 캡처 단계의 노출 위험이 없어지는 것은 아니다. 세션 결과는 sidepanel이 소비할 때까지 또는 최대 5분 동안 메모리에 남을 수 있으므로 민감 화면에서는 캡처를 시작하지 않아야 한다.
