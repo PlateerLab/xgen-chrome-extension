@@ -20,6 +20,7 @@
 | `POST /api/tools/api-collections/{id}/from-trace` | 기존 Collection과 trace 병합 |
 | `POST /api/tools/api-collections/preview` | OpenAPI/GraphQL 등 source adapter capability와 readiness 확인 |
 | `POST /api/tools/api-collections/{id}/sources` | 검증된 범용 source를 Collection에 추가 |
+| `GET /api/tools/api-collections/{id}` | 등록 후 graph build, readiness 및 semantic/edge 품질 상태 확인 |
 | `POST /api/tools/api-collections/{id}/run` | Collection tool 실행 |
 | `/api/session-station/v1/auth-profiles` | 대상 host 인증 profile 조회/생성 |
 
@@ -53,6 +54,13 @@ Pathfinder는 XGEN origin별 token을 분리한다. 서버 URL은 XGEN origin으
 - 연결할 `auth_profile_id`
 
 기존 Collection이 있을 때는 자동 overwrite하지 않고 충돌 결과를 표시한 뒤 사용자가 merge를 선택하도록 한다.
+
+등록이 성공하면 Pathfinder는 Collection 상세를 짧게 polling해 tool/source 수와
+`graph_tool_call_version`, `collection_graph_version`, `readiness_summary`,
+`semantic_summary`, `edge_quality_summary`를 표시한다. 예상 tool 수보다 적거나
+graph metadata가 아직 없으면 경고 상태로 남긴다. 상세 endpoint가 `404` 또는
+`405`를 반환하면 등록 실패로 오해하지 않고 backend contract 호환성 부족으로
+분류한다.
 
 ## graph-tool-call 연결
 

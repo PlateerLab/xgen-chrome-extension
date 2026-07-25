@@ -17,6 +17,7 @@ import {
   prepareOpenApiUrl,
   type PreparedOpenApiSource,
 } from '../lib/openapi-import';
+import { CollectionBuildStatus } from './CollectionBuildStatus';
 
 interface Props {
   targetTabId?: number | null;
@@ -536,9 +537,16 @@ export function OpenApiImportPanel({
         </div>
       )}
       {success && (
-        <div className="mb-2 bg-green-50 px-2 py-1.5 text-[10px] text-green-700">
-          Collection 등록 완료: {success.collectionId} · 도구 {success.toolCount}개
-        </div>
+        <>
+          <div className="mb-2 bg-green-50 px-2 py-1.5 text-[10px] text-green-700">
+            Collection 등록 완료: {success.collectionId} · 도구 {success.toolCount}개
+          </div>
+          <CollectionBuildStatus
+            collectionId={success.collectionId}
+            expectedToolCount={success.toolCount}
+            targetTabId={targetTabId}
+          />
+        </>
       )}
 
       <div className="flex items-center justify-between">

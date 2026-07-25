@@ -302,6 +302,7 @@ function startFixtureServer() {
   const mcpSourceAddRequests = [];
   const registrationMode = { conflictNext: false };
   const sourceAddMode = { failNext: false };
+  const collectionDetailMode = { failNext: false };
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url?.startsWith('/api/ai-chat/command-result/')) {
       const requestId = decodeURIComponent(req.url.split('/').pop() || '');
@@ -518,6 +519,46 @@ function startFixtureServer() {
           },
         }));
       });
+      return;
+    }
+
+    const collectionDetailMatch = req.url?.match(
+      /^\/api\/tools\/api-collections\/([^/]+)$/,
+    );
+    if (req.method === 'GET' && collectionDetailMatch) {
+      if (collectionDetailMode.failNext) {
+        collectionDetailMode.failNext = false;
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ detail: 'fixture collection detail unsupported' }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        collection_id: decodeURIComponent(collectionDetailMatch[1]),
+        name: 'Fixture Collection',
+        tool_count: 256,
+        edge_count: 12,
+        source_count: 1,
+        graph_tool_call_version: '0.35.0',
+        collection_graph_version: 2,
+        readiness_summary: {
+          readiness_score: 96,
+          status: 'ready',
+          tool_count: 256,
+        },
+        semantic_summary: {
+          canonical_action_known_rate: 0.98,
+          primary_resource_assigned_rate: 0.91,
+          path_module_assigned_rate: 1,
+        },
+        edge_quality_summary: {
+          total: 12,
+          strong_deterministic_evidence: 9,
+          strong_deterministic_evidence_rate: 0.75,
+          visual_edge_candidate_count: 9,
+        },
+        workspace_status: 'ready',
+      }));
       return;
     }
 
@@ -799,6 +840,7 @@ function startFixtureServer() {
         mcpSourceAddRequests,
         registrationMode,
         sourceAddMode,
+        collectionDetailMode,
       });
     });
   });
@@ -1886,6 +1928,7 @@ async function verifyGraphQLImportUi(
   collectionCreateRequests,
   sourcePreviewRequests,
   sourceAddRequests,
+  collectionDetailMode,
 ) {
   await openGraphQLImport(extensionPage, targetPage);
   const sourcePanel = extensionPage.getByTestId('graphql-import-panel');
@@ -1968,6 +2011,15 @@ async function verifyGraphQLImportUi(
 
   await panel.getByRole('button', { name: 'Collection에 등록' }).click();
   await panel.getByText(/Collection 등록 완료: graphql-customer-test/).waitFor();
+  const buildStatus = panel.getByTestId('collection-build-status');
+  await buildStatus.getByText('graph build 완료').waitFor();
+  await buildStatus.getByText(/graph-tool-call 0\.35\.0 · graph v2/).waitFor();
+  await buildStatus.getByText(/action 98% · resource 91% · module 100%/).waitFor();
+  collectionDetailMode.failNext = true;
+  await buildStatus.getByRole('button', { name: '새로고침' }).click();
+  await buildStatus.getByText(
+    '현재 XGEN backend가 Collection build 상태 조회를 지원하지 않습니다.',
+  ).waitFor();
   const created = await waitForItem(
     collectionCreateRequests,
     (entry) => entry.body?.collection_id === 'graphql-customer-test',
@@ -2296,6 +2348,7 @@ async function main() {
     collectionDeleteRequests,
     registrationMode,
     sourceAddMode,
+    collectionDetailMode,
     mcpSessionRequests,
     mcpSourcePreviewRequests,
     mcpSourceAddRequests,
@@ -2384,6 +2437,7 @@ async function main() {
       collectionCreateRequests,
       sourcePreviewRequests,
       sourceAddRequests,
+      collectionDetailMode,
     );
     await verifyManualToolContractUi(
       extensionPage,

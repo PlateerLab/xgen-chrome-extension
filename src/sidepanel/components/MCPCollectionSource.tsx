@@ -9,6 +9,7 @@ import {
   type MCPStationSession,
 } from '../../shared/api';
 import type { ExtensionMessage } from '../../shared/types';
+import { CollectionBuildStatus } from './CollectionBuildStatus';
 
 interface Props {
   onBack: () => void;
@@ -315,9 +316,12 @@ export function MCPCollectionSource({ onBack }: Props) {
         )}
 
         {action.status === 'success' && (
-          <div className="border border-green-200 bg-green-50 px-2.5 py-2 text-[11px] text-green-700">
-            {action.message}
-          </div>
+          <>
+            <div className="border border-green-200 bg-green-50 px-2.5 py-2 text-[11px] text-green-700">
+              {action.message}
+            </div>
+            <CollectionBuildStatus collectionId={collectionId} />
+          </>
         )}
         {action.status === 'error' && (
           <div className="border border-red-200 bg-red-50 px-2.5 py-2 text-[11px] text-red-700">

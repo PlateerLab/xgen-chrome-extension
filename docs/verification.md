@@ -63,6 +63,8 @@ xvfb-run -a npm run verify:pathfinder:runtime
 - 수동 Tool Contract 작성, XGEN preview 및 Collection source 등록
 - Postman 파일 분석, Base URL 보완, XGEN preview 및 Collection source 등록
 - GraphQL introspection 분석, XGEN preview 및 endpoint/capability 포함 source 등록
+- Collection 등록 후 graph build/readiness/semantic/edge 품질 상태와 구버전
+  backend의 detail endpoint 미지원 분류
 - capture 결과의 Collection 등록
 - Collection 충돌 및 merge UI
 - host/cookie 최초 미승인 readiness와 persisted 승인 상태

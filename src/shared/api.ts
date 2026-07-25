@@ -214,6 +214,32 @@ export interface ApiCollectionSummary {
   auth_profile_id?: string | null;
 }
 
+export interface ApiCollectionDetail extends ApiCollectionSummary {
+  edge_count?: number;
+  version?: number;
+  graph_tool_call_version?: string | null;
+  collection_graph_version?: number | string | null;
+  readiness_summary?: {
+    readiness_score?: number;
+    status?: string;
+    tool_count?: number;
+  };
+  semantic_summary?: {
+    canonical_action_known_rate?: number;
+    primary_resource_assigned_rate?: number;
+    path_module_assigned_rate?: number;
+  };
+  edge_quality_summary?: {
+    total?: number;
+    strong_deterministic_evidence?: number;
+    strong_deterministic_evidence_rate?: number;
+    visual_edge_candidate_count?: number;
+  };
+  workspace_status?: string;
+  primary_action?: string;
+  next_actions?: string[];
+}
+
 export interface OpenApiSourceInput {
   sourceUrl?: string;
   spec?: Record<string, unknown>;
@@ -361,6 +387,23 @@ export async function listApiCollections(
     },
   });
   if (!response.ok) throw await apiError(response, 'Collection 목록 조회 실패');
+  return response.json();
+}
+
+export async function getApiCollection(
+  serverUrl: string,
+  token: string,
+  collectionId: string,
+): Promise<ApiCollectionDetail> {
+  const response = await fetch(
+    `${serverUrl}/api/tools/api-collections/${encodeURIComponent(collectionId)}`,
+    {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    },
+  );
+  if (!response.ok) throw await apiError(response, 'Collection 상태 조회 실패');
   return response.json();
 }
 

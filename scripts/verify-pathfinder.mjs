@@ -334,6 +334,7 @@ async function loadApiClient() {
     createCollectionFromTrace: mod.createCollectionFromTrace,
     mergeCollectionFromTrace: mod.mergeCollectionFromTrace,
     listApiCollections: mod.listApiCollections,
+    getApiCollection: mod.getApiCollection,
     previewOpenApiSource: mod.previewOpenApiSource,
     previewCollectionSource: mod.previewCollectionSource,
     createApiCollection: mod.createApiCollection,
@@ -1907,6 +1908,7 @@ async function testOpenApiCollectionApi({
 }
 
 async function testGenericCollectionSourceApi({
+  getApiCollection,
   previewCollectionSource,
   addCollectionSource,
 }) {
@@ -1914,7 +1916,7 @@ async function testGenericCollectionSourceApi({
   await withMockFetch(async (url, init) => {
     observed.push({
       url: String(url),
-      body: JSON.parse(String(init.body)),
+      body: init.body ? JSON.parse(String(init.body)) : undefined,
       headers: init.headers,
     });
     return new Response(JSON.stringify({
@@ -1939,6 +1941,11 @@ async function testGenericCollectionSourceApi({
       headers: { 'content-type': 'application/json' },
     });
   }, async () => {
+    await getApiCollection(
+      'https://xgen.example',
+      'auth-value',
+      'graphql/catalog',
+    );
     const source = {
       spec: { data: { __schema: { types: [] } } },
       formatHint: 'graphql-introspection',
@@ -1959,25 +1966,30 @@ async function testGenericCollectionSourceApi({
     );
   });
 
-  assert.equal(observed.length, 2);
+  assert.equal(observed.length, 3);
   assert.equal(
     observed[0].url,
-    'https://xgen.example/api/tools/api-collections/preview',
+    'https://xgen.example/api/tools/api-collections/graphql%2Fcatalog',
   );
   assert.equal(observed[0].headers.Authorization, 'Bearer auth-value');
-  assert.equal(observed[0].body.format_hint, 'graphql-introspection');
-  assert.equal(observed[0].body.endpoint_url, 'https://api.example/graphql');
-  assert.equal(observed[0].body.target_collection_id, 'existing');
+  assert.equal(
+    observed[1].url,
+    'https://xgen.example/api/tools/api-collections/preview',
+  );
+  assert.equal(observed[1].headers.Authorization, 'Bearer auth-value');
+  assert.equal(observed[1].body.format_hint, 'graphql-introspection');
+  assert.equal(observed[1].body.endpoint_url, 'https://api.example/graphql');
+  assert.equal(observed[1].body.target_collection_id, 'existing');
   assert.deepEqual(
-    observed[0].body.required_capabilities,
+    observed[1].body.required_capabilities,
     ['input_schema', 'output_schema'],
   );
   assert.equal(
-    observed[1].url,
+    observed[2].url,
     'https://xgen.example/api/tools/api-collections/graphql%2Fcatalog/sources',
   );
-  assert.equal(observed[1].body.label, 'graphql');
-  assert.equal(observed[1].body.auto_enrich, false);
+  assert.equal(observed[2].body.label, 'graphql');
+  assert.equal(observed[2].body.auto_enrich, false);
 }
 
 async function main() {
@@ -2008,6 +2020,7 @@ async function main() {
     createCollectionFromTrace,
     mergeCollectionFromTrace,
     listApiCollections,
+    getApiCollection,
     previewOpenApiSource,
     previewCollectionSource,
     createApiCollection,
@@ -2052,6 +2065,7 @@ async function main() {
       deleteApiCollection,
     });
     await testGenericCollectionSourceApi({
+      getApiCollection,
       previewCollectionSource,
       addCollectionSource,
     });

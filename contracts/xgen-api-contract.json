@@ -156,8 +156,12 @@
       "method": "GET",
       "path": "/api/tools/api-collections/{collectionId}",
       "client": {
-        "file": "scripts/verify-xgen-dev.mjs",
-        "needle": "jsonRequest(`/api/tools/api-collections/${encodedId}`)"
+        "file": "src/shared/api.ts",
+        "needle": "function getApiCollection("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "const collectionDetailMatch"
       },
       "devProbe": false
     },

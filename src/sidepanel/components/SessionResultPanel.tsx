@@ -5,6 +5,7 @@ import { buildTraceRegistrationPayload } from '../lib/trace-registration';
 import { createCollectionFromTrace, mergeCollectionFromTrace } from '../../shared/api';
 import type { FromTraceRequest } from '../../shared/api';
 import type { ExtensionMessage } from '../../shared/types';
+import { CollectionBuildStatus } from './CollectionBuildStatus';
 
 interface Props {
   result: SessionResult;
@@ -351,10 +352,17 @@ export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
 
       {/* 등록 상태 */}
       {registerState.status === 'success' && (
-        <div className="mt-2 px-2 py-1.5 bg-green-50 border border-green-200 rounded text-[11px] text-green-700">
-          ✓ 컬렉션 등록 완료: <span className="font-mono">{registerState.collectionId}</span>
-          {' '}({registerState.toolCount}개 도구)
-        </div>
+        <>
+          <div className="mt-2 px-2 py-1.5 bg-green-50 border border-green-200 rounded text-[11px] text-green-700">
+            ✓ 컬렉션 등록 완료: <span className="font-mono">{registerState.collectionId}</span>
+            {' '}({registerState.toolCount}개 도구)
+          </div>
+          <CollectionBuildStatus
+            collectionId={registerState.collectionId}
+            expectedToolCount={registerState.toolCount}
+            targetTabId={targetTabId}
+          />
+        </>
       )}
       {registerState.status === 'conflict' && (
         <div className="mt-2 px-2 py-1.5 bg-amber-50 border border-amber-200 rounded text-[11px] text-amber-700">

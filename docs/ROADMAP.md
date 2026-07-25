@@ -95,14 +95,14 @@ npm run verify:pathfinder
 
 ## P4. XGEN Integration
 
-상태: `planned`
+상태: `in progress`
 
 목표: 캡처한 API가 실제 XGEN에서 Collection build, 검색, plan 및 read-only 실행까지 이어지는 것을 검증한다.
 
 - [ ] capture → Collection create/merge dev 검증
 - [ ] auth profile 자동 연결과 갱신
-- [ ] graph build status 추적
-- [ ] readiness, semantic summary 및 edge quality 표시
+- [x] Collection 등록 직후 graph build status 추적
+- [x] readiness, semantic summary 및 edge quality 표시
 - [ ] Quality Lab search/plan/read-only execute
 - [ ] backend capability와 extension contract 버전 진단
 - [x] 임시 Collection preview/build/search/plan/cleanup T2 acceptance 자동화
