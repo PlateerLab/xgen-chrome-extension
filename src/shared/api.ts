@@ -267,6 +267,44 @@ export interface AddOpenApiSourceInput extends OpenApiSourceInput {
   label: string;
 }
 
+export interface MCPStationSession {
+  session_id: string;
+  session_name?: string;
+  status?: string;
+  mcp_initialized?: boolean;
+  server_type?: string;
+  tool_count?: number;
+  is_shared?: boolean;
+}
+
+export interface MCPSourcePreview {
+  incoming_tool_count: number;
+  conflicts: string[];
+  existing_total: number;
+  ingest_supported: boolean;
+  ingest_stats?: Record<string, unknown>;
+  ingest_result?: {
+    ready?: boolean;
+    issues?: Array<{
+      severity?: string;
+      code?: string;
+      message?: string;
+    }>;
+  };
+  source_context?: {
+    session_count?: number;
+    session_ids?: string[];
+  };
+}
+
+export interface MCPSourceRequest {
+  label: string;
+  sessionIds: string[];
+  requiredCapabilities?: string[];
+  autoEnrich?: boolean;
+  enrichLlmSpec?: string;
+}
+
 async function apiError(response: Response, fallback: string): Promise<Error> {
   const body = await response.json().catch(() => null);
   const detail = body?.detail ?? body;
@@ -274,6 +312,8 @@ async function apiError(response: Response, fallback: string): Promise<Error> {
     ? detail
     : typeof detail?.message === 'string'
       ? detail.message
+      : typeof detail?.ingest_result?.issues?.[0]?.message === 'string'
+        ? detail.ingest_result.issues[0].message
       : response.statusText;
   return new Error(`${fallback}: ${response.status} ${message}`.trim());
 }
@@ -304,6 +344,68 @@ export async function listApiCollections(
     },
   });
   if (!response.ok) throw await apiError(response, 'Collection 목록 조회 실패');
+  return response.json();
+}
+
+export async function fetchMCPStationSessions(
+  serverUrl: string,
+  token: string,
+): Promise<MCPStationSession[]> {
+  const response = await fetch(`${serverUrl}/api/mcp/sessions`, {
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (!response.ok) throw await apiError(response, 'MCP 세션 목록 조회 실패');
+  const payload = await response.json() as
+    MCPStationSession[] | { sessions?: MCPStationSession[]; options?: MCPStationSession[] };
+  if (Array.isArray(payload)) return payload;
+  return payload.sessions ?? payload.options ?? [];
+}
+
+function mcpSourceBody(payload: MCPSourceRequest): Record<string, unknown> {
+  return {
+    label: payload.label,
+    session_ids: payload.sessionIds,
+    required_capabilities: payload.requiredCapabilities ?? ['input_schema'],
+    auto_enrich: payload.autoEnrich ?? false,
+    ...(payload.enrichLlmSpec ? { enrich_llm_spec: payload.enrichLlmSpec } : {}),
+  };
+}
+
+export async function previewMCPCollectionSource(
+  serverUrl: string,
+  token: string,
+  collectionId: string,
+  payload: MCPSourceRequest,
+): Promise<MCPSourcePreview> {
+  const response = await fetch(
+    `${serverUrl}/api/tools/api-collections/${encodeURIComponent(collectionId)}/mcp-sources/preview`,
+    {
+      method: 'POST',
+      headers: authenticatedJsonHeaders(token),
+      body: JSON.stringify(mcpSourceBody(payload)),
+    },
+  );
+  if (!response.ok) throw await apiError(response, 'MCP source 미리보기 실패');
+  return response.json();
+}
+
+export async function addMCPCollectionSource(
+  serverUrl: string,
+  token: string,
+  collectionId: string,
+  payload: MCPSourceRequest,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(
+    `${serverUrl}/api/tools/api-collections/${encodeURIComponent(collectionId)}/mcp-sources`,
+    {
+      method: 'POST',
+      headers: authenticatedJsonHeaders(token),
+      body: JSON.stringify(mcpSourceBody(payload)),
+    },
+  );
+  if (!response.ok) throw await apiError(response, 'MCP source 등록 실패');
   return response.json();
 }
 

@@ -90,6 +90,21 @@ LangGraph `create_react_agent`를 수동 ReAct 루프로 교체하여 전체 제
 - endpoint, parameter, request/response JSON Schema 기반 수동 Tool Contract
 - 모든 입력은 XGEN API Collection preview와 readiness 검사를 거쳐 등록
 
+### 11. MCP Station → API Collection 연결
+
+사이드패널 메뉴의 **MCP 도구 연결**에서 XGEN MCP Station의 실행 중인
+세션을 기존 API Collection에 추가할 수 있습니다.
+
+1. 대상 API Collection을 선택합니다.
+2. 현재 사용자가 접근할 수 있는 실행 중 MCP 세션을 선택합니다.
+3. `미리보기`로 도구 수, 이름 충돌, ingest 준비 상태를 확인합니다.
+4. `등록 / 갱신`으로 canonical MCP tool contract와 실행 binding을 저장합니다.
+
+등록된 MCP 도구는 OpenAPI 도구와 같은 graph/search/PlanRunner 경로를
+사용하지만, 실행은 XGEN MCP Station의 `tools/call`로 전달됩니다. 컬렉션은
+사용자 ID 원문을 저장하지 않으며, 실행할 때 현재 XGEN 사용자와 역할 권한을
+Station에서 다시 확인합니다.
+
 ## 아키텍처
 
 ```

@@ -13,6 +13,7 @@ import { ManualToolContractPanel } from './components/ManualToolContractPanel';
 import { PostmanImportPanel } from './components/PostmanImportPanel';
 import { MenuDrawer } from './components/MenuDrawer';
 import { ProductInbox } from './components/ProductInbox';
+import { MCPCollectionSource } from './components/MCPCollectionSource';
 import type { SessionResult } from './hooks/useCaptureSession';
 import type { SidePanelView } from './menu/items';
 import type { ExtensionMessage, PageContext } from '../shared/types';
@@ -327,6 +328,7 @@ export function App() {
       />
 
       {view === 'inbox' && <ProductInbox onBack={() => setView('chat')} />}
+      {view === 'mcp-sources' && <MCPCollectionSource onBack={() => setView('chat')} />}
 
       {view === 'chat' && (
       <>
