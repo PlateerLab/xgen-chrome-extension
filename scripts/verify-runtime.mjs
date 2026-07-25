@@ -739,9 +739,18 @@ async function clickSidepanelButton(extensionPage, targetPage, label, matcher) {
 async function runCaptureSessionViaSidepanel(extensionPage, targetPage, action, label, activePageForControls = targetPage) {
   await clickSidepanelButton(extensionPage, activePageForControls, `${label}: start`, /캡처 세션 시작/);
   await extensionPage.waitForFunction(() => document.body.innerText.includes('캡처 중'));
+  await targetPage.waitForFunction(
+    () => (window).__xgenApiHookActive === true,
+    undefined,
+    { timeout: 5_000 },
+  );
 
   await action();
-  await wait(300);
+  await extensionPage.waitForFunction(
+    () => /캡처 중[^]*\([1-9]\d*건\)/.test(document.body.innerText),
+    undefined,
+    { timeout: 5_000 },
+  );
 
   await clickSidepanelButton(extensionPage, activePageForControls, `${label}: stop`, /캡처 종료/);
   await extensionPage.waitForFunction(() => document.body.innerText.includes('캡처 분석'));
