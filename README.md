@@ -2,6 +2,20 @@
 
 브라우저에서 자연어로 XGEN AI 플랫폼을 제어하는 Chrome Extension.
 
+## 문서
+
+| 문서 | 내용 |
+|---|---|
+| [문서 인덱스](docs/README.md) | 전체 문서 안내 및 지원 범위 |
+| [개발 환경](docs/development.md) | 로컬 설치, 빌드 및 Chrome 로딩 |
+| [아키텍처](docs/architecture.md) | 확장 컨텍스트와 API 캡처 흐름 |
+| [메시지 프로토콜](docs/message-protocol.md) | Side Panel, Service Worker, Content Script 계약 |
+| [검증 가이드](docs/verification.md) | Playwright 자동화와 실제 환경 검증 계층 |
+| [XGEN 연동](docs/xgen-integration.md) | endpoint, 인증 및 Collection 등록 |
+| [고객사 환경](docs/customer-environment.md) | 내부망, VPN, CA, SSO 및 acceptance |
+| [보안](docs/security.md) | 권한, 민감정보 및 로그 정책 |
+| [문제 해결](docs/troubleshooting.md) | 설치, 캡처 및 통합 오류 진단 |
+
 ## 핵심 기능
 
 ### 1. 멀티스텝 페이지 네비게이션
@@ -133,10 +147,21 @@ LangGraph `create_react_agent`를 수동 ReAct 루프로 교체하여 전체 제
 ```bash
 git clone https://github.com/PlateerLab/xgen-chrome-extension.git
 cd xgen-chrome-extension
-npm install
-npm run dev
-# chrome://extensions → Load unpacked → dist/
+npm ci
+npx playwright install --with-deps chromium
+npm run build
+# chrome://extensions → 압축해제된 확장 프로그램 로드 → dist/
 ```
+
+개발 중 자동 빌드는 `npm run dev`를 사용한다. 자세한 절차는 [개발 환경 문서](docs/development.md)를 참고한다.
+
+## 검증
+
+```bash
+npm run verify:pathfinder
+```
+
+이 명령은 production build, trace contract 검증, 실제 Chromium extension runtime 검증을 순서대로 실행한다. mock runtime 통과는 실제 XGEN이나 고객사 내부망 통합 성공을 의미하지 않는다. 환경별 검증 기준은 [검증 가이드](docs/verification.md)에 정리되어 있다.
 
 ## 설정
 
