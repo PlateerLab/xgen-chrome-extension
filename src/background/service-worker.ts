@@ -9,9 +9,28 @@ import type {
   PageContext,
   SSEEvent,
 } from '../shared/types';
-import type { CapturedApi } from '../shared/api-hook-types';
+import type {
+  CaptureCoverage,
+  CapturedApi,
+} from '../shared/api-hook-types';
 import { mainWorldHookFunction, mainWorldUnhookFunction } from '../content/api-hook/main-world-hook';
 import { apiHookRelayFunction } from '../content/api-hook/relay';
+import {
+  inspectCookiePermission,
+  inspectHostPermission,
+  originPatternForUrl,
+  requestHostPermissions,
+} from '../shared/permissions';
+import {
+  canonicalAuthServiceId,
+  isPathfinderManagedProfile,
+  matchCollectionAuthProfile,
+  matchExactAuthProfile,
+  PATHFINDER_MANAGED_MARKER,
+  xgenAuthHeaders,
+  type AuthProfileSummary,
+  type CollectionAuthSummary,
+} from './auth-profile-resolution';
 
 // ── State ──
 // origin별 토큰 저장 — 멀티 인스턴스 (xgen.x2bee.com / jeju-xgen.x2bee.com) 동시 사용 지원
@@ -22,7 +41,66 @@ let cachedPageContextTabId: number | null = null;
 
 // ── API Hook State ──
 const hookedTabs = new Set<number>();
+const contentScriptTabs = new Set<number>();
+const contentScriptOriginPatterns = new Map<number, string>();
 const capturedApisByTab = new Map<number, CapturedApi[]>();
+interface FrameCaptureState {
+  discoveredFrameIds: Set<number>;
+  instrumentedFrameIds: Set<number>;
+  blockedFrameIds: Set<number>;
+  failedFrameIds: Set<number>;
+  instrumentedOrigins: Set<string>;
+  blockedOrigins: Set<string>;
+  observedRequestCount: number;
+  observedSubframeRequestCount: number;
+  serviceWorkerControlled: boolean;
+}
+const frameCaptureStateByTab = new Map<number, FrameCaptureState>();
+const authProfileUpsertsByDomain = new Map<
+  string,
+  Promise<AuthProfileResolution>
+>();
+const CAPTURE_TAB_MAX = 500;
+const CONTENT_SCRIPT_BUNDLE = 'pathfinder-content.js';
+const CONTENT_SCRIPT_ORIGINS_KEY = 'runtime:content-script-origins';
+let contentScriptOriginUpdate: Promise<void> = Promise.resolve();
+
+async function readPersistedContentScriptOrigins(): Promise<Record<string, string>> {
+  const stored = await chrome.storage.session.get(CONTENT_SCRIPT_ORIGINS_KEY);
+  const value = stored[CONTENT_SCRIPT_ORIGINS_KEY];
+  return value && typeof value === 'object'
+    ? { ...(value as Record<string, string>) }
+    : {};
+}
+
+function updatePersistedContentScriptOrigin(
+  tabId: number,
+  originPattern: string | null,
+): Promise<void> {
+  contentScriptOriginUpdate = contentScriptOriginUpdate.catch(() => {}).then(async () => {
+    const origins = await readPersistedContentScriptOrigins();
+    if (originPattern) {
+      origins[String(tabId)] = originPattern;
+    } else {
+      delete origins[String(tabId)];
+    }
+    if (Object.keys(origins).length > 0) {
+      await chrome.storage.session.set({ [CONTENT_SCRIPT_ORIGINS_KEY]: origins });
+    } else {
+      await chrome.storage.session.remove(CONTENT_SCRIPT_ORIGINS_KEY);
+    }
+  });
+  return contentScriptOriginUpdate;
+}
+
+function appendCapturedApi(tabId: number, captured: CapturedApi): void {
+  const captures = capturedApisByTab.get(tabId) ?? [];
+  captures.push(captured);
+  if (captures.length > CAPTURE_TAB_MAX) {
+    captures.splice(0, captures.length - CAPTURE_TAB_MAX);
+  }
+  capturedApisByTab.set(tabId, captures);
+}
 
 // AI agent가 page_command/canvas_command로 탭을 운전 중인 윈도우.
 // 이 시간 동안 캡처된 API는 origin='ai'로 태깅되어 사용자 capture session에서 제외된다.
@@ -53,7 +131,8 @@ interface CaptureSession {
   captures: CapturedApi[];
 }
 let activeCaptureSession: CaptureSession | null = null;
-const CAPTURE_SESSION_MAX = 500; // FIFO 상한 — 5분 무활동 자동종료는 Phase 2에서 추가
+const CAPTURE_SESSION_MAX = 500;
+const CAPTURE_RESULT_TTL_MS = 5 * 60 * 1000;
 
 // 캡처 종료 후 sidepanel이 mount되기 전 broadcast가 발사되는 race를 막기 위한 캐시.
 // sidepanel이 GET_CAPTURE_RESULT로 한 번 가져가면 null로 소비.
@@ -61,7 +140,288 @@ let cachedCaptureResult: {
   apis: CapturedApi[];
   tabId: number;
   durationMs: number;
+  captureCoverage: CaptureCoverage;
 } | null = null;
+let cachedCaptureResultTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearCachedCaptureResult(): void {
+  cachedCaptureResult = null;
+  if (cachedCaptureResultTimer) {
+    clearTimeout(cachedCaptureResultTimer);
+    cachedCaptureResultTimer = null;
+  }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isInjectableTabUrl(url?: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function getMessageTabId(message: ExtensionMessage): number | undefined {
+  const tabId = (message as { tabId?: unknown }).tabId;
+  return typeof tabId === 'number' && Number.isInteger(tabId) ? tabId : undefined;
+}
+
+async function getTargetTab(tabId?: number): Promise<chrome.tabs.Tab | null> {
+  if (typeof tabId === 'number') {
+    try {
+      return await chrome.tabs.get(tabId);
+    } catch {
+      return null;
+    }
+  }
+
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tabs[0] ?? null;
+}
+
+function newFrameCaptureState(): FrameCaptureState {
+  return {
+    discoveredFrameIds: new Set(),
+    instrumentedFrameIds: new Set(),
+    blockedFrameIds: new Set(),
+    failedFrameIds: new Set(),
+    instrumentedOrigins: new Set(),
+    blockedOrigins: new Set(),
+    observedRequestCount: 0,
+    observedSubframeRequestCount: 0,
+    serviceWorkerControlled: false,
+  };
+}
+
+function safeFrameOrigin(url?: string): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+      ? parsed.origin
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function captureCoverageForTab(tabId: number): CaptureCoverage {
+  const state = frameCaptureStateByTab.get(tabId) ?? newFrameCaptureState();
+  const issues: CaptureCoverage['issues'] = [];
+  if (state.blockedFrameIds.size > 0) {
+    issues.push({
+      code: 'cross_origin_frame_permission_required',
+      severity: 'warning',
+      count: state.blockedFrameIds.size,
+      origins: [...state.blockedOrigins].slice(0, 12),
+      message: '접근 권한이 없는 iframe의 API 요청은 캡처하지 못했습니다.',
+    });
+  }
+  if (state.failedFrameIds.size > 0) {
+    issues.push({
+      code: 'frame_hook_injection_failed',
+      severity: 'warning',
+      count: state.failedFrameIds.size,
+      message: '권한이 있지만 API hook을 주입하지 못한 iframe이 있습니다.',
+    });
+  }
+  if (state.serviceWorkerControlled) {
+    issues.push({
+      code: 'service_worker_fetch_not_observable',
+      severity: 'warning',
+      message: '이 페이지는 Service Worker의 제어를 받고 있습니다. Worker 내부 fetch는 HAR/CDP 입력으로 보완해야 합니다.',
+    });
+  }
+  issues.push({
+    code: 'worker_fetch_not_observable',
+    severity: 'info',
+    message: 'Web Worker와 Shared Worker 내부 fetch는 page hook의 관찰 범위 밖입니다.',
+  });
+  return {
+    discoveredFrameCount: state.discoveredFrameIds.size,
+    instrumentedFrameCount: state.instrumentedFrameIds.size,
+    blockedFrameCount: state.blockedFrameIds.size,
+    failedFrameCount: state.failedFrameIds.size,
+    observedRequestCount: state.observedRequestCount,
+    observedSubframeRequestCount: state.observedSubframeRequestCount,
+    instrumentedOrigins: [...state.instrumentedOrigins].slice(0, 12),
+    blockedOrigins: [...state.blockedOrigins].slice(0, 12),
+    serviceWorkerControlled: state.serviceWorkerControlled,
+    workerTransportVisibility: 'not_observable',
+    issues,
+  };
+}
+
+async function frameUrlsForTab(tabId: number, fallbackUrl?: string): Promise<string[]> {
+  const frames = await chrome.webNavigation.getAllFrames({ tabId }).catch(() => null);
+  const urls = frames?.map((frame) => frame.url) ?? [];
+  if (fallbackUrl) urls.unshift(fallbackUrl);
+  return [...new Set(urls.filter(isInjectableTabUrl))];
+}
+
+async function detectServiceWorkerControl(tabId: number): Promise<boolean> {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId, frameIds: [0] },
+    func: () => Boolean(navigator.serviceWorker?.controller),
+    world: 'ISOLATED' as any,
+  }).catch(() => []);
+  return results[0]?.result === true;
+}
+
+async function injectApiHookIntoFrame(
+  tabId: number,
+  frameId: number,
+  frameUrl: string,
+  state: FrameCaptureState,
+): Promise<void> {
+  state.discoveredFrameIds.add(frameId);
+  const frameOrigin = safeFrameOrigin(frameUrl);
+  const readiness = await inspectHostPermission(frameUrl);
+  if (!readiness.ready) {
+    state.blockedFrameIds.add(frameId);
+    state.instrumentedFrameIds.delete(frameId);
+    state.failedFrameIds.delete(frameId);
+    if (frameOrigin) state.blockedOrigins.add(frameOrigin);
+    return;
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [frameId] },
+      func: apiHookRelayFunction,
+      world: 'ISOLATED' as any,
+    });
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [frameId] },
+      func: mainWorldHookFunction,
+      world: 'MAIN' as any,
+    });
+    state.instrumentedFrameIds.add(frameId);
+    state.blockedFrameIds.delete(frameId);
+    state.failedFrameIds.delete(frameId);
+    if (frameOrigin) {
+      state.instrumentedOrigins.add(frameOrigin);
+      state.blockedOrigins.delete(frameOrigin);
+    }
+  } catch {
+    state.failedFrameIds.add(frameId);
+    state.instrumentedFrameIds.delete(frameId);
+    state.blockedFrameIds.delete(frameId);
+  }
+}
+
+async function injectApiHookIntoTab(tabId: number): Promise<void> {
+  const tab = await chrome.tabs.get(tabId);
+  if (!isInjectableTabUrl(tab.url)) {
+    throw new Error('API 캡처는 http/https 페이지에서만 사용할 수 있습니다.');
+  }
+  const readiness = await inspectHostPermission(tab.url);
+  if (!readiness.ready) {
+    throw new Error(readiness.reason);
+  }
+
+  await injectContentScriptIntoTab(tabId);
+  const state = frameCaptureStateByTab.get(tabId) ?? newFrameCaptureState();
+  frameCaptureStateByTab.set(tabId, state);
+  const frames = await chrome.webNavigation.getAllFrames({ tabId }).catch(() => null);
+  const currentFrames = frames?.filter((frame) => isInjectableTabUrl(frame.url)) ?? [{
+    frameId: 0,
+    parentFrameId: -1,
+    url: tab.url!,
+  }];
+  await Promise.all(currentFrames.map((frame) =>
+    injectApiHookIntoFrame(tabId, frame.frameId, frame.url, state)));
+  state.serviceWorkerControlled = await detectServiceWorkerControl(tabId);
+  hookedTabs.add(tabId);
+}
+
+async function injectContentScriptIntoTab(tabId: number): Promise<void> {
+  const tab = await chrome.tabs.get(tabId);
+  if (!isInjectableTabUrl(tab.url)) return;
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: [CONTENT_SCRIPT_BUNDLE],
+    world: 'ISOLATED' as any,
+  });
+  contentScriptTabs.add(tabId);
+  const originPattern = originPatternForUrl(tab.url);
+  if (originPattern) {
+    contentScriptOriginPatterns.set(tabId, originPattern);
+    await updatePersistedContentScriptOrigin(tabId, originPattern);
+  }
+}
+
+async function abortTabForPermission(
+  tabId: number,
+  reason: 'host_permission_required' | 'host_permission_revoked',
+): Promise<void> {
+  await unhookApiFrames(tabId);
+  await chrome.tabs.sendMessage(tabId, {
+    type: 'CONTENT_SCRIPT_SHUTDOWN',
+    reason: 'host_permission_revoked',
+  } satisfies ExtensionMessage).catch(() => {});
+  hookedTabs.delete(tabId);
+  frameCaptureStateByTab.delete(tabId);
+  contentScriptTabs.delete(tabId);
+  contentScriptOriginPatterns.delete(tabId);
+  await updatePersistedContentScriptOrigin(tabId, null);
+  capturedApisByTab.delete(tabId);
+  aiDrivingTabIds.delete(tabId);
+  if (cachedCaptureResult?.tabId === tabId) {
+    clearCachedCaptureResult();
+  }
+  if (activeCaptureSession?.tabId === tabId) {
+    activeCaptureSession = null;
+    broadcastCaptureStatus({
+      active: false,
+      tabId,
+      error: reason,
+    });
+  }
+}
+
+function completeCaptureSession(session: CaptureSession, options: { openPanel: boolean } = { openPanel: true }): void {
+  const durationMs = Date.now() - session.startedAt;
+  const captureCoverage = captureCoverageForTab(session.tabId);
+  if (options.openPanel) {
+    chrome.sidePanel.open({ tabId: session.tabId }).catch((err) => {
+      console.warn('[XGEN SW] sidePanel.open on stop failed:', err);
+    });
+  }
+
+  clearCachedCaptureResult();
+  cachedCaptureResult = {
+    apis: session.captures,
+    tabId: session.tabId,
+    durationMs,
+    captureCoverage,
+  };
+  cachedCaptureResultTimer = setTimeout(clearCachedCaptureResult, CAPTURE_RESULT_TTL_MS);
+
+  broadcastCaptureStatus({ active: false, tabId: session.tabId });
+  broadcastToSidePanel({
+    type: 'CAPTURE_SESSION_RESULT',
+    apis: session.captures,
+    tabId: session.tabId,
+    durationMs,
+    captureCoverage,
+  });
+}
+
+async function unhookApiFrames(tabId: number): Promise<void> {
+  const state = frameCaptureStateByTab.get(tabId);
+  const frameIds = [...(state?.instrumentedFrameIds ?? new Set([0]))];
+  await Promise.all(frameIds.map((frameId) =>
+    chrome.scripting.executeScript({
+      target: { tabId, frameIds: [frameId] },
+      func: mainWorldUnhookFunction,
+      world: 'MAIN' as any,
+    }).catch(() => {})));
+}
 
 // ── Side Panel open on icon click ──
 
@@ -69,12 +429,66 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch(console.error);
 
+// Extension action 클릭은 activeTab 권한을 부여한다. 설치 시 전역 host 권한 없이도
+// 현재 페이지의 PageAgent를 사용자 동작으로만 주입한다.
+chrome.action.onClicked.addListener((tab) => {
+  if (!tab.id || !isInjectableTabUrl(tab.url)) return;
+  injectContentScriptIntoTab(tab.id).catch((err) => {
+    console.warn('[XGEN SW] content script injection on action click failed:', err);
+  });
+});
+
 /**
  * origin이 XGEN 자체 호스트인지 — 이걸로 SET_ORIGIN/SET_TOKEN/resolver/startup migration 모두 검증.
  * fo.x2bee.com 같은 형제 서브도메인이 storage/메모리/resolver에 끼어들지 못하게 막는 single source of truth.
+ * dev-xgen.x2bee.com / xgen-dev.x2bee.com 같은 환경별 XGEN 호스트는 허용한다.
  */
+function isXgenHostedHost(host: string): boolean {
+  const normalized = host.toLowerCase();
+  return (
+    normalized === 'xgen.x2bee.com' ||
+    normalized.startsWith('xgen.') ||
+    normalized.endsWith('.xgen.x2bee.com') ||
+    /^(?:[a-z0-9-]+-)?xgen(?:-[a-z0-9-]+)?\.x2bee\.com$/.test(normalized)
+  );
+}
+
 function isXgenOrigin(origin: string): boolean {
-  return /^https?:\/\/(xgen\.x2bee\.com|xgen\.[^/:]+|[^/:]+\.xgen\.x2bee\.com|localhost(:\d+)?|127\.0\.0\.1(:\d+)?)(\/|$)/.test(origin);
+  try {
+    const parsed = new URL(origin);
+    if (!/^https?:$/.test(parsed.protocol)) return false;
+    return isXgenHostedHost(parsed.hostname) || parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+  } catch {
+    return false;
+  }
+}
+
+function isXgenHostedOrigin(origin: string): boolean {
+  try {
+    const parsed = new URL(origin);
+    if (!/^https?:$/.test(parsed.protocol)) return false;
+    return isXgenHostedHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isLocalOrigin(origin: string): boolean {
+  try {
+    const host = new URL(origin).hostname;
+    return host === 'localhost' || host === '127.0.0.1';
+  } catch {
+    return false;
+  }
+}
+
+function sameOrigin(a?: string | null, b?: string | null): boolean {
+  if (!a || !b) return false;
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
 }
 
 // ── Startup: migrate stale storage from earlier buggy versions ──
@@ -122,23 +536,36 @@ chrome.runtime.onMessage.addListener(
       case 'SET_ORIGIN': {
         // content script(token-extractor)에서 자동 호출되므로 origin이 정말 XGEN인지 검증.
         const origin = message.origin || '';
-        if (isXgenOrigin(origin)) {
-          chrome.storage.local.set({ [STORAGE_KEYS.SERVER_URL]: origin });
-        }
-        sendResponse({ ok: true });
-        break;
+        (async () => {
+          if (!isXgenOrigin(origin)) {
+            sendResponse({ ok: true });
+            return;
+          }
+          const stored = await chrome.storage.local.get(STORAGE_KEYS.SERVER_URL);
+          const storedUrl = stored[STORAGE_KEYS.SERVER_URL] as string | undefined;
+          const shouldStore = isXgenHostedOrigin(origin)
+            || !storedUrl
+            || sameOrigin(storedUrl, origin)
+            || !isLocalOrigin(origin);
+          if (shouldStore) {
+            chrome.storage.local.set({ [STORAGE_KEYS.SERVER_URL]: origin });
+          }
+          sendResponse({ ok: true });
+        })();
+        return true;
       }
 
       case 'GET_CHAT_CONFIG': {
         // sidePanel이 SSE를 직접 소비하기 위해 필요한 config 반환
+        const targetTabId = getMessageTabId(message);
         (async () => {
           const settings = await chrome.storage.local.get([
             STORAGE_KEYS.PROVIDER,
             STORAGE_KEYS.MODEL,
           ]);
-          const serverUrl = await resolveXgenServerUrl();
+          const serverUrl = await resolveXgenServerUrl(targetTabId);
           const authToken = serverUrl ? (tokensByOrigin[serverUrl] || await getStoredToken(serverUrl)) : '';
-          const pageContext = await getPageContextFromTab().catch(() => null);
+          const pageContext = await getPageContextFromTab(targetTabId).catch(() => null);
 
           if (pageContext) {
             cachedPageContext = pageContext;
@@ -175,27 +602,29 @@ chrome.runtime.onMessage.addListener(
       case 'RELAY_COMMAND': {
         // sidePanel이 SSE에서 받은 canvas_command/page_command를 SW로 위임
         const event = (message as any).event as SSEEvent;
+        const targetTabId = getMessageTabId(message);
         console.log('[XGEN SW] RELAY_COMMAND received:', event.type, event);
         (async () => {
-          // AI agent의 직접 dispatch — 이후 ~2초 캡처를 origin='ai'로 태깅하기 위해 active tab 마킹
-          const tabsForMark = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (tabsForMark[0]?.id) markAiDriving(tabsForMark[0].id);
+          const targetTab = await getTargetTab(targetTabId);
 
           if (event.type === 'canvas_command') {
+            // 실제 페이지 조작 뒤 발생한 API만 AI-origin으로 분리한다.
+            if (targetTab?.id) markAiDriving(targetTab.id);
             await sendToContentScript({
               type: 'CANVAS_COMMAND',
               requestId: (event as any).requestId || crypto.randomUUID(),
               action: event.action,
               params: event.params,
-            });
+            }, targetTab?.id ?? targetTabId);
           } else if (event.type === 'page_command') {
             const requestId = (event as any).requestId || crypto.randomUUID();
-            const apiHookResult = await handleApiHookAction(event.action, event.params);
+            const apiHookResult = await handleApiHookAction(event.action, event.params, targetTab?.id ?? targetTabId);
             if (apiHookResult) {
-              await postCommandResultToBackend(requestId, apiHookResult);
+              await postCommandResultToBackend(requestId, apiHookResult, targetTab?.id ?? targetTabId);
             } else {
+              if (targetTab?.id) markAiDriving(targetTab.id);
               // 네비게이션 생존주기 처리 포함 디스패치
-              await dispatchPageCommand(requestId, event.action, event.params);
+              await dispatchPageCommand(requestId, event.action, event.params, targetTab?.id ?? targetTabId);
             }
           }
           sendResponse({ ok: true });
@@ -213,7 +642,7 @@ chrome.runtime.onMessage.addListener(
         break;
 
       case 'GET_PAGE_CONTEXT':
-        getPageContextFromTab()
+        getPageContextFromTab(getMessageTabId(message))
           .then((ctx) => sendResponse(ctx))
           .catch(() => sendResponse(null));
         return true; // async response
@@ -238,7 +667,7 @@ chrome.runtime.onMessage.addListener(
         }
         // 백엔드 에이전트 루프에 결과 전달 — 다음 스텝 결정에 필요
         if (message.requestId) {
-          postCommandResultToBackend(message.requestId, message.result);
+          postCommandResultToBackend(message.requestId, message.result, sender.tab?.id);
         }
         sendResponse({ ok: true });
         break;
@@ -253,7 +682,7 @@ chrome.runtime.onMessage.addListener(
         }
         // 백엔드 에이전트 루프에 결과 전달
         if (message.requestId) {
-          postCommandResultToBackend(message.requestId, message.result);
+          postCommandResultToBackend(message.requestId, message.result, sender.tab?.id);
         }
         sendResponse({ ok: true });
         break;
@@ -262,13 +691,23 @@ chrome.runtime.onMessage.addListener(
       case 'API_CAPTURED': {
         const tabId = sender.tab?.id || 0;
         const captured = message.data as CapturedApi;
+        const frameId = sender.frameId ?? 0;
         captured.tabId = tabId;
         captured.origin = isAiDriving(tabId) ? 'ai' : 'user';
-
-        if (!capturedApisByTab.has(tabId)) {
-          capturedApisByTab.set(tabId, []);
+        captured.captureContext = {
+          kind: frameId === 0 ? 'top_frame' : 'subframe',
+          frameId,
+          ...(safeFrameOrigin(sender.url) ? {
+            frameOrigin: safeFrameOrigin(sender.url),
+          } : {}),
+        };
+        const frameState = frameCaptureStateByTab.get(tabId);
+        if (frameState) {
+          frameState.observedRequestCount += 1;
+          if (frameId !== 0) frameState.observedSubframeRequestCount += 1;
         }
-        capturedApisByTab.get(tabId)!.push(captured);
+
+        appendCapturedApi(tabId, captured);
 
         // 사용자 capture session에 누적: 같은 탭 + origin='user'만
         if (
@@ -290,7 +729,7 @@ chrome.runtime.onMessage.addListener(
 
         // 로그인 요청 감지 시 auth profile 즉시 자동 생성
         if (captured.method === 'POST' && /\/(login|auth|token|signin|oauth|session)/i.test(captured.url)) {
-          autoCreateAuthProfileFromCapture(captured.url).catch(() => {});
+          autoCreateAuthProfileFromCapture(captured.url, tabId).catch(() => {});
         }
 
         sendResponse({ ok: true });
@@ -299,19 +738,38 @@ chrome.runtime.onMessage.addListener(
 
       // ── User Capture Session ──
       case 'START_CAPTURE_SESSION': {
+        const targetTabId = getMessageTabId(message);
         (async () => {
-          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-          const tabId = tabs[0]?.id;
-          if (!tabId) {
-            sendResponse({ ok: false, error: 'No active tab' });
-            return;
+          try {
+            const tab = await getTargetTab(targetTabId);
+            const tabId = tab?.id;
+            if (!tabId || !tab?.url) {
+              sendResponse({ ok: false, error: 'No active tab' });
+              return;
+            }
+            const readiness = await inspectHostPermission(tab.url);
+            if (!readiness.ready) {
+              sendResponse({
+                ok: false,
+                error: readiness.reason,
+                reason: readiness.reason,
+                readiness,
+              });
+              return;
+            }
+            frameCaptureStateByTab.set(tabId, newFrameCaptureState());
+            await handlePickerHookInject(tabId);
+            clearCachedCaptureResult();
+            activeCaptureSession = { tabId, startedAt: Date.now(), captures: [] };
+            broadcastCaptureStatus({ active: true, tabId, count: 0 });
+            sendResponse({ ok: true, tabId });
+          } catch (err) {
+            const message = errorMessage(err);
+            activeCaptureSession = null;
+            console.warn('[XGEN SW] START_CAPTURE_SESSION failed:', err);
+            broadcastCaptureStatus({ active: false, error: message });
+            sendResponse({ ok: false, error: message });
           }
-          activeCaptureSession = { tabId, startedAt: Date.now(), captures: [] };
-          // content script가 아직 hook 주입 안 됐다면 주입 (ELEMENT_PICKER_STOP과 동일한 진입점 재사용).
-          // 부수효과로 capturedApisByTab[tabId]가 리셋되지만 session 버퍼는 별도라 영향 없음.
-          await handlePickerHookInject(tabId).catch(() => {});
-          broadcastCaptureStatus({ active: true, tabId, count: 0 });
-          sendResponse({ ok: true, tabId });
         })();
         return true;
       }
@@ -324,32 +782,16 @@ chrome.runtime.onMessage.addListener(
         }
         const session = activeCaptureSession;
         activeCaptureSession = null;
-
-        // 1. 사이드패널 즉시 열기 (await 전에) — overlay 클릭으로 전달된 user gesture가
-        //    살아있는 동안 호출해야 한다. await/setOptions 끼면 gesture 끊겨서 무음 실패.
-        chrome.sidePanel.open({ tabId: session.tabId }).catch((err) => {
-          console.warn('[XGEN SW] sidePanel.open on stop failed:', err);
+        unhookApiFrames(session.tabId).catch(() => {});
+        hookedTabs.delete(session.tabId);
+        completeCaptureSession(session, { openPanel: true });
+        capturedApisByTab.delete(session.tabId);
+        frameCaptureStateByTab.delete(session.tabId);
+        sendResponse({
+          ok: true,
+          count: session.captures.length,
+          bufferedCount: capturedApisByTab.get(session.tabId)?.length ?? 0,
         });
-
-        // 2. 결과 캐시 — sidepanel이 mount되기 전에 broadcast가 끝나는 race를 막기 위해.
-        //    sidepanel 첫 mount 시 GET_CAPTURE_RESULT로 직접 query.
-        cachedCaptureResult = {
-          apis: session.captures,
-          tabId: session.tabId,
-          durationMs: Date.now() - session.startedAt,
-        };
-
-        // 3. STATUS 브로드캐스트 — sidepanel + 캡처 탭(overlay 자동 hide).
-        broadcastCaptureStatus({ active: false, tabId: session.tabId });
-        // 4. 이미 열려있던 sidepanel을 위해 결과 브로드캐스트 (놓쳐도 cachedCaptureResult가 안전망).
-        broadcastToSidePanel({
-          type: 'CAPTURE_SESSION_RESULT',
-          apis: session.captures,
-          tabId: session.tabId,
-          durationMs: Date.now() - session.startedAt,
-        });
-
-        sendResponse({ ok: true, count: session.captures.length });
         break;
       }
 
@@ -357,9 +799,25 @@ chrome.runtime.onMessage.addListener(
         // sidepanel이 STOP 이후 새로 열린 경우 broadcast를 놓쳤으니 직접 가져감.
         // 한 번 읽으면 소비 (다음 mount 시 재노출 방지).
         const result = cachedCaptureResult;
-        cachedCaptureResult = null;
+        clearCachedCaptureResult();
         sendResponse({ ok: true, result });
         break;
+      }
+
+      case 'GET_PERMISSION_READINESS': {
+        (async () => {
+          const targetTab = await getTargetTab(getMessageTabId(message));
+          const targetUrl = message.url || targetTab?.url;
+          const readiness = await inspectHostPermission(targetUrl);
+          sendResponse({ ok: true, readiness });
+        })().catch((err) => {
+          sendResponse({
+            ok: false,
+            error: errorMessage(err),
+            reason: 'host_permission_required',
+          });
+        });
+        return true;
       }
 
       case 'LOOKUP_AUTH_PROFILE_FOR_HOST': {
@@ -368,7 +826,7 @@ chrome.runtime.onMessage.addListener(
         // auth_profile_id로 같이 넘겨 tool row까지 자동 propagate.
         (async () => {
           try {
-            const serverUrl = await resolveXgenServerUrl();
+            const serverUrl = await resolveXgenServerUrl(getMessageTabId(message));
             const authToken = serverUrl
               ? (tokensByOrigin[serverUrl] || await getStoredToken(serverUrl))
               : '';
@@ -376,11 +834,14 @@ chrome.runtime.onMessage.addListener(
               sendResponse({ ok: false, error: 'no XGEN auth' });
               return;
             }
-            // autoMatchAuthProfile은 api_url 인자를 받음 — 도메인만 알면 충분하니 dummy URL.
-            const profileId = await autoMatchAuthProfile(
+            const resolution = await autoMatchAuthProfile(
               serverUrl, authToken, `https://${message.host}/`,
             );
-            sendResponse({ ok: true, authProfileId: profileId || null });
+            sendResponse({
+              ok: true,
+              authProfileId: resolution.authProfileId || null,
+              authReadiness: resolution,
+            });
           } catch (err) {
             console.warn('[XGEN SW] LOOKUP_AUTH_PROFILE_FOR_HOST failed:', err);
             sendResponse({ ok: false, error: String(err) });
@@ -395,6 +856,18 @@ chrome.runtime.onMessage.addListener(
         // <all_urls>가 manifest에 있어서 어떤 host든 읽기 가능.
         (async () => {
           try {
+            const readiness = await inspectCookiePermission(
+              message.url || `https://${message.host}/`,
+            );
+            if (!readiness.ready) {
+              sendResponse({
+                ok: false,
+                error: readiness.reason,
+                reason: readiness.reason,
+                readiness,
+              });
+              return;
+            }
             const cookies = await chrome.cookies.getAll({ domain: message.host });
             // 같은 이름이 여러 path에 걸려있으면 longest-path가 일반적으로 우선 — 단순화 위해
             // 첫 발견 우선. 도메인은 .x2bee.com과 fo.x2bee.com 둘 다 들어옴 (chrome 동작).
@@ -418,7 +891,7 @@ chrome.runtime.onMessage.addListener(
       case 'PAGE_COMMAND': {
         if (!sender.tab) {
           // sidepanel에서 보낸 경우 (sender.tab 없음) → SW에서 직접 처리
-          handleApiHookAction(message.action, message.params).then((hookResult) => {
+          handleApiHookAction(message.action, message.params, getMessageTabId(message)).then((hookResult) => {
             sendResponse(hookResult || { success: false, action: message.action, error: 'Unknown action' });
           });
           return true;
@@ -429,7 +902,7 @@ chrome.runtime.onMessage.addListener(
 
       // ── Element Picker ──
       case 'ELEMENT_PICKER_START':
-        sendToContentScript({ type: 'ELEMENT_PICKER_START' } as ExtensionMessage);
+        sendToContentScript({ type: 'ELEMENT_PICKER_START' } as ExtensionMessage, getMessageTabId(message));
         sendResponse({ ok: true });
         break;
 
@@ -437,11 +910,13 @@ chrome.runtime.onMessage.addListener(
         const tabId3 = sender.tab?.id;
         if (tabId3) {
           // content script에서 보낸 경우 (요소 클릭 후) → hook inject
-          handlePickerHookInject(tabId3).then(() => sendResponse({ ok: true }));
+          handlePickerHookInject(tabId3)
+            .then(() => sendResponse({ ok: true }))
+            .catch((err) => sendResponse({ ok: false, error: errorMessage(err) }));
           return true;
         }
         // sidepanel에서 보낸 경우 (취소 버튼) → content script에 stop 전달
-        sendToContentScript({ type: 'ELEMENT_PICKER_STOP' } as ExtensionMessage);
+        sendToContentScript({ type: 'ELEMENT_PICKER_STOP' } as ExtensionMessage, getMessageTabId(message));
         sendResponse({ ok: true });
         break;
       }
@@ -485,11 +960,11 @@ chrome.storage.local.get(null, (items) => {
 
 // ── Helpers ──
 
-async function getOriginFromTab(): Promise<string | null> {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs.length > 0 && tabs[0].url) {
+async function getOriginFromTab(tabId?: number): Promise<string | null> {
+  const tab = await getTargetTab(tabId);
+  if (tab?.url) {
     try {
-      return new URL(tabs[0].url).origin;
+      return new URL(tab.url).origin;
     } catch {
       return null;
     }
@@ -500,23 +975,25 @@ async function getOriginFromTab(): Promise<string | null> {
 /**
  * XGEN 서버 URL을 결정한다. 모든 단계에서 isXgenOrigin으로 검증 — 비-XGEN origin은 절대 반환 X.
  *
- * 1순위: 토큰이 있는 XGEN origin (메모리 캐시)
- * 2순위: storage에 저장된 serverUrl (단, XGEN origin인지 검증)
- * 3순위: active tab의 origin (XGEN 페이지인 경우)
+ * 1순위: storage에 저장된 serverUrl (단, XGEN origin인지 검증)
+ * 2순위: active tab의 origin (xgen.* 또는 저장된 local serverUrl과 같은 origin)
+ * 3순위: 토큰이 있는 XGEN origin (메모리 캐시)
  */
-async function resolveXgenServerUrl(): Promise<string | null> {
-  // 1순위: active tab의 origin
-  const tabOrigin = await getOriginFromTab();
-  if (tabOrigin && isXgenOrigin(tabOrigin)) return tabOrigin;
-
-  // 2순위: storage에 저장된 서버 URL — 반드시 XGEN origin이어야 함.
+async function resolveXgenServerUrl(tabId?: number): Promise<string | null> {
+  // 1순위: storage에 저장된 서버 URL — 반드시 XGEN origin이어야 함.
   // 이전 버그로 fo.x2bee.com 같은 게 저장돼있을 수 있어서 startup migration이 청소하지만
   // 런타임에서도 한 번 더 가드.
   const stored = await chrome.storage.local.get(STORAGE_KEYS.SERVER_URL);
   const storedUrl = stored[STORAGE_KEYS.SERVER_URL] as string | undefined;
   if (storedUrl && isXgenOrigin(storedUrl)) {
-    const token = await getStoredToken(storedUrl);
-    if (token) return storedUrl;
+    return storedUrl;
+  }
+
+  // 2순위: active tab의 origin. xgen.* 도메인은 바로 허용하되, localhost/127은
+  // 저장된 serverUrl과 같은 origin일 때만 허용해 로컬 업무 사이트 오인을 줄인다.
+  const tabOrigin = await getOriginFromTab(tabId);
+  if (tabOrigin && (isXgenHostedOrigin(tabOrigin) || sameOrigin(tabOrigin, storedUrl))) {
+    return tabOrigin;
   }
 
   // 3순위: 토큰이 있는 XGEN origin (메모리)
@@ -527,19 +1004,48 @@ async function resolveXgenServerUrl(): Promise<string | null> {
 }
 
 async function getStoredToken(origin: string): Promise<string> {
-  const result = await chrome.storage.local.get(`token:${origin}`);
-  const token = result[`token:${origin}`] || '';
+  const result = await chrome.storage.local.get([`token:${origin}`, STORAGE_KEYS.AUTH_TOKEN]);
+  let token = result[`token:${origin}`] || '';
+  if (!token) {
+    token = await getXgenCookieToken(origin);
+  }
+  if (!token && result[STORAGE_KEYS.AUTH_TOKEN]) {
+    token = result[STORAGE_KEYS.AUTH_TOKEN];
+  }
   if (token) {
     tokensByOrigin[origin] = token; // 메모리 캐시에도 반영
+    chrome.storage.local.set({ [`token:${origin}`]: token });
   }
   return token;
 }
 
-async function getPageContextFromTab(): Promise<PageContext | null> {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs.length === 0 || !tabs[0].id) return null;
+async function getXgenCookieToken(origin: string): Promise<string> {
+  try {
+    const readiness = await inspectCookiePermission(origin);
+    if (!readiness.ready) return '';
+    const cookies = await chrome.cookies.getAll({ url: `${origin.replace(/\/+$/, '')}/` });
+    const preferredNames = [
+      'xgen_access_token',
+      'access_token',
+      'accessToken',
+      'token',
+      'jwt',
+    ];
+    for (const name of preferredNames) {
+      const found = cookies.find((cookie) => cookie.name === name && cookie.value);
+      if (found) return found.value;
+    }
+  } catch (err) {
+    console.warn('[XGEN SW] cookie token lookup failed:', err);
+  }
+  return '';
+}
 
-  const activeTabId = tabs[0].id;
+async function getPageContextFromTab(tabId?: number): Promise<PageContext | null> {
+  const targetTab = await getTargetTab(tabId);
+  if (!targetTab?.id) return null;
+
+  const activeTabId = targetTab.id;
 
   // 캐시: 같은 탭 + 2초 이내일 때만 사용
   if (
@@ -564,15 +1070,15 @@ async function getPageContextFromTab(): Promise<PageContext | null> {
   }
 }
 
-async function sendToContentScript(message: ExtensionMessage) {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs.length > 0 && tabs[0].id) {
-    console.log('[XGEN SW] sendToContentScript:', message.type, 'to tab', tabs[0].id);
-    await chrome.tabs.sendMessage(tabs[0].id, message).catch((err) => {
+async function sendToContentScript(message: ExtensionMessage, tabId?: number) {
+  const targetTab = await getTargetTab(tabId);
+  if (targetTab?.id) {
+    console.log('[XGEN SW] sendToContentScript:', message.type, 'to tab', targetTab.id);
+    await chrome.tabs.sendMessage(targetTab.id, message).catch((err) => {
       console.error('[XGEN SW] sendToContentScript failed:', message.type, err);
     });
   } else {
-    console.warn('[XGEN SW] sendToContentScript: no active tab found');
+    console.warn('[XGEN SW] sendToContentScript: no target tab found');
   }
 }
 
@@ -589,17 +1095,18 @@ async function dispatchPageCommand(
   requestId: string,
   action: string,
   params: Record<string, unknown>,
+  targetTabId?: number,
 ): Promise<void> {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs.length === 0 || !tabs[0].id) {
+  const targetTab = await getTargetTab(targetTabId);
+  if (!targetTab?.id) {
     await postCommandResultToBackend(requestId, {
-      success: false, action, error: 'No active tab found',
-    });
+      success: false, action, error: 'No target tab found',
+    }, targetTabId);
     return;
   }
 
-  const tabId = tabs[0].id;
-  const urlBefore = tabs[0].url || '';
+  const tabId = targetTab.id;
+  const urlBefore = targetTab.url || '';
 
   try {
     // content script가 살아있으면 정상 실행 → PAGE_COMMAND_RESULT로 결과 전달됨
@@ -624,7 +1131,7 @@ async function dispatchPageCommand(
         success: true,
         action,
         pageContext: newContext,
-      });
+      }, tabId);
       console.log(`[XGEN SW] Navigation handled: posted new page context to backend`);
     } catch (navErr) {
       // 네비게이션도 없고 content script도 죽은 경우 — 진짜 실패
@@ -632,7 +1139,7 @@ async function dispatchPageCommand(
         success: false,
         action,
         error: `Content script disconnected, no navigation detected: ${navErr}`,
-      });
+      }, tabId);
     }
   }
 }
@@ -727,8 +1234,9 @@ function waitForNavigationContext(
 async function postCommandResultToBackend(
   requestId: string,
   result: unknown,
+  targetTabId?: number,
 ) {
-  const serverUrl = await resolveXgenServerUrl();
+  const serverUrl = await resolveXgenServerUrl(targetTabId);
   if (!serverUrl) return;
 
   const authToken = tokensByOrigin[serverUrl] || (await getStoredToken(serverUrl));
@@ -759,6 +1267,7 @@ function broadcastCaptureStatus(payload: {
   active: boolean;
   tabId?: number;
   count?: number;
+  error?: string;
 }) {
   const msg: ExtensionMessage = { type: 'CAPTURE_SESSION_STATUS', ...payload };
   broadcastToSidePanel(msg);
@@ -774,7 +1283,7 @@ function isCapturableHost(url: string | undefined): boolean {
     const u = new URL(url);
     if (!/^https?:$/.test(u.protocol)) return false;
     const h = u.hostname;
-    if (h === 'xgen.x2bee.com' || h.startsWith('xgen.') || h.endsWith('.xgen.x2bee.com')) return false;
+    if (isXgenHostedHost(h)) return false;
     if (h === 'localhost' || h === '127.0.0.1') return false;
     return true;
   } catch {
@@ -819,14 +1328,31 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   // Start 단계에서는 사이드패널을 열지 않는다 — 페이지 시야 확보가 우선.
   // 사이드패널은 정지 시(STOP_FLOATING_CAPTURE 핸들러)에 열어서 결과 리스트를 보여준다.
 
-  // 캡처 세션 시작 — 기존 START_CAPTURE_SESSION 로직과 동일.
-  activeCaptureSession = { tabId: tab.id, startedAt: Date.now(), captures: [] };
-  await handlePickerHookInject(tab.id).catch(() => {});
+  try {
+    const frameUrls = await frameUrlsForTab(tab.id, url);
+    const readiness = await requestHostPermissions(frameUrls);
+    if (!readiness.ready) {
+      broadcastCaptureStatus({
+        active: false,
+        tabId: tab.id,
+        error: readiness.reason,
+      });
+      return;
+    }
+    frameCaptureStateByTab.set(tab.id, newFrameCaptureState());
+    await handlePickerHookInject(tab.id);
+    activeCaptureSession = { tabId: tab.id, startedAt: Date.now(), captures: [] };
 
-  // overlay 표시 — content script가 안 떠있는 탭(확장 reload 후 기존 탭)에서도 동작하도록
-  // tabs.sendMessage 실패하면 scripting.executeScript로 직접 주입.
-  await showFloatingOverlayOnTab(tab.id);
-  broadcastCaptureStatus({ active: true, tabId: tab.id, count: 0 });
+    // overlay 표시 — content script가 안 떠있는 탭(확장 reload 후 기존 탭)에서도 동작하도록
+    // tabs.sendMessage 실패하면 scripting.executeScript로 직접 주입.
+    await showFloatingOverlayOnTab(tab.id);
+    broadcastCaptureStatus({ active: true, tabId: tab.id, count: 0 });
+  } catch (err) {
+    const message = errorMessage(err);
+    activeCaptureSession = null;
+    console.warn('[XGEN SW] context capture start failed:', err);
+    broadcastCaptureStatus({ active: false, tabId: tab.id, error: message });
+  }
 });
 
 /**
@@ -951,45 +1477,34 @@ const API_HOOK_ACTIONS = new Set([
 async function handleApiHookAction(
   action: string,
   params: Record<string, unknown>,
+  targetTabId?: number,
 ): Promise<import('../shared/types').PageCommandResult | null> {
   if (!API_HOOK_ACTIONS.has(action)) return null;
 
   try {
     switch (action) {
       case 'start_api_hook': {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tabs.length === 0 || !tabs[0].id) {
-          return { success: false, action, error: 'Active tab not found' };
+        const targetTab = await getTargetTab(targetTabId);
+        if (!targetTab?.id) {
+          return { success: false, action, error: 'Target tab not found' };
         }
-        const tabId = tabs[0].id;
+        const tabId = targetTab.id;
 
         if (hookedTabs.has(tabId)) {
           return { success: true, action, result: 'API hook already active' };
         }
 
-        // relay (isolated world) + MAIN world hook 주입
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          func: apiHookRelayFunction,
-          world: 'ISOLATED' as any,
-        });
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          func: mainWorldHookFunction,
-          world: 'MAIN' as any,
-        });
-
-        hookedTabs.add(tabId);
+        await injectApiHookIntoTab(tabId);
         capturedApisByTab.set(tabId, []);
         return { success: true, action, result: 'API hook started. All fetch/XHR requests on this page will be captured.' };
       }
 
       case 'stop_api_hook': {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tabs.length === 0 || !tabs[0].id) {
-          return { success: false, action, error: 'Active tab not found' };
+        const targetTab = await getTargetTab(targetTabId);
+        if (!targetTab?.id) {
+          return { success: false, action, error: 'Target tab not found' };
         }
-        const tabId = tabs[0].id;
+        const tabId = targetTab.id;
 
         await chrome.scripting.executeScript({
           target: { tabId },
@@ -1003,8 +1518,7 @@ async function handleApiHookAction(
       }
 
       case 'get_captured_apis': {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        const tabId = tabs[0]?.id || 0;
+        const tabId = (await getTargetTab(targetTabId))?.id || 0;
         const captured = capturedApisByTab.get(tabId) || [];
 
         // 필터 적용
@@ -1048,8 +1562,7 @@ async function handleApiHookAction(
       }
 
       case 'clear_captured_apis': {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        const tabId = tabs[0]?.id || 0;
+        const tabId = (await getTargetTab(targetTabId))?.id || 0;
         const count = capturedApisByTab.get(tabId)?.length || 0;
         capturedApisByTab.set(tabId, []);
         return { success: true, action, result: `Cleared ${count} captured APIs.` };
@@ -1059,7 +1572,7 @@ async function handleApiHookAction(
         const toolData = params as Record<string, unknown>;
 
         // XGEN 서버 URL 결정
-        let serverUrl = (toolData.server_url as string | undefined) || await resolveXgenServerUrl();
+        let serverUrl = (toolData.server_url as string | undefined) || await resolveXgenServerUrl(targetTabId);
         if (!serverUrl) {
           return { success: false, action, error: 'XGEN server URL not found. Log in to XGEN first.' };
         }
@@ -1072,8 +1585,12 @@ async function handleApiHookAction(
         // 인증 프로필 자동 매칭: api_url 도메인과 일치하는 auth profile 찾기
         let authProfileId = toolData.auth_profile_id as string | undefined;
         if (!authProfileId) {
-          const matchResult = await autoMatchAuthProfile(serverUrl, authToken, toolData.api_url as string);
-          if (matchResult === 'LOGIN_REQUIRED') {
+          const resolution = await autoMatchAuthProfile(
+            serverUrl,
+            authToken,
+            toolData.api_url as string,
+          );
+          if (resolution.status === 'login_required') {
             return {
               success: false,
               action,
@@ -1082,7 +1599,14 @@ async function handleApiHookAction(
                 `해결 방법: (1) start_api_hook이 켜져 있는지 확인 후, (2) 로그아웃 → 재로그인으로 토큰을 재발급받은 다음, (3) register_tool을 다시 시도하세요.`,
             };
           }
-          authProfileId = matchResult || undefined;
+          if (resolution.status === 'ambiguous') {
+            return {
+              success: false,
+              action,
+              error: '여러 인증 프로필이 동일 host 후보로 확인되었습니다. XGEN Collection에서 인증 프로필을 명시적으로 선택해주세요.',
+            };
+          }
+          authProfileId = resolution.authProfileId;
         }
 
         // ── 캡처된 원본 request body로 static_body/api_body 보정 ──
@@ -1184,7 +1708,6 @@ async function handleApiHookAction(
           },
         };
 
-        console.log(`[XGEN SW] register_tool savePayload auth_profile_id: ${(savePayload.content as any).auth_profile_id ?? 'NONE'}`);
         const response = await fetch(`${serverUrl}/api/tools/storage/save`, {
           method: 'POST',
           headers: {
@@ -1226,126 +1749,222 @@ async function handleApiHookAction(
 /**
  * api_url의 도메인과 일치하는 auth profile을 찾거나, 없으면 캡처된 인증 헤더로 자동 생성.
  */
+type AuthResolutionStatus =
+  | 'linked_collection'
+  | 'matched_exact'
+  | 'created'
+  | 'updated'
+  | 'missing'
+  | 'ambiguous'
+  | 'login_required'
+  | 'profile_inactive'
+  | 'backend_error';
+
+interface AuthProfileResolution {
+  status: AuthResolutionStatus;
+  authProfileId?: string;
+  source?: 'collection' | 'profile' | 'capture';
+  collectionId?: string;
+  candidateIds?: string[];
+}
+
+async function fetchAuthProfiles(
+  serverUrl: string,
+  authToken: string,
+): Promise<AuthProfileSummary[]> {
+  const response = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
+    headers: xgenAuthHeaders(authToken),
+  });
+  if (!response.ok) {
+    throw new Error(`auth profile list failed: ${response.status}`);
+  }
+  const payload = await response.json();
+  return Array.isArray(payload) ? payload as AuthProfileSummary[] : [];
+}
+
+async function fetchApiCollectionsForAuth(
+  serverUrl: string,
+  authToken: string,
+): Promise<CollectionAuthSummary[]> {
+  const response = await fetch(`${serverUrl}/api/tools/api-collections`, {
+    headers: xgenAuthHeaders(authToken),
+  });
+  if (!response.ok) return [];
+  const payload = await response.json();
+  return Array.isArray(payload) ? payload as CollectionAuthSummary[] : [];
+}
+
+async function upsertCapturedLoginProfileUnlocked(
+  serverUrl: string,
+  authToken: string,
+  apiDomain: string,
+  capturedLogin: CapturedLogin,
+): Promise<AuthProfileResolution> {
+  const profiles = await fetchAuthProfiles(serverUrl, authToken);
+  const serviceId = canonicalAuthServiceId(apiDomain);
+  const profileData = buildAuthProfileFromLogin(
+    serviceId,
+    apiDomain,
+    capturedLogin,
+  );
+  const existing = profiles.find(
+    (profile) => profile.service_id.toLowerCase() === serviceId.toLowerCase(),
+  );
+
+  if (existing) {
+    if ((existing.status ?? 'active') !== 'active') {
+      return { status: 'profile_inactive', source: 'profile' };
+    }
+    if (!isPathfinderManagedProfile(existing, apiDomain)) {
+      return {
+        status: 'matched_exact',
+        source: 'profile',
+        authProfileId: existing.service_id,
+      };
+    }
+    const { service_id: _serviceId, ...updateData } = profileData;
+    const updateResponse = await fetch(
+      `${serverUrl}/api/session-station/v1/auth-profiles/${encodeURIComponent(existing.service_id)}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...xgenAuthHeaders(authToken),
+        },
+        body: JSON.stringify(updateData),
+      },
+    );
+    if (!updateResponse.ok) {
+      return { status: 'backend_error', source: 'capture' };
+    }
+    return {
+      status: 'updated',
+      source: 'capture',
+      authProfileId: existing.service_id,
+    };
+  }
+
+  const createResponse = await fetch(
+    `${serverUrl}/api/session-station/v1/auth-profiles`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...xgenAuthHeaders(authToken),
+      },
+      body: JSON.stringify(profileData),
+    },
+  );
+  if (createResponse.ok || createResponse.status === 409) {
+    return {
+      status: createResponse.ok ? 'created' : 'matched_exact',
+      source: 'capture',
+      authProfileId: serviceId,
+    };
+  }
+  return { status: 'backend_error', source: 'capture' };
+}
+
+async function upsertCapturedLoginProfile(
+  serverUrl: string,
+  authToken: string,
+  apiDomain: string,
+  capturedLogin: CapturedLogin,
+): Promise<AuthProfileResolution> {
+  const key = `${serverUrl}\n${apiDomain.toLowerCase()}`;
+  const previous = authProfileUpsertsByDomain.get(key);
+  const current = (previous ?? Promise.resolve({ status: 'missing' } as AuthProfileResolution))
+    .catch(() => ({ status: 'backend_error' } as AuthProfileResolution))
+    .then(() => upsertCapturedLoginProfileUnlocked(
+      serverUrl,
+      authToken,
+      apiDomain,
+      capturedLogin,
+    ));
+  authProfileUpsertsByDomain.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (authProfileUpsertsByDomain.get(key) === current) {
+      authProfileUpsertsByDomain.delete(key);
+    }
+  }
+}
+
 async function autoMatchAuthProfile(
   serverUrl: string,
   authToken: string,
   apiUrl: string,
-): Promise<string | undefined> {
+): Promise<AuthProfileResolution> {
   try {
     let apiDomain: string;
-    let apiOrigin: string;
     try {
       const u = new URL(apiUrl);
       apiDomain = u.hostname;
-      apiOrigin = u.origin;
     } catch {
-      return undefined;
+      return { status: 'missing' };
     }
+    if (apiDomain === 'localhost') return { status: 'missing' };
 
-    if (apiDomain === 'localhost') return undefined;
-
-    // 1) 기존 프로필에서 도메인 매칭
-    console.log(`[XGEN SW] autoMatchAuthProfile: serverUrl=${serverUrl}, apiDomain=${apiDomain}, token=${authToken?.slice(0, 20)}...`);
-    const resp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
-      headers: { Authorization: `Bearer ${authToken}` },
-    });
-    console.log(`[XGEN SW] auth-profiles response: ${resp.status}`);
-
-    if (resp.ok) {
-      const profiles = await resp.json() as Array<{
-        service_id: string;
-        name: string;
-        status: string;
-      }>;
-
-      const domainParts = apiDomain.replace('www.', '').split('.');
-      const domainKey = domainParts[0];
-
-      const matched = profiles.find((p) =>
-        p.status === 'active' && (
-          p.service_id.toLowerCase().includes(domainKey) ||
-          p.name.toLowerCase().includes(domainKey)
-        )
+    const [collections, profiles] = await Promise.all([
+      fetchApiCollectionsForAuth(serverUrl, authToken),
+      fetchAuthProfiles(serverUrl, authToken),
+    ]);
+    const collectionMatch = matchCollectionAuthProfile(apiDomain, collections);
+    if (collectionMatch.status === 'ambiguous') {
+      return {
+        status: 'ambiguous',
+        source: 'collection',
+        candidateIds: collectionMatch.candidateIds,
+      };
+    }
+    if (collectionMatch.status === 'matched' && collectionMatch.authProfileId) {
+      const linked = profiles.find(
+        (profile) => profile.service_id === collectionMatch.authProfileId,
       );
-
-      if (matched) {
-        console.log(`[XGEN SW] Auto-matched auth profile: ${matched.service_id} for ${apiDomain}`);
-        return matched.service_id;
+      if (!linked) return { status: 'missing', source: 'collection' };
+      if ((linked.status ?? 'active') !== 'active') {
+        return { status: 'profile_inactive', source: 'collection' };
       }
+      return {
+        status: 'linked_collection',
+        source: 'collection',
+        authProfileId: linked.service_id,
+        collectionId: collectionMatch.collectionId,
+      };
     }
 
-    // 2) 매칭 실패 → 캡처된 로그인 요청으로 auth profile 자동 생성
-    const serviceId = apiDomain.replace('www.', '').replace(/\./g, '_');
+    const profileMatch = matchExactAuthProfile(apiDomain, profiles);
+    if (profileMatch.status === 'ambiguous') {
+      return {
+        status: 'ambiguous',
+        source: 'profile',
+        candidateIds: profileMatch.candidateIds,
+      };
+    }
+    if (profileMatch.status === 'matched' && profileMatch.authProfileId) {
+      return {
+        status: 'matched_exact',
+        source: 'profile',
+        authProfileId: profileMatch.authProfileId,
+      };
+    }
 
     const capturedLogin = findCapturedLoginForDomain(apiDomain);
-    if (!capturedLogin) {
-      // 2-a) autoCreateAuthProfileFromCapture는 API_CAPTURED 시점에 fire-and-forget으로 실행됨.
-      //      레이스로 인해 첫 조회에서 프로필이 아직 안 만들어졌을 수 있으므로
-      //      짧게 한 번 대기 후 서버 프로필 목록을 재조회하여 구제한다.
-      await new Promise(r => setTimeout(r, 500));
-      try {
-        const retryResp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
-          headers: { Authorization: `Bearer ${authToken}` },
-        });
-        if (retryResp.ok) {
-          const retryProfiles = await retryResp.json() as Array<{
-            service_id: string; name: string; status: string;
-          }>;
-          const domainParts = apiDomain.replace('www.', '').split('.');
-          const domainKey = domainParts[0];
-          const matched = retryProfiles.find((p) =>
-            p.status === 'active' && (
-              p.service_id.toLowerCase().includes(domainKey) ||
-              p.name.toLowerCase().includes(domainKey)
-            )
-          );
-          if (matched) {
-            console.log(`[XGEN SW] Auto-matched auth profile on retry: ${matched.service_id} for ${apiDomain}`);
-            return matched.service_id;
-          }
-        }
-      } catch (e) {
-        console.warn('[XGEN SW] retry profile fetch failed:', e);
-      }
-
-      const capturedAuth = findCapturedAuthForDomain(apiDomain);
-      if (capturedAuth) {
-        // Authorization 헤더 있지만 로그인 미캡처 → 로그인 필요
-        return 'LOGIN_REQUIRED';
-      }
-      // Authorization 헤더 없음 — 하지만 같은 도메인에 로그인 API가 존재하면
-      // 쿠키 기반 인증일 수 있으므로 로그인 필요로 판단
-      // (로그인 API는 이전 캡처 세션에서 남아있을 수 있음)
-      return undefined;
+    if (capturedLogin) {
+      return upsertCapturedLoginProfile(
+        serverUrl,
+        authToken,
+        apiDomain,
+        capturedLogin,
+      );
     }
-
-    const profileData = buildAuthProfileFromLogin(serviceId, apiDomain, capturedLogin);
-
-    const createResp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${authToken}`,
-      },
-      body: JSON.stringify(profileData),
-    });
-
-    if (createResp.ok) {
-      console.log(`[XGEN SW] Auto-created auth profile: ${serviceId} for ${apiDomain}`);
-      return serviceId;
-    }
-
-    // 409 (already exists) — 이미 있으면 그 service_id 반환
-    if (createResp.status === 409) {
-      return serviceId;
-    }
-
-    const err = await createResp.text();
-    console.warn(`[XGEN SW] Failed to create auth profile: ${createResp.status} ${err}`);
-    return undefined;
+    return findCapturedAuthForDomain(apiDomain)
+      ? { status: 'login_required', source: 'capture' }
+      : { status: 'missing' };
   } catch (e) {
     console.warn('[XGEN SW] autoMatchAuthProfile error:', e);
-    return undefined;
+    return { status: 'backend_error' };
   }
 }
 
@@ -1370,7 +1989,7 @@ function findCapturedLoginForDomain(domain: string): CapturedLogin | null {
       if (api.method !== 'POST') continue;
 
       try {
-        if (!new URL(api.url).hostname.includes(domain.replace('www.', ''))) continue;
+        if (new URL(api.url).hostname.toLowerCase() !== domain.toLowerCase()) continue;
       } catch { continue; }
 
       if (!loginUrlPatterns.test(api.url)) continue;
@@ -1420,7 +2039,12 @@ function findCapturedLoginForDomain(domain: string): CapturedLogin | null {
       const ct = api.requestHeaders['content-type'] || api.requestHeaders['Content-Type'];
       if (ct) headers['Content-Type'] = ct;
 
-      console.log(`[XGEN SW] Found login request: ${api.method} ${api.url}, tokens: ${tokenFields.map(f => f.name).join(', ')}`);
+      const parsedLoginUrl = new URL(api.url);
+      console.log(
+        `[XGEN SW] Found login request: ${api.method} `
+        + `${parsedLoginUrl.origin}${parsedLoginUrl.pathname}, `
+        + `token fields: ${tokenFields.map((field) => field.name).join(', ')}`,
+      );
 
       return {
         url: api.url,
@@ -1467,7 +2091,7 @@ function buildAuthProfileFromLogin(
   return {
     service_id: serviceId,
     name: `${domain} (자동 생성)`,
-    description: `캡처된 로그인 요청으로 자동 생성된 인증 프로필. 토큰 만료 시 자동 갱신됩니다.`,
+    description: `${PATHFINDER_MANAGED_MARKER} 캡처된 로그인 요청으로 자동 생성된 인증 프로필. 토큰 만료 시 자동 갱신됩니다.`,
     auth_type: 'bearer',
     login_config: {
       url: login.url,
@@ -1490,7 +2114,7 @@ function findCapturedAuthForDomain(domain: string): { type: string; key: string;
   for (const [, apis] of capturedApisByTab) {
     for (const api of apis) {
       try {
-        if (!new URL(api.url).hostname.includes(domain.replace('www.', ''))) continue;
+        if (new URL(api.url).hostname.toLowerCase() !== domain.toLowerCase()) continue;
       } catch { continue; }
 
       for (const [key, value] of Object.entries(api.requestHeaders)) {
@@ -1510,100 +2134,25 @@ function findCapturedAuthForDomain(domain: string): { type: string; key: string;
   return null;
 }
 
-/**
- * 캡처된 인증 정보로 auth profile 생성 데이터를 구성한다.
- * login_config는 플레이스홀더 — 사용자가 나중에 실제 로그인 URL/자격증명을 설정해야 자동 갱신 가능.
- * 우선은 캡처된 토큰을 fixed 값으로 injection하여 즉시 사용 가능하게 한다.
- */
-function buildAuthProfileFromCaptured(
-  serviceId: string,
-  domain: string,
-  serverUrl: string,
-  auth: { type: string; key: string; value: string },
-) {
-  // 토큰 값 추출 (예: "Bearer xxx" → "xxx")
-  const tokenValue = auth.value.includes(' ') ? auth.value.split(' ').slice(1).join(' ') : auth.value;
-  const prefix = auth.value.includes(' ') ? auth.value.split(' ')[0] + ' ' : '';
-
-  return {
-    service_id: serviceId,
-    name: `${domain} (자동 생성)`,
-    description: `Element Picker에서 자동 생성된 인증 프로필. 로그인 자동 갱신을 위해 login_config를 업데이트하세요.`,
-    auth_type: auth.type,
-    login_config: {
-      // gateway health 엔드포인트로 200 응답 보장 — fixed extraction은 응답 내용 무관
-      url: `${serverUrl}/api/health`,
-      method: 'GET',
-      headers: {},
-      payload: {},
-      timeout: 10,
-    },
-    extraction_rules: [
-      {
-        name: 'access_token',
-        source: 'fixed',
-        value: tokenValue,
-      },
-    ],
-    injection_rules: [
-      {
-        source_field: 'access_token',
-        target: 'header',
-        key: auth.key,
-        value_template: `${prefix}{access_token}`,
-        required: true,
-      },
-    ],
-    ttl: 3600,
-    refresh_before_expire: 300,
-  };
-}
-
 // ── 로그인 캡처 시 auth profile 즉시 생성 ──
 
-async function autoCreateAuthProfileFromCapture(loginUrl: string) {
+async function autoCreateAuthProfileFromCapture(loginUrl: string, tabId?: number) {
   try {
     const apiDomain = new URL(loginUrl).hostname;
-    const serverUrl = await resolveXgenServerUrl();
+    const serverUrl = await resolveXgenServerUrl(tabId);
     if (!serverUrl) return;
 
     const authToken = tokensByOrigin[serverUrl] || await getStoredToken(serverUrl);
     if (!authToken) return;
 
-    // 이미 프로필 있는지 확인
-    const resp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
-      headers: { Authorization: `Bearer ${authToken}` },
-    });
-    if (resp.ok) {
-      const profiles = await resp.json() as Array<{ service_id: string; status: string }>;
-      const serviceId = apiDomain.replace('www.', '').replace(/\./g, '_');
-      if (profiles.some((p) => p.service_id === serviceId)) {
-        console.log(`[XGEN SW] Auth profile already exists: ${serviceId}`);
-        return;
-      }
-    }
-
-    // 로그인 캡처 찾기
     const capturedLogin = findCapturedLoginForDomain(apiDomain);
     if (!capturedLogin) return;
-
-    const serviceId = apiDomain.replace('www.', '').replace(/\./g, '_');
-    const profileData = buildAuthProfileFromLogin(serviceId, apiDomain, capturedLogin);
-
-    const createResp = await fetch(`${serverUrl}/api/session-station/v1/auth-profiles`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${authToken}`,
-      },
-      body: JSON.stringify(profileData),
-    });
-
-    if (createResp.ok) {
-      console.log(`[XGEN SW] Auto-created auth profile on login capture: ${serviceId}`);
-    } else if (createResp.status === 409) {
-      console.log(`[XGEN SW] Auth profile already exists: ${serviceId}`);
-    }
+    await upsertCapturedLoginProfile(
+      serverUrl,
+      authToken,
+      apiDomain,
+      capturedLogin,
+    );
   } catch (e) {
     console.warn('[XGEN SW] autoCreateAuthProfileFromCapture error:', e);
   }
@@ -1611,27 +2160,17 @@ async function autoCreateAuthProfileFromCapture(loginUrl: string) {
 
 // ── Element Picker: hook inject ──
 async function handlePickerHookInject(tabId: number) {
-  if (!hookedTabs.has(tabId)) {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: apiHookRelayFunction,
-      world: 'ISOLATED' as any,
-    }).catch(() => {});
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: mainWorldHookFunction,
-      world: 'MAIN' as any,
-    }).catch(() => {});
-    hookedTabs.add(tabId);
-    capturedApisByTab.set(tabId, []);
-  } else {
-    capturedApisByTab.set(tabId, []);
-  }
+  await injectApiHookIntoTab(tabId);
+  capturedApisByTab.set(tabId, []);
 }
 
 // ── 탭 닫힘 시 정리 ──
 chrome.tabs.onRemoved.addListener((tabId) => {
   hookedTabs.delete(tabId);
+  frameCaptureStateByTab.delete(tabId);
+  contentScriptTabs.delete(tabId);
+  contentScriptOriginPatterns.delete(tabId);
+  updatePersistedContentScriptOrigin(tabId, null).catch(() => {});
   capturedApisByTab.delete(tabId);
   aiDrivingTabIds.delete(tabId);
   if (activeCaptureSession?.tabId === tabId) {
@@ -1639,29 +2178,47 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     // 탭이 이미 사라졌으니 tabs.sendMessage는 fail하지만 broadcastCaptureStatus가 catch.
     const session = activeCaptureSession;
     activeCaptureSession = null;
-    broadcastCaptureStatus({ active: false, tabId: session.tabId });
-    broadcastToSidePanel({
-      type: 'CAPTURE_SESSION_RESULT',
-      apis: session.captures,
-      tabId: session.tabId,
-      durationMs: Date.now() - session.startedAt,
-    });
+    completeCaptureSession(session, { openPanel: false });
   }
 });
 
 // ── 페이지 네비게이션 감지: 후킹된 탭에서 페이지 이동 시 자동 재주입 + 기록 ──
 chrome.webNavigation.onCompleted.addListener(async (details) => {
-  // 메인 프레임만 (iframe 무시)
-  if (details.frameId !== 0) return;
   const tabId = details.tabId;
 
   if (!hookedTabs.has(tabId)) return;
 
-  // 네비게이션 기록을 캡처 데이터에 추가
-  if (!capturedApisByTab.has(tabId)) {
-    capturedApisByTab.set(tabId, []);
+  const readiness = await inspectHostPermission(details.url);
+  if (!readiness.ready) {
+    if (details.frameId === 0) {
+      await abortTabForPermission(tabId, 'host_permission_required');
+    } else {
+      const state = frameCaptureStateByTab.get(tabId) ?? newFrameCaptureState();
+      state.discoveredFrameIds.add(details.frameId);
+      state.blockedFrameIds.add(details.frameId);
+      state.instrumentedFrameIds.delete(details.frameId);
+      state.failedFrameIds.delete(details.frameId);
+      const frameOrigin = safeFrameOrigin(details.url);
+      if (frameOrigin) state.blockedOrigins.add(frameOrigin);
+      frameCaptureStateByTab.set(tabId, state);
+    }
+    return;
   }
-  capturedApisByTab.get(tabId)!.push({
+
+  if (details.frameId !== 0) {
+    const state = frameCaptureStateByTab.get(tabId) ?? newFrameCaptureState();
+    frameCaptureStateByTab.set(tabId, state);
+    await injectApiHookIntoFrame(
+      tabId,
+      details.frameId,
+      details.url,
+      state,
+    );
+    return;
+  }
+
+  // 네비게이션 기록을 캡처 데이터에 추가
+  appendCapturedApi(tabId, {
     id: crypto.randomUUID(),
     tabId,
     timestamp: Date.now(),
@@ -1678,18 +2235,40 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
 
   // hook 자동 재주입 (페이지 이동으로 이전 hook 소멸)
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: apiHookRelayFunction,
-      world: 'ISOLATED' as any,
-    });
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: mainWorldHookFunction,
-      world: 'MAIN' as any,
-    });
+    await injectApiHookIntoTab(tabId);
     console.log(`[XGEN SW] API hook re-injected after navigation: ${details.url}`);
   } catch (err) {
+    hookedTabs.delete(tabId);
     console.warn('[XGEN SW] Failed to re-inject hook:', err);
   }
+});
+
+chrome.permissions.onRemoved.addListener((removed) => {
+  (async () => {
+    if (removed.permissions?.includes('cookies')) {
+      for (const origin of Object.keys(tokensByOrigin)) {
+        delete tokensByOrigin[origin];
+      }
+    }
+    if (!removed.origins?.length) return;
+    await contentScriptOriginUpdate;
+    const persistedOrigins = await readPersistedContentScriptOrigins();
+    const affectedTabs = new Set([
+      ...hookedTabs,
+      ...contentScriptTabs,
+      ...Object.keys(persistedOrigins).map(Number),
+    ]);
+    for (const tabId of affectedTabs) {
+      const originPattern = contentScriptOriginPatterns.get(tabId)
+        || persistedOrigins[String(tabId)];
+      const stillGranted = originPattern
+        ? await chrome.permissions.contains({ origins: [originPattern] })
+        : false;
+      if (!stillGranted) {
+        await abortTabForPermission(tabId, 'host_permission_revoked');
+      }
+    }
+  })().catch((err) => {
+    console.warn('[XGEN SW] permission revoke cleanup failed:', err);
+  });
 });

@@ -1,17 +1,27 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { ExtensionMessage } from '../../shared/types';
 import type { CapturedApi } from '../../shared/api-hook-types';
+import { requestHostPermission } from '../../shared/permissions';
 
 interface PickerResult {
   apis: CapturedApi[];
   elementInfo: { tag: string; text: string; url: string };
 }
 
-export function useElementPicker() {
+function tabTarget(tabId: number | null | undefined): { tabId?: number } {
+  return typeof tabId === 'number' ? { tabId } : {};
+}
+
+export function useElementPicker(
+  targetTabId?: number | null,
+  targetTabUrl?: string | null,
+) {
   const [picking, setPicking] = useState(false);
   const [result, setResult] = useState<PickerResult | null>(null);
   const [registered, setRegistered] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
   const [registerError, setRegisterError] = useState('');
+  const [permissionError, setPermissionError] = useState('');
+  const [permissionPending, setPermissionPending] = useState(false);
 
   useEffect(() => {
     const listener = (message: ExtensionMessage) => {
@@ -28,16 +38,42 @@ export function useElementPicker() {
   }, []);
 
   const togglePicker = useCallback(() => {
+    if (permissionPending) return;
     if (picking) {
       setPicking(false);
-      chrome.runtime.sendMessage({ type: 'ELEMENT_PICKER_STOP' } as ExtensionMessage);
+      chrome.runtime.sendMessage({
+        type: 'ELEMENT_PICKER_STOP',
+        ...tabTarget(targetTabId),
+      } satisfies ExtensionMessage);
     } else {
-      setPicking(true);
       setResult(null);
       setRegistered('idle');
-      chrome.runtime.sendMessage({ type: 'ELEMENT_PICKER_START' } satisfies ExtensionMessage);
+      setPermissionError('');
+      setPermissionPending(true);
+      requestHostPermission(targetTabUrl || undefined)
+        .then((readiness) => {
+          if (!readiness.ready) {
+            setPicking(false);
+            setPermissionError(
+              readiness.reason === 'host_permission_required'
+                ? '요소 캡처를 사용하려면 현재 사이트 접근 권한이 필요합니다.'
+                : '요소 캡처는 http/https 페이지에서만 사용할 수 있습니다.',
+            );
+            return;
+          }
+          setPicking(true);
+          chrome.runtime.sendMessage({
+            type: 'ELEMENT_PICKER_START',
+            ...tabTarget(targetTabId),
+          } satisfies ExtensionMessage);
+        })
+        .catch((error) => {
+          setPicking(false);
+          setPermissionError(error instanceof Error ? error.message : String(error));
+        })
+        .finally(() => setPermissionPending(false));
     }
-  }, [picking]);
+  }, [permissionPending, picking, targetTabId, targetTabUrl]);
 
   const registerApi = useCallback(async (api: CapturedApi) => {
     let pathname: string;
@@ -53,6 +89,7 @@ export function useElementPicker() {
         type: 'PAGE_COMMAND',
         requestId: crypto.randomUUID(),
         action: 'register_tool',
+        ...tabTarget(targetTabId),
         params: {
           function_name: toolName,
           api_url: api.url,
@@ -93,7 +130,7 @@ export function useElementPicker() {
       setRegistered('error');
       setRegisterError(err instanceof Error ? err.message : 'Unknown error');
     }
-  }, []);
+  }, [targetTabId]);
 
   const closeResult = useCallback(() => {
     setResult(null);
@@ -101,7 +138,18 @@ export function useElementPicker() {
     setRegisterError('');
   }, []);
 
-  return { picking, result, registered, registerError, togglePicker, registerApi, closeResult };
+  return {
+    picking,
+    result,
+    registered,
+    registerError,
+    permissionError,
+    permissionPending,
+    dismissPermissionError: () => setPermissionError(''),
+    togglePicker,
+    registerApi,
+    closeResult,
+  };
 }
 
 export function ElementPickerButton() {

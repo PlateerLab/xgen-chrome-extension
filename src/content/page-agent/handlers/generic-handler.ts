@@ -15,19 +15,14 @@
 import { PageController } from '@page-agent/page-controller';
 import type { PageHandler, PageContext, PageCommandResult, PageType } from '../types';
 import { detectPageType } from '../page-detector';
+import { computeSnapshotId } from '../dom-utils';
 
-/**
- * DOM 평탄화 텍스트의 해시 — snapshot_id.
- * FNV-1a 32-bit, 8자 hex. 백엔드/LLM이 이 id를 도구 호출에 포함시켜 freshness를 검증한다.
- */
-function computeSnapshotId(content: string): string {
-  let hash = 2166136261;
-  for (let i = 0; i < content.length; i++) {
-    hash ^= content.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0');
-}
+const SNAPSHOT_GUARDED_ACTIONS = new Set([
+  'click_element',
+  'input_text',
+  'select_option',
+  'scroll',
+]);
 
 /** 대상 요소가 실제로 보이고 상호작용 가능한지 확인. */
 function isInteractableElement(el: Element | null | undefined): boolean {
@@ -40,6 +35,11 @@ function isInteractableElement(el: Element | null | undefined): boolean {
   const rect = el.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0) return false;
   return true;
+}
+
+function getProvidedSnapshotId(params: Record<string, unknown>): string {
+  const raw = params.snapshot_id ?? params.snapshotId;
+  return typeof raw === 'string' ? raw : '';
 }
 
 export class GenericHandler implements PageHandler {
@@ -99,14 +99,19 @@ export class GenericHandler implements PageHandler {
     params: Record<string, unknown>,
   ): Promise<PageCommandResult> {
     try {
-      // updateTree()를 호출하지 않음 — extractContext()에서 빌드한 트리의 인덱스를
-      // 그대로 사용해야 AI가 지정한 인덱스와 일치한다.
-      // updateTree()는 DOM을 재스캔하여 인덱스를 재할당하므로 불일치 발생.
-
-      // snapshot_id 검증은 백엔드에서만 수행한다 (대화 이력 내 stale ref 차단).
-      // 확장 측에서 현재 DOM 해시를 re-check하면 동적 페이지(캐러셀, 배너 등)에서
-      // content hash가 매 초 바뀌어 정상 인덱스까지 거부되므로 수행하지 않는다.
-      // page-controller 인덱스는 DOM 트리 위치 기반이라 콘텐츠 변경에 안정적이다.
+      if (SNAPSHOT_GUARDED_ACTIONS.has(action)) {
+        const latestContext = await this.extractContext();
+        const expectedSnapshotId = latestContext.snapshotId ?? '';
+        const providedSnapshotId = getProvidedSnapshotId(params);
+        if (!providedSnapshotId || providedSnapshotId !== expectedSnapshotId) {
+          return {
+            success: false,
+            action,
+            error: `snapshot_id stale. 전달=${providedSnapshotId || '(누락)'}, 현재=${expectedSnapshotId}. 최신 page_context로 재시도하세요.`,
+            pageContext: latestContext,
+          };
+        }
+      }
 
       // ── Step 4: 숨겨진/상호작용 불가 요소 차단 (click/input/select) ──
       if (action === 'click_element' || action === 'input_text' || action === 'select_option') {
@@ -166,20 +171,7 @@ export class GenericHandler implements PageHandler {
       // 마스크 숨기기
       await this.controller.hideMask().catch(() => {});
 
-      const state = await this.controller.getBrowserState();
-      await this.controller.cleanUpHighlights();
-      const updatedContext: PageContext = {
-        pageType: detectPageType(new URL(window.location.href)),
-        url: state.url,
-        title: state.title,
-        elements: state.content,
-        snapshotId: computeSnapshotId(state.content ?? ''),
-        data: {},
-        availableActions: this.getAvailableActions(),
-        timestamp: Date.now(),
-      };
-
-      return { success: true, action, pageContext: updatedContext };
+      return { success: true, action, pageContext: await this.extractContext() };
     } catch (err) {
       await this.controller.hideMask().catch(() => {});
       return {

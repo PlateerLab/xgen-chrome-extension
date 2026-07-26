@@ -1,20 +1,34 @@
 import { useMemo, useState } from 'react';
 import type { SessionResult } from '../hooks/useCaptureSession';
 import { analyzeTrace, type AnalyzedTool, type AnalyzedEdge } from '../lib/trace-analyzer';
-import { createCollectionFromTrace } from '../../shared/api';
+import { buildTraceRegistrationPayload } from '../lib/trace-registration';
+import { createCollectionFromTrace, mergeCollectionFromTrace } from '../../shared/api';
+import type { FromTraceRequest } from '../../shared/api';
 import type { ExtensionMessage } from '../../shared/types';
+import {
+  assertXgenCompatibility,
+  diagnoseXgenCompatibility,
+} from '../../shared/xgen-capabilities';
+import { CollectionBuildStatus } from './CollectionBuildStatus';
 
 interface Props {
   result: SessionResult;
   onDismiss: () => void;
+  targetTabId?: number | null;
 }
 
 type RegisterState =
   | { status: 'idle' }
-  | { status: 'loading' }
+  | { status: 'loading'; action: 'create' | 'merge' }
   | { status: 'success'; collectionId: string; toolCount: number }
   | { status: 'conflict'; collectionId: string; message: string }
   | { status: 'error'; message: string };
+
+interface RegistrationContext {
+  serverUrl: string;
+  authToken: string;
+  payload: FromTraceRequest;
+}
 
 function methodColor(m: string): string {
   return m === 'GET' ? 'text-blue-600'
@@ -50,6 +64,38 @@ function ToolRow({
           <span className={methodColor(tool.method)}>{tool.method}</span> {tool.templatedPath}
           {tool.sampleCount > 1 && <span className="ml-1 text-gray-400">×{tool.sampleCount}</span>}
         </div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[9px]">
+          <span className={
+            tool.captureMetadata.confidence === 'high'
+              ? 'text-green-700'
+              : tool.captureMetadata.confidence === 'medium'
+                ? 'text-amber-700'
+                : 'text-red-700'
+          }>
+            contract {Math.round(tool.captureMetadata.coverageScore * 100)}%
+          </span>
+          {tool.captureMetadata.protocol === 'graphql' && (
+            <span className="text-fuchsia-700">GraphQL</span>
+          )}
+          {tool.captureMetadata.requestBodyKinds.includes('multipart') && (
+            <span className="text-blue-700">multipart</span>
+          )}
+          {tool.captureMetadata.frameKinds.includes('subframe') && (
+            <span className="text-cyan-700">iframe</span>
+          )}
+          {(tool.captureMetadata.requestSchemaVariants.length > 1
+            || tool.captureMetadata.responseSchemaVariants.length > 1) && (
+            <span className="text-violet-700">shape variation</span>
+          )}
+          {tool.captureMetadata.issues.some((entry) => entry.severity === 'warning') && (
+            <span
+              className="text-amber-700"
+              title={tool.captureMetadata.issues.map((entry) => entry.message).join('\n')}
+            >
+              확인 필요
+            </span>
+          )}
+        </div>
         {edgesFrom.length > 0 && (
           <div className="text-[9px] text-violet-600 mt-0.5 truncate">
             → 보통 다음으로:{' '}
@@ -64,70 +110,77 @@ function ToolRow({
   );
 }
 
-export function SessionResultPanel({ result, onDismiss }: Props) {
+function tabTarget(tabId: number | null | undefined): { tabId?: number } {
+  return typeof tabId === 'number' ? { tabId } : {};
+}
+
+export function SessionResultPanel({ result, onDismiss, targetTabId }: Props) {
   const analysis = useMemo(() => analyzeTrace(result.apis), [result.apis]);
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(analysis.tools.filter((t) => !t.isLowPriority).map((t) => t.id)),
   );
   const [showDropped, setShowDropped] = useState(false);
+  const [includeSamples, setIncludeSamples] = useState(true);
   const [registerState, setRegisterState] = useState<RegisterState>({ status: 'idle' });
 
-  const handleRegister = async () => {
+  const prepareRegistrationContext = async (): Promise<RegistrationContext> => {
     if (!analysis.primaryHost) {
-      setRegisterState({ status: 'error', message: 'host를 식별할 수 없어 등록할 수 없습니다.' });
-      return;
+      throw new Error('host를 식별할 수 없어 등록할 수 없습니다.');
     }
-    setRegisterState({ status: 'loading' });
+    const config = await chrome.runtime.sendMessage({
+      type: 'GET_CHAT_CONFIG',
+      ...tabTarget(targetTabId),
+    } satisfies ExtensionMessage);
+    if (!config?.serverUrl) {
+      throw new Error('XGEN 서버 URL이 설정되지 않았습니다.');
+    }
+    const compatibility = await diagnoseXgenCompatibility(
+      config.serverUrl,
+      config.authToken ?? '',
+    );
+    assertXgenCompatibility(compatibility);
+    // 캡처 도중 자동 등록된 인증 프로필을 collection 등록 시 같이 넘긴다 — 그래야
+    // 백엔드가 collection.auth_profile_id를 통해 모든 tool row에 자동 propagate.
+    // 이게 빠지면 collection은 만들어져도 tool들의 auth_profile_id가 비어 호출 시 401.
+    let authProfileId: string | undefined;
     try {
-      const config = await chrome.runtime.sendMessage({
-        type: 'GET_CHAT_CONFIG',
-      } satisfies ExtensionMessage);
-      if (!config?.serverUrl) {
-        setRegisterState({ status: 'error', message: 'XGEN 서버 URL이 설정되지 않았습니다.' });
-        return;
-      }
-      const selectedTools = analysis.tools.filter((t) => selected.has(t.id));
-      const selectedEdges = analysis.edges.filter(
-        (e) => selected.has(e.fromToolId) && selected.has(e.toToolId),
-      );
-
-      // 캡처 도중 자동 등록된 인증 프로필을 collection 등록 시 같이 넘긴다 — 그래야
-      // 백엔드가 collection.auth_profile_id를 통해 모든 tool row에 자동 propagate.
-      // 이게 빠지면 collection은 만들어져도 tool들의 auth_profile_id가 비어 호출 시 401.
-      let authProfileId: string | undefined;
-      try {
-        const lookup = await chrome.runtime.sendMessage({
-          type: 'LOOKUP_AUTH_PROFILE_FOR_HOST',
-          host: analysis.primaryHost,
-        } satisfies ExtensionMessage);
-        if (lookup?.ok && typeof lookup.authProfileId === 'string') {
-          authProfileId = lookup.authProfileId;
-        }
-      } catch (err) {
-        console.warn('[SessionResultPanel] auth profile lookup failed:', err);
-      }
-
-      const res = await createCollectionFromTrace(config.serverUrl, config.authToken, {
+      const lookup = await chrome.runtime.sendMessage({
+        type: 'LOOKUP_AUTH_PROFILE_FOR_HOST',
         host: analysis.primaryHost,
-        tools: selectedTools.map((t) => ({
-          method: t.method,
-          templatedPath: t.templatedPath,
-          pathParams: t.pathParams,
-          queryParamKeys: t.queryParamKeys,
-          querySample: t.querySample,
-          requestBodySample: t.requestBodySample,
-          responseSample: t.responseSample,
-          label: t.label,
-          sampleCount: t.sampleCount,
-        })),
-        edges: selectedEdges.map((e) => ({
-          fromToolId: e.fromToolId,
-          toToolId: e.toToolId,
-          confidence: e.confidence,
-          sampleSharedValue: e.sampleSharedValue,
-        })),
-        ...(authProfileId ? { authProfileId } : {}),
-      });
+        ...tabTarget(targetTabId),
+      } satisfies ExtensionMessage);
+      if (lookup?.ok && typeof lookup.authProfileId === 'string') {
+        authProfileId = lookup.authProfileId;
+      }
+    } catch (err) {
+      console.warn('[SessionResultPanel] auth profile lookup failed:', err);
+    }
+
+    return {
+      serverUrl: config.serverUrl,
+      authToken: config.authToken ?? '',
+      payload: buildTraceRegistrationPayload(
+        analysis,
+        selected,
+        authProfileId,
+        { includeSamples },
+      ),
+    };
+  };
+
+  const setSuccess = (collection: Record<string, unknown>, fallbackToolCount: number) => {
+    setRegisterState({
+      status: 'success',
+      collectionId: String(collection.collection_id ?? ''),
+      toolCount: Number(collection.tool_count ?? fallbackToolCount),
+    });
+  };
+
+  const handleRegister = async () => {
+    setRegisterState({ status: 'loading', action: 'create' });
+    try {
+      const { serverUrl, authToken, payload } = await prepareRegistrationContext();
+      const res = await createCollectionFromTrace(serverUrl, authToken, payload);
       if (res.status === 409) {
         setRegisterState({
           status: 'conflict',
@@ -135,13 +188,24 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
           message: res.message,
         });
       } else {
-        const col = res.collection as Record<string, unknown>;
-        setRegisterState({
-          status: 'success',
-          collectionId: String(col.collection_id ?? ''),
-          toolCount: Number(col.tool_count ?? selectedTools.length),
-        });
+        setSuccess(res.collection, payload.tools.length);
       }
+    } catch (err) {
+      setRegisterState({
+        status: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const handleMerge = async () => {
+    if (registerState.status !== 'conflict' || !registerState.collectionId) return;
+    const collectionId = registerState.collectionId;
+    setRegisterState({ status: 'loading', action: 'merge' });
+    try {
+      const { serverUrl, authToken, payload } = await prepareRegistrationContext();
+      const res = await mergeCollectionFromTrace(serverUrl, authToken, collectionId, payload);
+      setSuccess(res.collection, payload.tools.length);
     } catch (err) {
       setRegisterState({
         status: 'error',
@@ -180,12 +244,16 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
   };
 
   const totalDropped = analysis.dropped.reduce((s, d) => s + d.count, 0);
+  const isLoading = registerState.status === 'loading';
+  const isMerging = isLoading && registerState.action === 'merge';
+  const isConflict = registerState.status === 'conflict';
 
   return (
     <div className="border-b border-gray-200 bg-gray-50 px-3 py-2">
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-[11px] font-medium text-gray-700">
-          캡처 분석 — {analysis.primaryHost ?? '(host 미상)'}
+          {result.source === 'har' ? 'HAR 분석' : '캡처 분석'}
+          {' — '}{analysis.primaryHost ?? '(host 미상)'}
         </span>
         <button
           onClick={onDismiss}
@@ -199,7 +267,63 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
         원본 {analysis.totalRaw}건 · 노이즈 제거 {totalDropped}건 ·
         도구 {analysis.tools.length}개 · 추정 관계 {analysis.edges.length}개
         {analysis.authCandidates.length > 0 && ` · 인증 후보 ${analysis.authCandidates.length}건`}
+        {' '}· contract 평균 {Math.round(analysis.qualitySummary.averageCoverageScore * 100)}%
+        {analysis.qualitySummary.graphqlToolCount > 0
+          && ` · GraphQL ${analysis.qualitySummary.graphqlToolCount}개`}
+        {analysis.qualitySummary.multipartToolCount > 0
+          && ` · multipart ${analysis.qualitySummary.multipartToolCount}개`}
       </div>
+      {result.source !== 'har' && result.captureCoverage && (
+        <div className="mb-2 border-y border-gray-200 py-1.5 text-[9px] text-gray-600">
+          <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+            <span>
+              frame {result.captureCoverage.instrumentedFrameCount}/
+              {result.captureCoverage.discoveredFrameCount} 관찰
+            </span>
+            <span>
+              iframe 요청 {result.captureCoverage.observedSubframeRequestCount}건
+            </span>
+            {result.captureCoverage.blockedFrameCount > 0 && (
+              <span className="text-amber-700">
+                권한 없음 {result.captureCoverage.blockedFrameCount} frame
+              </span>
+            )}
+            {result.captureCoverage.failedFrameCount > 0 && (
+              <span className="text-red-700">
+                hook 실패 {result.captureCoverage.failedFrameCount} frame
+              </span>
+            )}
+            {result.captureCoverage.serviceWorkerControlled && (
+              <span className="text-amber-700">Service Worker 제어 감지</span>
+            )}
+          </div>
+          {result.captureCoverage.issues.some((entry) => entry.severity === 'warning') && (
+            <div
+              className="mt-0.5 truncate text-amber-700"
+              title={result.captureCoverage.issues
+                .map((entry) => entry.message)
+                .join('\n')}
+            >
+              일부 요청은 브라우저 hook 범위 밖입니다. HAR 가져오기로 보완할 수 있습니다.
+            </div>
+          )}
+        </div>
+      )}
+      {result.source === 'har' && result.importSummary && (
+        <div
+          className="text-[9px] text-gray-500 mb-2 truncate"
+          title={result.sourceName}
+        >
+          {result.sourceName || 'HAR'}
+          {' · '}가져옴 {result.importSummary.importedEntries}
+          {result.importSummary.skippedEntries > 0
+            && ` · 제외 ${result.importSummary.skippedEntries}`}
+          {result.importSummary.redacted && ' · 민감값 제거'}
+          {result.importSummary.droppedSensitiveQueryKeys > 0
+            && ` · query key 제외 ${result.importSummary.droppedSensitiveQueryKeys}`}
+          {result.importSummary.truncated && ' · 크기 제한 적용'}
+        </div>
+      )}
 
       {/* 도구 목록 */}
       {analysis.tools.length > 0 ? (
@@ -276,21 +400,48 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
 
       {/* 등록 상태 */}
       {registerState.status === 'success' && (
-        <div className="mt-2 px-2 py-1.5 bg-green-50 border border-green-200 rounded text-[11px] text-green-700">
-          ✓ 컬렉션 등록 완료: <span className="font-mono">{registerState.collectionId}</span>
-          {' '}({registerState.toolCount}개 도구)
-        </div>
+        <>
+          <div className="mt-2 px-2 py-1.5 bg-green-50 border border-green-200 rounded text-[11px] text-green-700">
+            ✓ 컬렉션 등록 완료: <span className="font-mono">{registerState.collectionId}</span>
+            {' '}({registerState.toolCount}개 도구)
+          </div>
+          <CollectionBuildStatus
+            collectionId={registerState.collectionId}
+            expectedToolCount={registerState.toolCount}
+            targetTabId={targetTabId}
+          />
+        </>
       )}
       {registerState.status === 'conflict' && (
         <div className="mt-2 px-2 py-1.5 bg-amber-50 border border-amber-200 rounded text-[11px] text-amber-700">
           이 host는 이미 <span className="font-mono">{registerState.collectionId}</span> 컬렉션으로 등록돼 있어요.
-          머지 기능(Phase 4)이 추가되기 전까지는 기존 컬렉션을 삭제 후 재등록해 주세요.
+          {' '}현재 선택한 도구를 기존 컬렉션에 병합할 수 있습니다.
         </div>
       )}
       {registerState.status === 'error' && (
         <div className="mt-2 px-2 py-1.5 bg-red-50 border border-red-200 rounded text-[11px] text-red-700">
           등록 실패: {registerState.message}
         </div>
+      )}
+
+      {analysis.tools.length > 0 && (
+        <label className="mt-2 flex items-start gap-2 rounded border border-gray-200 bg-white px-2 py-1.5">
+          <input
+            type="checkbox"
+            checked={includeSamples}
+            disabled={isLoading || registerState.status === 'success'}
+            onChange={(event) => setIncludeSamples(event.target.checked)}
+            className="mt-0.5 flex-none"
+          />
+          <span className="min-w-0">
+            <span className="block text-[10px] font-medium text-gray-700">
+              정제된 요청/응답 샘플 포함
+            </span>
+            <span className="block text-[9px] leading-4 text-gray-500">
+              끄면 필드 구조만 등록하며 query 값과 body 샘플은 전송하지 않습니다.
+            </span>
+          </span>
+        </label>
       )}
 
       {/* 액션 */}
@@ -304,17 +455,27 @@ export function SessionResultPanel({ result, onDismiss }: Props) {
         >
           {registerState.status === 'success' ? '닫기' : '취소'}
         </button>
-        <button
-          disabled={
-            selected.size === 0 ||
-            registerState.status === 'loading' ||
-            registerState.status === 'success'
-          }
-          onClick={handleRegister}
-          className="text-[11px] px-2 py-1 bg-violet-500 text-white rounded hover:bg-violet-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
-        >
-          {registerState.status === 'loading' ? '등록 중...' : '컬렉션으로 등록'}
-        </button>
+        {isConflict || isMerging ? (
+          <button
+            disabled={selected.size === 0 || isLoading}
+            onClick={handleMerge}
+            className="text-[11px] px-2 py-1 bg-amber-500 text-white rounded hover:bg-amber-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
+          >
+            {isMerging ? '병합 중...' : '기존 컬렉션에 병합'}
+          </button>
+        ) : (
+          <button
+            disabled={
+              selected.size === 0 ||
+              isLoading ||
+              registerState.status === 'success'
+            }
+            onClick={handleRegister}
+            className="text-[11px] px-2 py-1 bg-violet-500 text-white rounded hover:bg-violet-600 disabled:bg-gray-300 disabled:cursor-not-allowed"
+          >
+            {isLoading ? '등록 중...' : '컬렉션으로 등록'}
+          </button>
+        )}
       </div>
     </div>
   );

@@ -9,10 +9,12 @@
     "activeTab",
     "scripting",
     "webNavigation",
-    "contextMenus",
+    "contextMenus"
+  ],
+  "optional_permissions": [
     "cookies"
   ],
-  "host_permissions": [
+  "optional_host_permissions": [
     "<all_urls>"
   ],
   "side_panel": {
@@ -22,13 +24,6 @@
     "service_worker": "src/background/service-worker.ts",
     "type": "module"
   },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["src/content/index.ts"],
-      "run_at": "document_idle"
-    }
-  ],
   "action": {
     "default_icon": {
       "16": "public/icons/icon-16.png",

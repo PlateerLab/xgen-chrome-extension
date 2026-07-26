@@ -2,6 +2,24 @@
 
 브라우저에서 자연어로 XGEN AI 플랫폼을 제어하는 Chrome Extension.
 
+## 문서
+
+| 문서 | 내용 |
+|---|---|
+| [문서 인덱스](docs/README.md) | 전체 문서 안내 및 지원 범위 |
+| [로드맵](docs/ROADMAP.md) | 현재 작업 순서, 품질 gate 및 완료 기준 |
+| [개발 환경](docs/development.md) | 로컬 설치, 빌드 및 Chrome 로딩 |
+| [아키텍처](docs/architecture.md) | 확장 컨텍스트와 API 캡처 흐름 |
+| [메시지 프로토콜](docs/message-protocol.md) | Side Panel, Service Worker, Content Script 계약 |
+| [검증 가이드](docs/verification.md) | Playwright 자동화와 실제 환경 검증 계층 |
+| [GraphQL Introspection 가져오기](docs/graphql-introspection-import.md) | schema JSON과 endpoint 기반 GraphQL tool 등록 |
+| [Postman 가져오기](docs/postman-import.md) | Collection v2.0/v2.1의 schema-only import |
+| [수동 Tool Contract](docs/manual-tool-contract.md) | endpoint와 schema로 단일 API 도구 등록 |
+| [XGEN 연동](docs/xgen-integration.md) | endpoint, 인증 및 Collection 등록 |
+| [고객사 환경](docs/customer-environment.md) | 내부망, VPN, CA, SSO 및 acceptance |
+| [보안](docs/security.md) | 권한, 민감정보 및 로그 정책 |
+| [문제 해결](docs/troubleshooting.md) | 설치, 캡처 및 통합 오류 진단 |
+
 ## 핵심 기능
 
 ### 1. 멀티스텝 페이지 네비게이션
@@ -65,6 +83,29 @@ LangGraph `create_react_agent`를 수동 ReAct 루프로 교체하여 전체 제
 - **컨텍스트 연속성**: 대화 요약 자동 생성 + DOM 재스캔 + canvas state 캐싱
 - **실시간 스트리밍**: SSE 기반 LLM 응답 + 마크다운 렌더링
 - **다크/라이트 모드**: 시스템 설정 연동
+
+### 10. 범용 API 입력
+- 브라우저 fetch/XHR 캡처와 개인정보 보호형 HAR import
+- OpenAPI/Swagger URL 또는 JSON/YAML 파일 import
+- GraphQL introspection JSON과 실행 endpoint import
+- Postman Collection v2.0/v2.1 schema-only import
+- endpoint, parameter, request/response JSON Schema 기반 수동 Tool Contract
+- 모든 입력은 XGEN API Collection preview와 readiness 검사를 거쳐 등록
+
+### 11. MCP Station → API Collection 연결
+
+사이드패널 메뉴의 **MCP 도구 연결**에서 XGEN MCP Station의 실행 중인
+세션을 기존 API Collection에 추가할 수 있습니다.
+
+1. 대상 API Collection을 선택합니다.
+2. 현재 사용자가 접근할 수 있는 실행 중 MCP 세션을 선택합니다.
+3. `미리보기`로 도구 수, 이름 충돌, ingest 준비 상태를 확인합니다.
+4. `등록 / 갱신`으로 canonical MCP tool contract와 실행 binding을 저장합니다.
+
+등록된 MCP 도구는 OpenAPI 도구와 같은 graph/search/PlanRunner 경로를
+사용하지만, 실행은 XGEN MCP Station의 `tools/call`로 전달됩니다. 컬렉션은
+사용자 ID 원문을 저장하지 않으며, 실행할 때 현재 XGEN 사용자와 역할 권한을
+Station에서 다시 확인합니다.
 
 ## 아키텍처
 
@@ -133,10 +174,21 @@ LangGraph `create_react_agent`를 수동 ReAct 루프로 교체하여 전체 제
 ```bash
 git clone https://github.com/PlateerLab/xgen-chrome-extension.git
 cd xgen-chrome-extension
-npm install
-npm run dev
-# chrome://extensions → Load unpacked → dist/
+npm ci
+npx playwright install --with-deps chromium
+npm run build
+# chrome://extensions → 압축해제된 확장 프로그램 로드 → dist/
 ```
+
+개발 중 자동 빌드는 `npm run dev`를 사용한다. 자세한 절차는 [개발 환경 문서](docs/development.md)를 참고한다.
+
+## 검증
+
+```bash
+npm run verify:pathfinder
+```
+
+이 명령은 production build, trace contract 검증, 실제 Chromium extension runtime 검증을 순서대로 실행한다. mock runtime 통과는 실제 XGEN이나 고객사 내부망 통합 성공을 의미하지 않는다. 환경별 검증 기준은 [검증 가이드](docs/verification.md)에 정리되어 있다.
 
 ## 설정
 

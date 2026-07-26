@@ -7,8 +7,15 @@ import { SettingsBar } from './components/SettingsBar';
 import { PlanQuestionPopup } from './components/PlanQuestionPopup';
 import { useElementPicker, PickerResultPanel } from './components/ElementPickerButton';
 import { SessionResultPanel } from './components/SessionResultPanel';
+import { SourceImportButton } from './components/SourceImportButton';
+import { OpenApiImportPanel } from './components/OpenApiImportPanel';
+import { GraphQLImportPanel } from './components/GraphQLImportPanel';
+import { ManualToolContractPanel } from './components/ManualToolContractPanel';
+import { PostmanImportPanel } from './components/PostmanImportPanel';
 import { MenuDrawer } from './components/MenuDrawer';
 import { ProductInbox } from './components/ProductInbox';
+import { MCPCollectionSource } from './components/MCPCollectionSource';
+import type { SessionResult } from './hooks/useCaptureSession';
 import type { SidePanelView } from './menu/items';
 import type { ExtensionMessage, PageContext } from '../shared/types';
 
@@ -22,13 +29,21 @@ function extractHost(u: string | undefined): string | null {
 }
 
 export function App() {
+  const [targetTabId, setTargetTabId] = useState<number | null>(null);
+  const [targetTabUrl, setTargetTabUrl] = useState<string | null>(null);
   const {
     messages, isStreaming, sendMessage, stopStream, clearMessages,
     planQuestions, submitQuestionAnswers, dismissQuestions,
     greetProactive, collectionId, runCollection,
-  } = useChat();
-  const picker = useElementPicker();
-  const captureSession = useCaptureSession();
+  } = useChat(targetTabId);
+  const picker = useElementPicker(targetTabId, targetTabUrl);
+  const captureSession = useCaptureSession(targetTabId, targetTabUrl);
+  const [importedResult, setImportedResult] = useState<SessionResult | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [openApiImportOpen, setOpenApiImportOpen] = useState(false);
+  const [graphQLImportOpen, setGraphQLImportOpen] = useState(false);
+  const [manualToolOpen, setManualToolOpen] = useState(false);
+  const [postmanImportOpen, setPostmanImportOpen] = useState(false);
   const [authCapturing, setAuthCapturing] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [view, setView] = useState<SidePanelView>('chat');
@@ -49,9 +64,14 @@ export function App() {
     (async () => {
       // 마운트 시점 active 탭 ID로 pin (chrome.tabs.query는 activeTab permission으로 가능)
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tabs[0]?.id) pinnedTabIdRef.current = tabs[0].id;
+      if (tabs[0]?.id) {
+        pinnedTabIdRef.current = tabs[0].id;
+        setTargetTabId(tabs[0].id);
+        setTargetTabUrl(tabs[0].url || null);
+      }
       const config = await chrome.runtime.sendMessage({
         type: 'GET_CHAT_CONFIG',
+        ...(tabs[0]?.id ? { tabId: tabs[0].id } : {}),
       } satisfies ExtensionMessage);
       if (config?.pageContext) setPageContext(config.pageContext);
     })().catch(() => {});
@@ -65,8 +85,10 @@ export function App() {
         if (message.tabId !== pinned) return;
       } else if (message.tabId !== undefined) {
         pinnedTabIdRef.current = message.tabId;
+        setTargetTabId(message.tabId);
       }
       setPageContext(message.context);
+      setTargetTabUrl(message.context.url || null);
     };
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
@@ -75,14 +97,21 @@ export function App() {
   const handleClear = useCallback(() => {
     clearMessages();
     pinnedTabIdRef.current = null;
+    setTargetTabId(null);
+    setTargetTabUrl(null);
     greetedHostsRef.current = new Set();
     setPageContext(null);
     // 새 active 탭 기준으로 재pin + 재greet
     (async () => {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tabs[0]?.id) pinnedTabIdRef.current = tabs[0].id;
+      if (tabs[0]?.id) {
+        pinnedTabIdRef.current = tabs[0].id;
+        setTargetTabId(tabs[0].id);
+        setTargetTabUrl(tabs[0].url || null);
+      }
       const config = await chrome.runtime.sendMessage({
         type: 'GET_CHAT_CONFIG',
+        ...(tabs[0]?.id ? { tabId: tabs[0].id } : {}),
       } satisfies ExtensionMessage);
       if (config?.pageContext) setPageContext(config.pageContext);
     })().catch(() => {});
@@ -102,6 +131,7 @@ export function App() {
     (async () => {
       const config = await chrome.runtime.sendMessage({
         type: 'GET_CHAT_CONFIG',
+        ...(targetTabId !== null ? { tabId: targetTabId } : {}),
       } satisfies ExtensionMessage);
       const xgenHost = extractHost(config?.serverUrl);
       console.log('[PathFinder] greet check:', { host, xgenHost, alreadyGreeted: greetedHostsRef.current.has(host) });
@@ -115,7 +145,7 @@ export function App() {
       console.log('[PathFinder] greeting:', pageContext.url);
       greetProactive(pageContext.url);
     })().catch((err) => console.warn('[PathFinder] greet trigger failed:', err));
-  }, [pageContext?.url, greetProactive]);
+  }, [pageContext?.url, greetProactive, targetTabId]);
 
   return (
     <div className="flex flex-col h-screen bg-white text-gray-800">
@@ -139,12 +169,19 @@ export function App() {
           {/* Element Picker 아이콘 */}
           <button
             onClick={picker.togglePicker}
+            disabled={picker.permissionPending}
             className={`p-1 rounded transition-colors ${
               picker.picking
                 ? 'text-violet-600 bg-violet-100'
-                : 'text-gray-400 hover:text-gray-600'
+                : 'text-gray-400 hover:text-gray-600 disabled:opacity-40'
             }`}
-            title={picker.picking ? '요소 선택 취소 (Esc)' : 'API 캡처 — 요소 선택'}
+            title={
+              picker.permissionPending
+                ? '사이트 권한 확인 중'
+                : picker.picking
+                  ? '요소 선택 취소 (Esc)'
+                  : 'API 캡처 — 요소 선택'
+            }
           >
             <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10" />
@@ -157,14 +194,26 @@ export function App() {
 
           {/* 캡처 세션 토글 (🔴 시작 / ⏹ 종료) */}
           <button
-            onClick={() => (captureSession.active ? captureSession.stop() : captureSession.start())}
+            onClick={() => {
+              if (captureSession.active) {
+                captureSession.stop();
+              } else {
+                setImportedResult(null);
+                captureSession.start();
+              }
+            }}
+            disabled={captureSession.pending}
             className={`p-1 rounded transition-colors ${
               captureSession.active
                 ? 'text-red-600 bg-red-100'
-                : 'text-gray-400 hover:text-gray-600'
+                : captureSession.pending
+                  ? 'text-gray-300 cursor-wait'
+                  : 'text-gray-400 hover:text-gray-600'
             }`}
             title={
-              captureSession.active
+              captureSession.pending
+                ? '캡처 세션 준비 중'
+                : captureSession.active
                 ? `캡처 종료 (현재 ${captureSession.count}건)`
                 : '캡처 세션 시작 — 사용자 클릭 캡처를 끝까지 모음'
             }
@@ -179,6 +228,64 @@ export function App() {
               </svg>
             )}
           </button>
+
+          <SourceImportButton
+            targetTabId={targetTabId}
+            disabled={
+              captureSession.active
+              || captureSession.pending
+              || openApiImportOpen
+              || graphQLImportOpen
+              || manualToolOpen
+              || postmanImportOpen
+            }
+            onOpenApiRequested={() => {
+              setImportedResult(null);
+              captureSession.dismissResult();
+              setImportError(null);
+              setGraphQLImportOpen(false);
+              setManualToolOpen(false);
+              setPostmanImportOpen(false);
+              setOpenApiImportOpen(true);
+            }}
+            onGraphQLRequested={() => {
+              setImportedResult(null);
+              captureSession.dismissResult();
+              setImportError(null);
+              setOpenApiImportOpen(false);
+              setManualToolOpen(false);
+              setPostmanImportOpen(false);
+              setGraphQLImportOpen(true);
+            }}
+            onManualRequested={() => {
+              setImportedResult(null);
+              captureSession.dismissResult();
+              setImportError(null);
+              setOpenApiImportOpen(false);
+              setGraphQLImportOpen(false);
+              setPostmanImportOpen(false);
+              setManualToolOpen(true);
+            }}
+            onPostmanRequested={() => {
+              setImportedResult(null);
+              captureSession.dismissResult();
+              setImportError(null);
+              setOpenApiImportOpen(false);
+              setGraphQLImportOpen(false);
+              setManualToolOpen(false);
+              setPostmanImportOpen(true);
+            }}
+            onImported={(result) => {
+              setImportError(null);
+              setOpenApiImportOpen(false);
+              setGraphQLImportOpen(false);
+              setManualToolOpen(false);
+              setPostmanImportOpen(false);
+              captureSession.dismissResult();
+              setImportedResult(result);
+            }}
+            onError={setImportError}
+          />
 
           {/* 인증 프로필 생성 */}
           <button
@@ -215,7 +322,7 @@ export function App() {
           </button>
 
           {/* Settings 아이콘 */}
-          <SettingsBar />
+          <SettingsBar targetTabId={targetTabId} targetTabUrl={targetTabUrl} />
 
           <div className="flex-1" />
 
@@ -237,9 +344,36 @@ export function App() {
       />
 
       {view === 'inbox' && <ProductInbox onBack={() => setView('chat')} />}
+      {view === 'mcp-sources' && <MCPCollectionSource onBack={() => setView('chat')} />}
 
       {view === 'chat' && (
       <>
+      {openApiImportOpen && (
+        <OpenApiImportPanel
+          targetTabId={targetTabId}
+          onDismiss={() => setOpenApiImportOpen(false)}
+        />
+      )}
+      {graphQLImportOpen && (
+        <GraphQLImportPanel
+          targetTabId={targetTabId}
+          onDismiss={() => setGraphQLImportOpen(false)}
+        />
+      )}
+      {manualToolOpen && (
+        <ManualToolContractPanel
+          targetTabId={targetTabId}
+          targetTabUrl={targetTabUrl}
+          onDismiss={() => setManualToolOpen(false)}
+        />
+      )}
+      {postmanImportOpen && (
+        <PostmanImportPanel
+          targetTabId={targetTabId}
+          onDismiss={() => setPostmanImportOpen(false)}
+        />
+      )}
+
       {/* Picker 결과 패널 (있을 때만) */}
       {picker.result && (
         <PickerResultPanel
@@ -252,10 +386,14 @@ export function App() {
       )}
 
       {/* Capture Session 결과 패널 (세션 종료 후) */}
-      {captureSession.result && (
+      {(importedResult || captureSession.result) && (
         <SessionResultPanel
-          result={captureSession.result}
-          onDismiss={captureSession.dismissResult}
+          result={importedResult || captureSession.result!}
+          onDismiss={() => {
+            if (importedResult) setImportedResult(null);
+            else captureSession.dismissResult();
+          }}
+          targetTabId={targetTabId}
         />
       )}
 
@@ -266,6 +404,48 @@ export function App() {
             <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
             캡처 중 — 페이지 액션 수행 후 ⏹ 누르면 정리된 목록을 보여드려요. ({captureSession.count}건)
           </span>
+        </div>
+      )}
+
+      {captureSession.error && (
+        <div className="border-b border-red-200 bg-red-50 px-3 py-1.5 flex items-center gap-2">
+          <span className="text-[11px] text-red-700 flex-1">
+            캡처 오류: {captureSession.error}
+          </span>
+          <button
+            onClick={captureSession.dismissError}
+            className="text-[10px] text-red-500 hover:text-red-700"
+          >
+            닫기
+          </button>
+        </div>
+      )}
+
+      {picker.permissionError && (
+        <div className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 flex items-center gap-2">
+          <span className="text-[11px] text-amber-800 flex-1">
+            요소 캡처: {picker.permissionError}
+          </span>
+          <button
+            onClick={picker.dismissPermissionError}
+            className="text-[10px] text-amber-700 hover:text-amber-900"
+          >
+            닫기
+          </button>
+        </div>
+      )}
+
+      {importError && (
+        <div className="border-b border-red-200 bg-red-50 px-3 py-1.5 flex items-center gap-2">
+          <span className="text-[11px] text-red-700 flex-1">
+            소스 가져오기 오류: {importError}
+          </span>
+          <button
+            onClick={() => setImportError(null)}
+            className="text-[10px] text-red-500 hover:text-red-700"
+          >
+            닫기
+          </button>
         </div>
       )}
 

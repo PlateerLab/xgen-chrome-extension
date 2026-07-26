@@ -1,0 +1,97 @@
+name: Pathfinder Verification
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+    inputs:
+      verify_failure_artifacts:
+        description: Intentionally fail T1 after validating downloadable artifacts
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pathfinder-verification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: T0 Build and Contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify XGEN endpoint contract
+        run: npm run verify:pathfinder:contract
+
+      - name: Verify trace analysis and registration
+        run: npm run verify:pathfinder:trace
+
+      - name: Verify XGEN dev acceptance script against fixture
+        run: npm run verify:pathfinder:xgen-dev-fixture
+
+  runtime:
+    name: T1 Chromium Runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PATHFINDER_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/pathfinder-runtime
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify extension runtime
+        run: npm run verify:pathfinder:runtime
+
+      - name: Verify failure artifact pipeline
+        if: >-
+          github.event_name == 'workflow_dispatch'
+          && inputs.verify_failure_artifacts
+        env:
+          PATHFINDER_ARTIFACT_PROBE_FAIL_JOB: "1"
+        run: npm run verify:pathfinder:artifacts
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: pathfinder-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/pathfinder-runtime
+          if-no-files-found: ignore
+          retention-days: 14

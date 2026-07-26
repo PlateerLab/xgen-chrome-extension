@@ -1,0 +1,283 @@
+{
+  "version": 2,
+  "endpoints": [
+    {
+      "id": "chat_stream",
+      "method": "POST",
+      "path": "/api/ai-chat/stream",
+      "client": {
+        "file": "src/shared/constants.ts",
+        "needle": "API_CHAT_ENDPOINT = '/api/ai-chat/stream'"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/ai-chat/stream'"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "command_result",
+      "method": "POST",
+      "path": "/api/ai-chat/command-result/{requestId}",
+      "client": {
+        "file": "src/background/service-worker.ts",
+        "needle": "/api/ai-chat/command-result/${requestId}"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "startsWith('/api/ai-chat/command-result/')"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "providers",
+      "method": "GET",
+      "path": "/api/ai-chat/providers",
+      "client": {
+        "file": "src/shared/constants.ts",
+        "needle": "API_PROVIDERS_ENDPOINT = '/api/ai-chat/providers'"
+      },
+      "devProbe": true
+    },
+    {
+      "id": "auth_profiles",
+      "method": "GET",
+      "path": "/api/session-station/v1/auth-profiles",
+      "client": {
+        "file": "src/background/service-worker.ts",
+        "needle": "/api/session-station/v1/auth-profiles"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/session-station/v1/auth-profiles'"
+      },
+      "devProbe": true
+    },
+    {
+      "id": "auth_profile_create",
+      "method": "POST",
+      "path": "/api/session-station/v1/auth-profiles",
+      "client": {
+        "file": "src/background/service-worker.ts",
+        "needle": "upsertCapturedLoginProfile("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.method === 'POST' && req.url === '/api/session-station/v1/auth-profiles'"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "auth_profile_update",
+      "method": "PUT",
+      "path": "/api/session-station/v1/auth-profiles/{serviceId}",
+      "client": {
+        "file": "src/background/service-worker.ts",
+        "needle": "method: 'PUT'"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "const authProfileUpdateMatch"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_from_trace",
+      "method": "POST",
+      "path": "/api/tools/api-collections/from-trace",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "/api/tools/api-collections/from-trace"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/tools/api-collections/from-trace'"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_from_trace_merge",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/from-trace",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "/api/tools/api-collections/${encodedCollectionId}/from-trace"
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "/from-trace$/"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_list",
+      "method": "GET",
+      "path": "/api/tools/api-collections",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function listApiCollections("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/tools/api-collections'"
+      },
+      "devProbe": true
+    },
+    {
+      "id": "collection_capabilities",
+      "method": "GET",
+      "path": "/api/tools/api-collections/capabilities",
+      "client": {
+        "file": "src/shared/xgen-capabilities.ts",
+        "needle": "function diagnoseXgenCompatibility("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/tools/api-collections/capabilities'"
+      },
+      "devProbe": true
+    },
+    {
+      "id": "collection_create",
+      "method": "POST",
+      "path": "/api/tools/api-collections",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function createApiCollection("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "collectionCreateRequests.push"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_source_preview",
+      "method": "POST",
+      "path": "/api/tools/api-collections/preview",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function previewCollectionSource("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "sourcePreviewRequests.push"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_source_add",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/sources",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function addCollectionSource("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "sourceAddRequests.push"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_delete",
+      "method": "DELETE",
+      "path": "/api/tools/api-collections/{collectionId}",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function deleteApiCollection("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "collectionDeleteRequests.push"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_detail",
+      "method": "GET",
+      "path": "/api/tools/api-collections/{collectionId}",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function getApiCollection("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "const collectionDetailMatch"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_test_search",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/test-search",
+      "client": {
+        "file": "scripts/verify-xgen-dev.mjs",
+        "needle": "/test-search`"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_synthesize_plan",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/synthesize-plan",
+      "client": {
+        "file": "scripts/verify-xgen-dev.mjs",
+        "needle": "/synthesize-plan`"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_run",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/run",
+      "client": {
+        "file": "scripts/verify-xgen-dev.mjs",
+        "needle": "/run`"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "mcp_session_list",
+      "method": "GET",
+      "path": "/api/mcp/sessions",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function fetchMCPStationSessions("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "req.url === '/api/mcp/sessions'"
+      },
+      "devProbe": true
+    },
+    {
+      "id": "collection_mcp_source_preview",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/mcp-sources/preview",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function previewMCPCollectionSource("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "const mcpPreviewMatch"
+      },
+      "devProbe": false
+    },
+    {
+      "id": "collection_mcp_source_add",
+      "method": "POST",
+      "path": "/api/tools/api-collections/{collectionId}/mcp-sources",
+      "client": {
+        "file": "src/shared/api.ts",
+        "needle": "function addMCPCollectionSource("
+      },
+      "runtimeMock": {
+        "file": "scripts/verify-runtime.mjs",
+        "needle": "const mcpSourceMatch"
+      },
+      "devProbe": false
+    }
+  ]
+}

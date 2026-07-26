@@ -4,8 +4,10 @@
  * Lucide mouse-pointer-2 아이콘 기반의 깔끔한 마우스 커서로 대체
  * (https://lucide.dev/icons/mouse-pointer-2 — ISC License)
  */
-export function injectCursorOverride(): void {
+export function injectCursorOverride(): () => void {
+  document.getElementById('__xgen_cursor_override__')?.remove();
   const style = document.createElement('style');
+  style.id = '__xgen_cursor_override__';
   style.textContent = `
     /* 커서 컨테이너 */
     ._cursor_1dgwb_2 {
@@ -65,4 +67,5 @@ export function injectCursorOverride(): void {
     }
   `;
   document.head.appendChild(style);
+  return () => style.remove();
 }

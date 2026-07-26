@@ -106,3 +106,16 @@ export function fillInput(selector: string, value: string): boolean {
 export function getSelectedText(): string {
   return window.getSelection()?.toString().trim() ?? '';
 }
+
+/**
+ * DOM 평탄화 텍스트의 해시 — snapshot_id.
+ * FNV-1a 32-bit, 8자 hex. 백엔드/LLM이 도구 호출 freshness 검증에 사용한다.
+ */
+export function computeSnapshotId(content: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < content.length; i++) {
+    hash ^= content.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}

@@ -1,15 +1,39 @@
+function isXgenHostedHost(host: string): boolean {
+  const normalized = host.toLowerCase();
+  return (
+    normalized === 'xgen.x2bee.com' ||
+    normalized.startsWith('xgen.') ||
+    normalized.endsWith('.xgen.x2bee.com') ||
+    /^(?:[a-z0-9-]+-)?xgen(?:-[a-z0-9-]+)?\.x2bee\.com$/.test(normalized)
+  );
+}
+
 function isXgenDomain(): boolean {
   const host = window.location.hostname;
   // XGEN 자체 호스트만 — 다른 x2bee.com 서브도메인(fo.x2bee.com 등 캡처 대상)은 제외.
   // 잘못 넣으면 그 사이트의 origin이 SET_ORIGIN으로 chrome.storage.serverUrl을 덮어써서
   // 모든 API 호출이 그쪽으로 빠짐.
   return (
-    host === 'xgen.x2bee.com' ||
-    host.startsWith('xgen.') ||
-    host.endsWith('.xgen.x2bee.com') ||
+    isXgenHostedHost(host) ||
     host === 'localhost' ||
     host === '127.0.0.1'
   );
+}
+
+const TOKEN_STORAGE_KEYS = [
+  'xgen_access_token',
+  'access_token',
+  'accessToken',
+  'token',
+  'jwt',
+];
+
+function readLocalStorageToken(): string | null {
+  for (const key of TOKEN_STORAGE_KEYS) {
+    const value = localStorage.getItem(key);
+    if (value) return value;
+  }
+  return null;
 }
 
 export function extractAndSendToken(): void {
@@ -17,9 +41,10 @@ export function extractAndSendToken(): void {
   if (!isXgenDomain()) return;
 
   const token =
-    localStorage.getItem('xgen_access_token') ??
+    readLocalStorageToken() ??
     document.cookie.match(/(?:^|; )xgen_access_token=([^;]+)/)?.[1] ??
     document.cookie.match(/(?:^|; )access_token=([^;]+)/)?.[1] ??
+    document.cookie.match(/(?:^|; )accessToken=([^;]+)/)?.[1] ??
     null;
 
   if (token) {
@@ -33,16 +58,21 @@ export function extractAndSendToken(): void {
   }).catch(() => {});
 }
 
-export function watchTokenChanges(): void {
-  if (!isXgenDomain()) return;
+export function watchTokenChanges(): () => void {
+  if (!isXgenDomain()) return () => {};
 
   // Re-extract token periodically (handles token refresh)
-  setInterval(extractAndSendToken, 30_000);
+  const interval = window.setInterval(extractAndSendToken, 30_000);
 
   // Also watch for storage changes
-  window.addEventListener('storage', (e) => {
-    if (e.key === 'xgen_access_token' && e.newValue) {
+  const handleStorage = (e: StorageEvent) => {
+    if (e.key && TOKEN_STORAGE_KEYS.includes(e.key) && e.newValue) {
       chrome.runtime.sendMessage({ type: 'SET_TOKEN', token: e.newValue, origin: window.location.origin }).catch(() => {});
     }
-  });
+  };
+  window.addEventListener('storage', handleStorage);
+  return () => {
+    window.clearInterval(interval);
+    window.removeEventListener('storage', handleStorage);
+  };
 }

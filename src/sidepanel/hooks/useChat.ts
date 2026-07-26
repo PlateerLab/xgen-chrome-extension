@@ -5,7 +5,20 @@ import type {
   PipelineState, PlanQuestion, Chip, SiteInfo,
 } from '../../shared/types';
 
-export function useChat() {
+function tabTarget(tabId: number | null | undefined): { tabId?: number } {
+  return typeof tabId === 'number' ? { tabId } : {};
+}
+
+async function getTabUrl(tabId: number | null | undefined): Promise<string | undefined> {
+  if (typeof tabId === 'number') {
+    return (await chrome.tabs.get(tabId).catch(() => null))?.url;
+  }
+
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tabs[0]?.url;
+}
+
+export function useChat(targetTabId?: number | null) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [pageContext, setPageContext] = useState<PageContext | null>(null);
@@ -49,7 +62,10 @@ export function useChat() {
       try {
         // 1. SW에서 config 가져오기 (serverUrl, authToken, pageContext 등)
         console.log('[useChat] GET_CHAT_CONFIG 요청...');
-        const config = await chrome.runtime.sendMessage({ type: 'GET_CHAT_CONFIG' } satisfies ExtensionMessage);
+        const config = await chrome.runtime.sendMessage({
+          type: 'GET_CHAT_CONFIG',
+          ...tabTarget(targetTabId),
+        } satisfies ExtensionMessage);
         console.log('[useChat] GET_CHAT_CONFIG 응답:', config);
 
         if (!config?.serverUrl) {
@@ -104,7 +120,11 @@ export function useChat() {
             case 'page_command':
               // SW에 위임 → content script로 전달
               console.log('[useChat] RELAY_COMMAND 전송:', event.type, event);
-              await chrome.runtime.sendMessage({ type: 'RELAY_COMMAND', event } satisfies ExtensionMessage);
+              await chrome.runtime.sendMessage({
+                type: 'RELAY_COMMAND',
+                event,
+                ...tabTarget(targetTabId),
+              } satisfies ExtensionMessage);
               console.log('[useChat] RELAY_COMMAND 전송 완료');
               break;
 
@@ -145,7 +165,7 @@ export function useChat() {
         abortRef.current = null;
       }
     },
-    [isStreaming, messages, pipelineState],
+    [isStreaming, messages, pipelineState, targetTabId],
   );
 
   // ── 헬퍼 함수들 ──
@@ -230,6 +250,7 @@ export function useChat() {
     try {
       const config = await chrome.runtime.sendMessage({
         type: 'GET_CHAT_CONFIG',
+        ...tabTarget(targetTabId),
       } satisfies ExtensionMessage);
       console.log('[PathFinder] greet config:', {
         url,
@@ -340,7 +361,7 @@ export function useChat() {
       // 백엔드 도달 실패(502 등)는 사용자가 행동할 수 없어서 노이즈만 됨. console만.
       console.warn('[useChat] greetProactive failed:', err);
     }
-  }, []);
+  }, [targetTabId]);
 
   const clearMessages = useCallback(() => {
     setMessages([]);
@@ -381,7 +402,10 @@ export function useChat() {
   /** 단일 /run 호출 (한 round). question.required 만나면 그 자리에서 끝남 — 사용자 답변 후 다시 호출됨. */
   const _runOnce = useCallback(
     async (run: ActiveRun) => {
-      const config = await chrome.runtime.sendMessage({ type: 'GET_CHAT_CONFIG' } satisfies ExtensionMessage);
+      const config = await chrome.runtime.sendMessage({
+        type: 'GET_CHAT_CONFIG',
+        ...tabTarget(targetTabId),
+      } satisfies ExtensionMessage);
       if (!config?.serverUrl) {
         addSystemMessage('XGEN에 먼저 로그인해주세요');
         return;
@@ -403,12 +427,11 @@ export function useChat() {
       // 호출 직전마다 새로 읽어서 사용자 세션이 갱신되면 자동 반영됨.
       let liveCookies: string | undefined;
       try {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        const tabUrl = tabs[0]?.url;
+        const tabUrl = await getTabUrl(targetTabId);
         if (tabUrl) {
           const host = new URL(tabUrl).hostname;
           const resp = await chrome.runtime.sendMessage({
-            type: 'GET_LIVE_COOKIES', host,
+            type: 'GET_LIVE_COOKIES', host, url: tabUrl,
           } satisfies ExtensionMessage);
           if (resp?.ok && typeof resp.cookieHeader === 'string' && resp.cookieHeader) {
             liveCookies = resp.cookieHeader;
@@ -574,7 +597,7 @@ export function useChat() {
         abortRef.current = null;
       }
     },
-    [collectionId],
+    [collectionId, targetTabId],
   );
 
   /** 새 run 시작 — chip 클릭 / 슬래시 / 향후 자연어.

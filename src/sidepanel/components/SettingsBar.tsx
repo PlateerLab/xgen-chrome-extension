@@ -1,5 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 import { STORAGE_KEYS, API_PROVIDERS_ENDPOINT } from '../../shared/constants';
+import {
+  inspectCookiePermission,
+  requestCookiePermission,
+  type PermissionReadiness,
+} from '../../shared/permissions';
+import {
+  diagnoseXgenCompatibility,
+  xgenCompatibilityLabel,
+  type XgenCompatibilityResult,
+} from '../../shared/xgen-capabilities';
+import type { ExtensionMessage } from '../../shared/types';
 
 /** /providers 의 models 원소 — 구 백엔드는 문자열, 신 백엔드(chat mode)는 {id,name,description} 객체. */
 type ModelInfo = string | { id: string; name?: string; description?: string };
@@ -17,7 +28,12 @@ const modelId = (m: ModelInfo): string => (typeof m === 'string' ? m : m.id);
 /** ModelInfo → 드롭다운 표시 라벨. */
 const modelLabel = (m: ModelInfo): string => (typeof m === 'string' ? m : m.name || m.id);
 
-export function SettingsBar() {
+interface SettingsBarProps {
+  targetTabId?: number | null;
+  targetTabUrl?: string | null;
+}
+
+export function SettingsBar({ targetTabId, targetTabUrl }: SettingsBarProps) {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [provider, setProvider] = useState('anthropic');
   const [model, setModel] = useState('');
@@ -26,6 +42,10 @@ export function SettingsBar() {
   const [serverUrlDraft, setServerUrlDraft] = useState('');
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [cookieReadiness, setCookieReadiness] = useState<PermissionReadiness | null>(null);
+  const [permissionPending, setPermissionPending] = useState(false);
+  const [compatibility, setCompatibility] = useState<XgenCompatibilityResult | null>(null);
+  const [compatibilityPending, setCompatibilityPending] = useState(false);
 
   // Load saved settings + fetch providers
   useEffect(() => {
@@ -87,6 +107,63 @@ export function SettingsBar() {
     }
   }, []);
 
+  const inspectCompatibility = useCallback(async (url: string, token: string) => {
+    if (!url) {
+      setCompatibility(null);
+      return;
+    }
+    setCompatibilityPending(true);
+    try {
+      setCompatibility(await diagnoseXgenCompatibility(url, token));
+    } finally {
+      setCompatibilityPending(false);
+    }
+  }, []);
+
+  const refreshCookieReadiness = useCallback(() => {
+    inspectCookiePermission(targetTabUrl || undefined)
+      .then(setCookieReadiness)
+      .catch(() => setCookieReadiness(null));
+  }, [targetTabUrl]);
+
+  useEffect(() => {
+    if (!expanded) return undefined;
+    refreshCookieReadiness();
+    if (serverUrl) {
+      chrome.runtime.sendMessage({
+        type: 'GET_CHAT_CONFIG',
+        ...(typeof targetTabId === 'number' ? { tabId: targetTabId } : {}),
+      } satisfies ExtensionMessage).then((config) => {
+        void inspectCompatibility(
+          String(config?.serverUrl || serverUrl),
+          String(config?.authToken || ''),
+        );
+      }).catch(() => {
+        void inspectCompatibility(serverUrl, '');
+      });
+    }
+    chrome.permissions.onAdded.addListener(refreshCookieReadiness);
+    chrome.permissions.onRemoved.addListener(refreshCookieReadiness);
+    return () => {
+      chrome.permissions.onAdded.removeListener(refreshCookieReadiness);
+      chrome.permissions.onRemoved.removeListener(refreshCookieReadiness);
+    };
+  }, [
+    expanded,
+    inspectCompatibility,
+    refreshCookieReadiness,
+    serverUrl,
+    targetTabId,
+  ]);
+
+  const handleCookiePermission = useCallback(() => {
+    setPermissionPending(true);
+    requestCookiePermission(targetTabUrl || undefined)
+      .then(setCookieReadiness)
+      .catch(() => refreshCookieReadiness())
+      .finally(() => setPermissionPending(false));
+  }, [refreshCookieReadiness, targetTabUrl]);
+
   const handleProviderChange = useCallback((newProvider: string) => {
     setProvider(newProvider);
     const info = providers.find((p) => p.provider === newProvider);
@@ -134,6 +211,7 @@ export function SettingsBar() {
     <div className="relative">
       <button
         onClick={() => setExpanded(!expanded)}
+        data-testid="settings-toggle"
         className={`p-1 rounded transition-colors ${expanded ? 'text-gray-700 bg-gray-100' : 'text-gray-400 hover:text-gray-600'}`}
         title={`${displayName} · ${model || '(모델 미설정)'}`}
       >
@@ -219,6 +297,67 @@ export function SettingsBar() {
                 : serverUrl
                   ? `현재: ${serverUrl.replace(/^https?:\/\//, '')}`
                   : '비워두면 active 탭/저장된 토큰으로 자동 감지'}
+            </div>
+          </div>
+
+          <div className="border-t border-gray-100 pt-2">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-wide text-gray-400">
+                  XGEN 호환성
+                </div>
+                <div
+                  data-testid="xgen-compatibility-status"
+                  className={`truncate text-[10px] ${
+                    compatibility?.compatible
+                      ? 'text-green-700'
+                      : compatibility?.status === 'legacy_unverified'
+                        ? 'text-amber-700'
+                        : 'text-gray-500'
+                  }`}
+                  title={compatibility?.issues.map((issue) => issue.message).join('\n')}
+                >
+                  {compatibilityPending
+                    ? '확인 중...'
+                    : compatibility
+                      ? xgenCompatibilityLabel(compatibility)
+                      : '서버를 연결하면 확인합니다'}
+                </div>
+              </div>
+              {compatibility?.graphToolCallVersion && (
+                <span className="shrink-0 text-[9px] text-gray-400">
+                  gtc {compatibility.graphToolCallVersion}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[10px] uppercase tracking-wide text-gray-400">
+                  실행 인증
+                </div>
+                <div className="text-[10px] text-gray-500 truncate">
+                  <span data-testid="cookie-permission-status">
+                    {cookieReadiness?.ready
+                      ? '현재 사이트 쿠키 연결됨'
+                      : cookieReadiness?.reason === 'host_permission_required'
+                        ? '사이트 접근 권한 필요'
+                        : cookieReadiness?.reason === 'unsupported_url'
+                          ? '웹 페이지에서만 사용 가능'
+                          : '쿠키 연결 안 됨'}
+                  </span>
+                </div>
+              </div>
+              {!cookieReadiness?.ready && (
+                <button
+                  type="button"
+                  onClick={handleCookiePermission}
+                  data-testid="cookie-permission-connect"
+                  disabled={permissionPending || cookieReadiness?.reason === 'unsupported_url'}
+                  className="shrink-0 text-[10px] px-2 py-1.5 rounded border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {permissionPending ? '확인 중' : '연결'}
+                </button>
+              )}
             </div>
           </div>
         </div>
