@@ -33,7 +33,7 @@ npm run verify:pathfinder
 
 ## P1. Verification Automation
 
-상태: `in progress`
+상태: `done`
 
 목표: PR마다 정적 contract와 실제 Chromium extension runtime을 자동 검증하고, 실패 원인을 재현할 artifact를 남긴다.
 
@@ -44,6 +44,7 @@ npm run verify:pathfinder
 - [x] 실제 XGEN dev T2 smoke를 opt-in script로 분리
 - [x] PR workflow에서 secret을 참조하지 않도록 분리
 - [x] main 대상 통합 PR #19에서 T0/T1 green 확인
+- [x] 의도적 runtime 실패 artifact 업로드·다운로드와 trace 내부 secret/PII scan
 
 완료 gate:
 
