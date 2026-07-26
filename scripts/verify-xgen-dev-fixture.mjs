@@ -9,6 +9,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const fixtureToken = 'fixture-token-must-not-be-printed';
 const requests = [];
 let deletedCollectionId = null;
+let traceMergedCollectionId = null;
 
 function readJson(req) {
   return new Promise((resolve) => {
@@ -148,6 +149,9 @@ const server = createServer(async (req, res) => {
   const sourceMatch = url.pathname.match(
     /^\/api\/tools\/api-collections\/([^/]+)\/sources$/,
   );
+  const traceMergeMatch = url.pathname.match(
+    /^\/api\/tools\/api-collections\/([^/]+)\/from-trace$/,
+  );
   const searchMatch = url.pathname.match(
     /^\/api\/tools\/api-collections\/([^/]+)\/test-search$/,
   );
@@ -162,6 +166,30 @@ const server = createServer(async (req, res) => {
       tool_count: 1,
       source_count: 1,
       ingest_result: { adapter: body.format_hint, ready: true },
+    });
+    return;
+  }
+  if (req.method === 'POST' && traceMergeMatch) {
+    const body = await readJson(req);
+    assert.equal(body.host, '127.0.0.1');
+    assert.equal(body.tools?.[0]?.templatedPath, '/api/health');
+    assert.equal(
+      body.tools?.[0]?.aiMetadata?.source,
+      'pathfinder_trace',
+    );
+    assert.equal(
+      body.tools?.[0]?.captureMetadata?.confidence,
+      'high',
+    );
+    traceMergedCollectionId = decodeURIComponent(traceMergeMatch[1]);
+    json(res, 200, {
+      collection_id: traceMergedCollectionId,
+      tool_count: 1,
+      source_count: 1,
+      trace_merge: {
+        tool_count: 1,
+        trace_metadata_tools: 1,
+      },
     });
     return;
   }
@@ -280,10 +308,18 @@ try {
     'graphql-introspection',
   );
   assert.equal(result.collectionAcceptance.collection.toolCount, 1);
+  assert.equal(
+    result.collectionAcceptance.collection.ingestMode,
+    'pathfinder_trace',
+  );
   assert.equal(result.collectionAcceptance.search.targetRank, 1);
   assert.equal(result.collectionAcceptance.plan.stepCount, 1);
   assert.equal(result.collectionAcceptance.execute, undefined);
   assert.equal(deletedCollectionId, result.collectionAcceptance.collectionId);
+  assert.equal(
+    traceMergedCollectionId,
+    result.collectionAcceptance.collectionId,
+  );
   assert.ok(
     requests.some((entry) => entry.path.endsWith('/test-search')),
     'search route was not exercised',
@@ -299,7 +335,7 @@ try {
     'capability manifest route was not exercised',
   );
   console.log(
-    'XGEN dev verifier fixture passed: capability contract, OpenAPI/GraphQL preview, Collection build, search, plan, cleanup.',
+    'XGEN dev verifier fixture passed: capability contract, OpenAPI/GraphQL preview, Pathfinder trace build, search, plan, cleanup.',
   );
 } finally {
   await new Promise((resolve) => server.close(resolve));

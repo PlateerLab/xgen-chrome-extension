@@ -19,6 +19,8 @@ const runCollectionFlow = process.env.PATHFINDER_XGEN_RUN_COLLECTION_FLOW === '1
 const runExecute = process.env.PATHFINDER_XGEN_RUN_EXECUTE === '1';
 const testGraphQL = process.env.PATHFINDER_XGEN_TEST_GRAPHQL === '1';
 const keepCollection = process.env.PATHFINDER_XGEN_KEEP_COLLECTION === '1';
+const testTrace = runCollectionFlow
+  && process.env.PATHFINDER_XGEN_TEST_TRACE !== '0';
 const requiredBackendCapabilities = [
   'trace_collection_import',
   'collection_build_status',
@@ -235,6 +237,55 @@ function graphQLAcceptanceFixture() {
   };
 }
 
+function traceAcceptanceFixture() {
+  return {
+    host: new URL(serverUrl).hostname,
+    tools: [{
+      method: 'GET',
+      templatedPath: '/api/health',
+      pathParams: [],
+      queryParamKeys: [],
+      querySample: {},
+      responseSample: { status: 'ok' },
+      label: 'XGEN 서비스 health 상태 조회',
+      sampleCount: 1,
+      aiMetadata: {
+        source: 'pathfinder_trace',
+        canonical_action: 'read',
+        primary_resource: 'health',
+        one_line_summary: 'Read the XGEN service health status',
+        when_to_use: 'Use when checking whether the XGEN service is available',
+        output_fields: ['status'],
+      },
+      sampleMeta: {
+        redacted: false,
+        truncated: false,
+        droppedQueryKeyCount: 0,
+      },
+      captureMetadata: {
+        protocol: 'http',
+        requestContentTypes: [],
+        responseContentTypes: ['application/json'],
+        requestBodyKinds: [],
+        responseEnvelopePaths: [],
+        requestSchemaVariants: [],
+        responseSchemaVariants: [{
+          signature: 'shape_health_status',
+          observedCount: 1,
+          fields: [{ path: 'status', type: 'string' }],
+        }],
+        fileFields: [],
+        frameKinds: ['top_frame'],
+        frameOrigins: [serverUrl],
+        coverageScore: 1,
+        confidence: 'high',
+        issues: [],
+      },
+    }],
+    edges: [],
+  };
+}
+
 async function previewSource({
   spec,
   formatHint,
@@ -359,18 +410,26 @@ async function verifyCollectionAcceptance() {
     });
     created = true;
 
-    await jsonRequest(`/api/tools/api-collections/${encodedId}/sources`, {
-      method: 'POST',
-      expected: [201],
-      body: {
-        label: sourceLabel,
-        spec: openApiSpec,
-        format_hint: 'openapi',
-        required_capabilities: ['input_schema', 'output_schema'],
-        on_conflict: 'prefix',
-        auto_enrich: false,
-      },
-    });
+    if (testTrace) {
+      await jsonRequest(`/api/tools/api-collections/${encodedId}/from-trace`, {
+        method: 'POST',
+        expected: [200],
+        body: traceAcceptanceFixture(),
+      });
+    } else {
+      await jsonRequest(`/api/tools/api-collections/${encodedId}/sources`, {
+        method: 'POST',
+        expected: [201],
+        body: {
+          label: sourceLabel,
+          spec: openApiSpec,
+          format_hint: 'openapi',
+          required_capabilities: ['input_schema', 'output_schema'],
+          on_conflict: 'prefix',
+          auto_enrich: false,
+        },
+      });
+    }
 
     const collection = await jsonRequest(`/api/tools/api-collections/${encodedId}`);
     assert.ok(Number(collection.tool_count || 0) >= 1, 'Collection build produced no tools');
@@ -413,6 +472,7 @@ async function verifyCollectionAcceptance() {
     assert.ok(Array.isArray(plan.steps) && plan.steps.length >= 1, 'plan has no steps');
 
     acceptance.collection = {
+      ingestMode: testTrace ? 'pathfinder_trace' : 'openapi',
       toolCount: Number(collection.tool_count || 0),
       edgeCount: Number(collection.edge_count || 0),
       sourceCount: Number(collection.source_count || 0),

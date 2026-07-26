@@ -143,11 +143,15 @@ npm run verify:xgen-dev
 
 1. OpenAPI fixture preview
 2. 선택 시 GraphQL introspection fixture preview
-3. 임시 Collection 생성과 OpenAPI source 등록
+3. 임시 Collection 생성과 Pathfinder `from-trace` payload 등록
 4. build 결과의 tool/source 수, graph-tool-call 및 graph version 확인
 5. readiness, semantic, edge quality summary 확인
 6. health 질의 search Top-K와 deterministic plan synthesis 확인
 7. `finally`에서 임시 Collection 삭제
+
+실제 확장 등록 계약을 검증하기 위해 Collection flow는 기본적으로 `from-trace`를
+사용한다. 구버전 backend와 OpenAPI source 경로만 진단해야 하는 경우에만
+`PATHFINDER_XGEN_TEST_TRACE=0`으로 끌 수 있다.
 
 LLM provider와 실제 HTTP runner까지 확인할 때만 다음을 추가한다.
 
