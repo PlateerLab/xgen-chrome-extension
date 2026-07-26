@@ -12,6 +12,7 @@
     "verify:pathfinder:trace": "node scripts/verify-pathfinder.mjs",
     "verify:pathfinder:xgen-dev-fixture": "node scripts/verify-xgen-dev-fixture.mjs",
     "verify:pathfinder:runtime": "node scripts/verify-runtime.mjs",
+    "verify:pathfinder:artifacts": "node scripts/verify-runtime-failure-artifacts.mjs",
     "verify:xgen-dev": "node scripts/verify-xgen-dev.mjs"
   },
   "dependencies": {

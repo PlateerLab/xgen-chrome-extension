@@ -108,6 +108,12 @@ T1 실패 시 `pathfinder-runtime-*` artifact에 다음을 저장한다.
 
 runtime log는 token/cookie 계열 값을 scrub한다. screenshot은 synthetic fixture에서만 자동 수집한다. 실제 고객사 페이지의 screenshot을 공용 CI artifact로 업로드하지 않는다.
 
+artifact 파이프라인 자체를 검증하려면 Actions의 `Run workflow`에서
+`verify_failure_artifacts`를 켠다. 이 실행은 synthetic token, 이메일, 전화번호,
+긴 숫자가 포함된 의도적 runtime 실패를 만든 뒤 파일 생성과 redaction을 확인하고
+일부러 job을 실패시킨다. 따라서 `pathfinder-runtime-*` artifact를 실제로
+다운로드해 볼 수 있으며, 일반 PR/push 실행에는 추가 browser 비용이 없다.
+
 ## Dev XGEN T2 Smoke
 
 T2의 기본 probe는 PR workflow와 분리된 비파괴 검증이다.

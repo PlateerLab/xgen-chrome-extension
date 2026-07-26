@@ -97,7 +97,20 @@ function scrubRuntimeLog(value) {
     .replace(
       /((?:authorization|cookie|password|passwd|pwd|access[_-]?token|refresh[_-]?token|token|api[_-]?key|secret|client[_-]?secret)["']?\s*[:=]\s*["']?)[^"',}\s]+/gi,
       '$1[REDACTED]',
-    );
+    )
+    .replace(
+      /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
+      '[REDACTED:EMAIL]',
+    )
+    .replace(
+      /\+\d{1,3}(?:[-\s]?\d){7,14}\b/g,
+      '[REDACTED:PHONE]',
+    )
+    .replace(
+      /\b01[016789][-\s]?\d{3,4}[-\s]?\d{4}\b/g,
+      '[REDACTED:PHONE]',
+    )
+    .replace(/\b\d{12,19}\b/g, '[REDACTED:LONG_NUMBER]');
 }
 
 function attachRuntimeLogging(context, logs) {
@@ -147,7 +160,10 @@ async function writeFailureArtifacts(context, error, logs) {
   };
   await writeFile(
     path.join(artifactDir, 'runtime.log'),
-    `${[...logs, `[failure] ${scrubRuntimeLog(errorText)}`].join('\n')}\n`,
+    `${[
+      ...logs.map((entry) => scrubRuntimeLog(entry)),
+      `[failure] ${scrubRuntimeLog(errorText)}`,
+    ].join('\n')}\n`,
     'utf8',
   );
   await writeFile(
@@ -2608,6 +2624,16 @@ async function main() {
     const extensionPage = await openExtensionPage(context, extensionId);
 
     await extensionPage.bringToFront();
+    if (process.env.PATHFINDER_RUNTIME_EXPECTED_FAILURE === '1') {
+      runtimeLogs.push(
+        '[artifact-probe] Authorization: Bearer artifact-probe-token '
+        + 'owner@example.test 010-1234-5678 1234567890123456',
+      );
+      throw new Error(
+        'Expected artifact probe failure: Bearer artifact-probe-token '
+        + 'owner@example.test 010-1234-5678 1234567890123456',
+      );
+    }
     const unsupportedStart = await sendExtensionMessage(extensionPage, { type: 'START_CAPTURE_SESSION' });
     assert.equal(unsupportedStart?.ok, false, `START_CAPTURE_SESSION should reject extension pages: ${JSON.stringify(unsupportedStart)}`);
     assert.match(unsupportedStart?.error || '', /http\/https|API 캡처|No active tab/);
@@ -3000,6 +3026,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err);
+  const errorText = err instanceof Error ? err.stack || err.message : String(err);
+  console.error(scrubRuntimeLog(errorText));
   process.exit(1);
 });

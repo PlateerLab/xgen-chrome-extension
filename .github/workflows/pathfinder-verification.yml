@@ -7,6 +7,12 @@ on:
       - main
       - develop
   workflow_dispatch:
+    inputs:
+      verify_failure_artifacts:
+        description: Intentionally fail T1 after validating downloadable artifacts
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -72,6 +78,14 @@ jobs:
 
       - name: Verify extension runtime
         run: npm run verify:pathfinder:runtime
+
+      - name: Verify failure artifact pipeline
+        if: >-
+          github.event_name == 'workflow_dispatch'
+          && inputs.verify_failure_artifacts
+        env:
+          PATHFINDER_ARTIFACT_PROBE_FAIL_JOB: "1"
+        run: npm run verify:pathfinder:artifacts
 
       - name: Upload failure artifacts
         if: failure()
