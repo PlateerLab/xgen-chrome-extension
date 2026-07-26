@@ -46,6 +46,8 @@ Collection 등록 전에 다음을 적용한다.
 - 관계 edge에는 실제 공유값 대신 source/target field path와 value type만 전송
 - 실패 runtime log에서 token/cookie뿐 아니라 이메일, 전화번호와 12~19자리
   숫자 패턴도 redaction
+- Playwright 실패 trace에는 verifier 소스 파일을 포함하지 않고, artifact probe가
+  trace 압축 내부까지 synthetic secret/PII 원문을 검사
 - 등록 화면에서 request/response sample 전송을 끄고 필드 구조만 등록 가능
 - 탭별 raw capture FIFO 500건 제한, 세션 종료 후 탭 버퍼 삭제, 미소비 결과 5분 TTL
 - host 권한 회수 시 main-world hook/relay 종료, tab buffer와 cached result 즉시 폐기

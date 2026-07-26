@@ -1,15 +1,23 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { readFile, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
+const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const artifactDir = path.resolve(
   process.env.PATHFINDER_ARTIFACT_DIR
     || path.join(repoRoot, 'artifacts/pathfinder-runtime'),
 );
+const failurePayload = [
+  'Authorization: Bearer artifact-probe-token',
+  'owner@example.test',
+  '010-1234-5678',
+  '1234567890123456',
+].join(' ');
 const forbiddenValues = [
   'artifact-probe-token',
   'owner@example.test',
@@ -25,6 +33,7 @@ function runExpectedFailure() {
         ...process.env,
         PATHFINDER_ARTIFACT_DIR: artifactDir,
         PATHFINDER_RUNTIME_EXPECTED_FAILURE: '1',
+        PATHFINDER_RUNTIME_FAILURE_PAYLOAD: failurePayload,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -58,11 +67,19 @@ const summary = await readFile(
   path.join(artifactDir, 'runtime-summary.json'),
   'utf8',
 );
-const textualArtifacts = `${runtimeLog}\n${summary}`;
+const { stdout: traceArchiveText } = await execFileAsync(
+  'unzip',
+  ['-p', path.join(artifactDir, 'trace.zip')],
+  {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  },
+);
+const inspectableArtifacts = `${runtimeLog}\n${summary}\n${traceArchiveText}`;
 for (const forbidden of forbiddenValues) {
   assert.ok(
-    !textualArtifacts.includes(forbidden),
-    `failure artifact leaked a synthetic secret or PII value: ${forbidden}`,
+    !inspectableArtifacts.includes(forbidden),
+    `failure artifact or trace leaked a synthetic value: ${forbidden}`,
   );
   assert.ok(
     !result.output.includes(forbidden),

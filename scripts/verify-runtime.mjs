@@ -2616,7 +2616,7 @@ async function main() {
     await context.tracing.start({
       screenshots: true,
       snapshots: true,
-      sources: true,
+      sources: false,
     });
 
     const relaunchedExtensionId = await resolveExtensionId(context, userDataDir);
@@ -2625,14 +2625,10 @@ async function main() {
 
     await extensionPage.bringToFront();
     if (process.env.PATHFINDER_RUNTIME_EXPECTED_FAILURE === '1') {
-      runtimeLogs.push(
-        '[artifact-probe] Authorization: Bearer artifact-probe-token '
-        + 'owner@example.test 010-1234-5678 1234567890123456',
-      );
-      throw new Error(
-        'Expected artifact probe failure: Bearer artifact-probe-token '
-        + 'owner@example.test 010-1234-5678 1234567890123456',
-      );
+      const probePayload = process.env.PATHFINDER_RUNTIME_FAILURE_PAYLOAD
+        || 'synthetic runtime artifact probe';
+      runtimeLogs.push(`[artifact-probe] ${probePayload}`);
+      throw new Error(`Expected artifact probe failure: ${probePayload}`);
     }
     const unsupportedStart = await sendExtensionMessage(extensionPage, { type: 'START_CAPTURE_SESSION' });
     assert.equal(unsupportedStart?.ok, false, `START_CAPTURE_SESSION should reject extension pages: ${JSON.stringify(unsupportedStart)}`);

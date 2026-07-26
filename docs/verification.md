@@ -112,7 +112,9 @@ artifact 파이프라인 자체를 검증하려면 Actions의 `Run workflow`에�
 `verify_failure_artifacts`를 켠다. 이 실행은 synthetic token, 이메일, 전화번호,
 긴 숫자가 포함된 의도적 runtime 실패를 만든 뒤 파일 생성과 redaction을 확인하고
 일부러 job을 실패시킨다. 따라서 `pathfinder-runtime-*` artifact를 실제로
-다운로드해 볼 수 있으며, 일반 PR/push 실행에는 추가 browser 비용이 없다.
+다운로드해 볼 수 있다. 검사는 runtime log와 summary뿐 아니라 trace 압축 내부까지
+대상으로 하며, trace에는 verifier source를 포함하지 않는다. 일반 PR/push 실행에는
+추가 browser 비용이 없다.
 
 ## Dev XGEN T2 Smoke
 
