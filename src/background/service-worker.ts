@@ -26,6 +26,7 @@ import {
   inspectCookiePermission,
   inspectHostPermission,
   originPatternForUrl,
+  requestCookiePermission,
   requestHostPermissions,
 } from '../shared/permissions';
 import {
@@ -42,8 +43,7 @@ import {
 // ── State ──
 // origin별 토큰 저장 — 멀티 인스턴스 (xgen.x2bee.com / jeju-xgen.x2bee.com) 동시 사용 지원
 const tokensByOrigin: Record<string, string> = {};
-let cachedPageContext: PageContext | null = null;
-let cachedPageContextTabId: number | null = null;
+const pageContextByTab = new Map<number, PageContext>();
 // activeAbortController 제거 — SSE abort는 sidePanel에서 직접 처리
 
 // ── API Hook State ──
@@ -459,6 +459,7 @@ async function abortTabForPermission(
   await updatePersistedContentScriptOrigin(tabId, null);
   capturedApisByTab.delete(tabId);
   aiDrivingTabIds.delete(tabId);
+  pageContextByTab.delete(tabId);
   if (cachedCaptureResult?.tabId === tabId) {
     await clearCachedCaptureResult();
   }
@@ -746,10 +747,6 @@ chrome.runtime.onMessage.addListener(
           const authToken = serverUrl ? (tokensByOrigin[serverUrl] || await getStoredToken(serverUrl)) : '';
           const pageContext = await getPageContextFromTab(targetTabId).catch(() => null);
 
-          if (pageContext) {
-            cachedPageContext = pageContext;
-          }
-
           // SSE 스트리밍은 Next.js 프록시를 우회하여 gateway에 직접 연결해야 함
           // Next.js rewrites는 SSE 응답을 버퍼링하므로 실시간 스트리밍이 안 됨
           let streamUrl = serverUrl || '';
@@ -772,7 +769,10 @@ chrome.runtime.onMessage.addListener(
             authToken: authToken || '',
             provider: settings[STORAGE_KEYS.PROVIDER] || DEFAULT_PROVIDER,
             model: settings[STORAGE_KEYS.MODEL] || DEFAULT_MODEL,
-            pageContext: pageContext || cachedPageContext,
+            pageContext: pageContext
+              || (typeof targetTabId === 'number'
+                ? pageContextByTab.get(targetTabId) ?? null
+                : null),
           });
         })();
         return true; // async response
@@ -828,8 +828,11 @@ chrome.runtime.onMessage.addListener(
 
       case 'PAGE_CONTEXT_UPDATE': {
         const senderTabId = sender.tab?.id ?? null;
-        cachedPageContext = message.context;
-        cachedPageContextTabId = senderTabId;
+        if (senderTabId == null) {
+          sendResponse({ ok: false, reason: 'invalid_sender' });
+          break;
+        }
+        pageContextByTab.set(senderTabId, message.context);
         broadcastToSidePanel({
           type: 'PAGE_CONTEXT_UPDATE',
           context: message.context,
@@ -841,8 +844,11 @@ chrome.runtime.onMessage.addListener(
 
       case 'PAGE_COMMAND_RESULT':
         // DOM 재스캔 결과로 context 갱신
-        if (message.result?.pageContext) {
-          cachedPageContext = message.result.pageContext as PageContext;
+        if (message.result?.pageContext && sender.tab?.id != null) {
+          pageContextByTab.set(
+            sender.tab.id,
+            message.result.pageContext as PageContext,
+          );
         }
         // 백엔드 에이전트 루프에 결과 전달 — 다음 스텝 결정에 필요
         if (message.requestId) {
@@ -853,11 +859,14 @@ chrome.runtime.onMessage.addListener(
 
       case 'CANVAS_RESULT':
         // canvas state 캐싱 — 다음 턴에 갱신된 state 제공
-        if (message.result && cachedPageContext) {
-          cachedPageContext = {
-            ...cachedPageContext,
-            data: { ...cachedPageContext.data, canvasState: message.result },
-          };
+        if (message.result && sender.tab?.id != null) {
+          const senderContext = pageContextByTab.get(sender.tab.id);
+          if (senderContext) {
+            pageContextByTab.set(sender.tab.id, {
+              ...senderContext,
+              data: { ...senderContext.data, canvasState: message.result },
+            });
+          }
         }
         // 백엔드 에이전트 루프에 결과 전달
         if (message.requestId) {
@@ -1174,14 +1183,20 @@ chrome.runtime.onMessage.addListener(
       }
 
       case 'GET_LIVE_COOKIES': {
-        // 사용자 브라우저가 그 host에 대해 들고있는 fresh 쿠키를 모두 모아 Cookie 헤더 문자열로
-        // 변환. 캡처 시점의 stale 쿠키 대신 호출 시점의 살아있는 세션 사용. host_permissions
-        // <all_urls>가 manifest에 있어서 어떤 host든 읽기 가능.
+        // Legacy diagnostic path. URL 하나를 source of truth로 쓰며, 호환용 host가 전달되면
+        // URL hostname과 정확히 일치해야 한다. Collection 실행은 아래 준비 API를 사용한다.
         (async () => {
           try {
-            const readiness = await inspectCookiePermission(
-              message.url || `https://${message.host}/`,
-            );
+            const targetUrl = normalizedHttpUrl(message.url);
+            if (!targetUrl || (message.host && message.host !== targetUrl.hostname)) {
+              sendResponse({
+                ok: false,
+                reason: 'cookie_target_mismatch',
+                error: 'Cookie target URL is invalid or does not match host',
+              });
+              return;
+            }
+            const readiness = await inspectCookiePermission(targetUrl.href);
             if (!readiness.ready) {
               sendResponse({
                 ok: false,
@@ -1191,23 +1206,43 @@ chrome.runtime.onMessage.addListener(
               });
               return;
             }
-            const cookies = await chrome.cookies.getAll({ domain: message.host });
-            // 같은 이름이 여러 path에 걸려있으면 longest-path가 일반적으로 우선 — 단순화 위해
-            // 첫 발견 우선. 도메인은 .x2bee.com과 fo.x2bee.com 둘 다 들어옴 (chrome 동작).
-            const seen = new Set<string>();
-            const parts: string[] = [];
-            for (const c of cookies) {
-              if (seen.has(c.name)) continue;
-              seen.add(c.name);
-              parts.push(`${c.name}=${c.value}`);
-            }
-            sendResponse({ ok: true, cookieHeader: parts.join('; '), count: cookies.length });
+            const cookies = await readCookiesForUrl(targetUrl);
+            sendResponse({
+              ok: true,
+              cookieHeader: cookies.header,
+              count: cookies.count,
+            });
           } catch (err) {
             console.warn('[XGEN SW] GET_LIVE_COOKIES failed:', err);
             sendResponse({ ok: false, error: String(err) });
           }
         })();
         return true;  // async response
+      }
+
+      case 'PREPARE_COLLECTION_RUN_AUTH': {
+        prepareCollectionRunAuth(
+          message.collectionId,
+          getMessageTabId(message),
+          Boolean(message.requestPermission),
+        ).then((result) => {
+          sendResponse({ ok: result.readiness.ready, ...result });
+        }).catch((err) => {
+          console.warn('[XGEN SW] collection auth preparation failed:', errorMessage(err));
+          sendResponse({
+            ok: false,
+            readiness: {
+              required: false,
+              ready: false,
+              source: 'none',
+              authProfileIdPresent: false,
+              liveCookiesRequired: false,
+              liveCookiesIncluded: false,
+              reason: 'backend_error',
+            } satisfies CollectionRunAuthReadiness,
+          });
+        });
+        return true;
       }
 
       // ── Sidepanel → SW 직접 PAGE_COMMAND (register_tool 등) ──
@@ -1371,11 +1406,8 @@ async function getPageContextFromTab(tabId?: number): Promise<PageContext | null
   const activeTabId = targetTab.id;
 
   // 캐시: 같은 탭 + 2초 이내일 때만 사용
-  if (
-    cachedPageContext &&
-    cachedPageContextTabId === activeTabId &&
-    Date.now() - cachedPageContext.timestamp < 2000
-  ) {
+  const cachedPageContext = pageContextByTab.get(activeTabId);
+  if (cachedPageContext && Date.now() - cachedPageContext.timestamp < 2000) {
     return cachedPageContext;
   }
 
@@ -1384,8 +1416,7 @@ async function getPageContextFromTab(tabId?: number): Promise<PageContext | null
       type: 'GET_PAGE_CONTEXT',
     });
     if (response) {
-      cachedPageContext = response;
-      cachedPageContextTabId = activeTabId;
+      pageContextByTab.set(activeTabId, response);
     }
     return response;
   } catch {
@@ -2053,6 +2084,299 @@ interface AuthProfileResolution {
   candidateIds?: string[];
 }
 
+interface CollectionRunAuthReadiness {
+  required: boolean;
+  ready: boolean;
+  source: 'none' | 'auth_profile';
+  authProfileIdPresent: boolean;
+  authType?: string;
+  targetHost?: string;
+  pageHostMatches?: boolean;
+  liveCookiesRequired: boolean;
+  liveCookiesIncluded: boolean;
+  permission?: Awaited<ReturnType<typeof inspectCookiePermission>>;
+  reason:
+    | 'ready'
+    | 'auth_profile_missing'
+    | 'auth_profile_inactive'
+    | 'collection_base_url_invalid'
+    | 'collection_base_url_mismatch'
+    | 'collection_cookie_permission_required'
+    | 'collection_cookie_missing'
+    | 'backend_error';
+}
+
+function normalizedHttpUrl(value: unknown): URL | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try {
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+    if (parsed.username || parsed.password) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function hostMatchesDomainPattern(host: string, pattern: string): boolean {
+  const normalized = pattern.trim().toLowerCase().replace(/^\.+|\.+$/g, '');
+  if (!normalized) return false;
+  if (!normalized.includes('*')) return host === normalized;
+  const escaped = normalized
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '[^.]+');
+  return new RegExp(`^${escaped}$`, 'i').test(host);
+}
+
+async function readCookiesForUrl(targetUrl: URL): Promise<{
+  header: string;
+  count: number;
+}> {
+  const cookies = await chrome.cookies.getAll({ url: `${targetUrl.origin}/` });
+  cookies.sort((left, right) => (right.path?.length ?? 0) - (left.path?.length ?? 0));
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const cookie of cookies) {
+    if (seen.has(cookie.name)) continue;
+    seen.add(cookie.name);
+    parts.push(`${cookie.name}=${cookie.value}`);
+  }
+  return { header: parts.join('; '), count: parts.length };
+}
+
+async function prepareCollectionRunAuth(
+  collectionId: string,
+  tabId: number | undefined,
+  requestPermission: boolean,
+): Promise<{
+  readiness: CollectionRunAuthReadiness;
+  cookieHeader?: string;
+}> {
+  const normalizedCollectionId = collectionId.trim();
+  if (
+    !normalizedCollectionId
+    || normalizedCollectionId.length > 256
+    || /[\u0000-\u001f\u007f]/.test(normalizedCollectionId)
+  ) {
+    return {
+      readiness: {
+        required: false,
+        ready: false,
+        source: 'none',
+        authProfileIdPresent: false,
+        liveCookiesRequired: false,
+        liveCookiesIncluded: false,
+        reason: 'backend_error',
+      },
+    };
+  }
+  const serverUrl = await resolveXgenServerUrl(tabId);
+  const authToken = serverUrl
+    ? (tokensByOrigin[serverUrl] || await getStoredToken(serverUrl))
+    : '';
+  if (!serverUrl || !authToken) {
+    return {
+      readiness: {
+        required: false,
+        ready: false,
+        source: 'none',
+        authProfileIdPresent: false,
+        liveCookiesRequired: false,
+        liveCookiesIncluded: false,
+        reason: 'backend_error',
+      },
+    };
+  }
+
+  const response = await fetch(
+    `${serverUrl}/api/tools/api-collections/${encodeURIComponent(normalizedCollectionId)}`,
+    { headers: xgenAuthHeaders(authToken) },
+  );
+  if (!response.ok) {
+    return {
+      readiness: {
+        required: false,
+        ready: false,
+        source: 'none',
+        authProfileIdPresent: false,
+        liveCookiesRequired: false,
+        liveCookiesIncluded: false,
+        reason: 'backend_error',
+      },
+    };
+  }
+  const collection = await response.json() as {
+    auth_profile_id?: string | null;
+    base_url?: string | null;
+    domain_patterns?: string[];
+  };
+  const authProfileId = collection.auth_profile_id?.trim();
+  if (!authProfileId) {
+    return {
+      readiness: {
+        required: false,
+        ready: true,
+        source: 'none',
+        authProfileIdPresent: false,
+        liveCookiesRequired: false,
+        liveCookiesIncluded: false,
+        reason: 'ready',
+      },
+    };
+  }
+
+  let profile: AuthProfileSummary | undefined;
+  try {
+    profile = (await fetchAuthProfiles(serverUrl, authToken)).find(
+      (candidate) => candidate.service_id === authProfileId,
+    );
+  } catch {
+    return {
+      readiness: {
+        required: true,
+        ready: false,
+        source: 'auth_profile',
+        authProfileIdPresent: true,
+        liveCookiesRequired: false,
+        liveCookiesIncluded: false,
+        reason: 'backend_error',
+      },
+    };
+  }
+  if (!profile) {
+    return {
+      readiness: {
+        required: true,
+        ready: false,
+        source: 'auth_profile',
+        authProfileIdPresent: true,
+        liveCookiesRequired: false,
+        liveCookiesIncluded: false,
+        reason: 'auth_profile_missing',
+      },
+    };
+  }
+  const authType = (profile.auth_type || '').trim().toLowerCase();
+  if ((profile.status || 'active') !== 'active') {
+    return {
+      readiness: {
+        required: true,
+        ready: false,
+        source: 'auth_profile',
+        authProfileIdPresent: true,
+        authType,
+        liveCookiesRequired: authType === 'cookie',
+        liveCookiesIncluded: false,
+        reason: 'auth_profile_inactive',
+      },
+    };
+  }
+  if (authType !== 'cookie') {
+    return {
+      readiness: {
+        required: true,
+        ready: true,
+        source: 'auth_profile',
+        authProfileIdPresent: true,
+        authType,
+        liveCookiesRequired: false,
+        liveCookiesIncluded: false,
+        reason: 'ready',
+      },
+    };
+  }
+
+  const targetUrl = normalizedHttpUrl(collection.base_url);
+  if (!targetUrl) {
+    return {
+      readiness: {
+        required: true,
+        ready: false,
+        source: 'auth_profile',
+        authProfileIdPresent: true,
+        authType,
+        liveCookiesRequired: true,
+        liveCookiesIncluded: false,
+        reason: 'collection_base_url_invalid',
+      },
+    };
+  }
+  const domainPatterns = Array.isArray(collection.domain_patterns)
+    ? collection.domain_patterns.filter((value): value is string => typeof value === 'string')
+    : [];
+  if (
+    domainPatterns.length > 0
+    && !domainPatterns.some((pattern) => hostMatchesDomainPattern(targetUrl.hostname, pattern))
+  ) {
+    return {
+      readiness: {
+        required: true,
+        ready: false,
+        source: 'auth_profile',
+        authProfileIdPresent: true,
+        authType,
+        targetHost: targetUrl.hostname,
+        liveCookiesRequired: true,
+        liveCookiesIncluded: false,
+        reason: 'collection_base_url_mismatch',
+      },
+    };
+  }
+  const targetTab = await getTargetTab(tabId);
+  const pageUrl = normalizedHttpUrl(targetTab?.url);
+  let permission;
+  try {
+    permission = requestPermission
+      ? await requestCookiePermission(targetUrl.href)
+      : await inspectCookiePermission(targetUrl.href);
+  } catch {
+    permission = await inspectCookiePermission(targetUrl.href);
+  }
+  if (!permission.ready && requestPermission) {
+    permission = await inspectCookiePermission(targetUrl.href);
+  }
+  const baseReadiness = {
+    required: true,
+    source: 'auth_profile' as const,
+    authProfileIdPresent: true,
+    authType,
+    targetHost: targetUrl.hostname,
+    pageHostMatches: pageUrl?.hostname === targetUrl.hostname,
+    liveCookiesRequired: true,
+    permission,
+  };
+  if (!permission.ready) {
+    return {
+      readiness: {
+        ...baseReadiness,
+        ready: false,
+        liveCookiesIncluded: false,
+        reason: 'collection_cookie_permission_required',
+      },
+    };
+  }
+  const cookies = await readCookiesForUrl(targetUrl);
+  if (!cookies.header) {
+    return {
+      readiness: {
+        ...baseReadiness,
+        ready: false,
+        liveCookiesIncluded: false,
+        reason: 'collection_cookie_missing',
+      },
+    };
+  }
+  return {
+    readiness: {
+      ...baseReadiness,
+      ready: true,
+      liveCookiesIncluded: true,
+      reason: 'ready',
+    },
+    cookieHeader: cookies.header,
+  };
+}
+
 async function fetchAuthProfiles(
   serverUrl: string,
   authToken: string,
@@ -2458,6 +2782,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   updatePersistedContentScriptOrigin(tabId, null).catch(() => {});
   capturedApisByTab.delete(tabId);
   aiDrivingTabIds.delete(tabId);
+  pageContextByTab.delete(tabId);
   if (activeCaptureSession?.tabId === tabId) {
     const session = activeCaptureSession;
     serializeCaptureTransition(() => finishCaptureSession(session, {
@@ -2468,6 +2793,15 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       console.warn('[XGEN SW] tab-close capture cleanup failed:', errorMessage(err));
     });
   }
+});
+
+// Navigation은 tab ID를 유지하므로 새 document가 열리는 순간 이전 origin의 context를
+// 폐기한다. 새 Content Script 관찰이 도착하기 전까지 stale context를 반환하지 않는다.
+chrome.webNavigation.onCommitted.addListener((details) => {
+  if (details.frameId === 0) pageContextByTab.delete(details.tabId);
+});
+chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+  if (details.frameId === 0) pageContextByTab.delete(details.tabId);
 });
 
 // ── 페이지 네비게이션 감지: 후킹된 탭에서 페이지 이동 시 자동 재주입 + 기록 ──

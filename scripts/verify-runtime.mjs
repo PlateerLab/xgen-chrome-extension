@@ -333,6 +333,7 @@ function startFixtureServer() {
   const sourceAddRequests = [];
   const collectionDeleteRequests = [];
   const capabilityRequests = [];
+  const collectionRunRequests = [];
   const mcpSessionRequests = [];
   const mcpSourcePreviewRequests = [];
   const mcpSourceAddRequests = [];
@@ -342,6 +343,14 @@ function startFixtureServer() {
       name: '127 local profile',
       description: 'operator managed fixture profile',
       status: 'active',
+      auth_type: 'bearer',
+    },
+    {
+      service_id: '127_cookie_profile',
+      name: '127 cookie profile',
+      description: 'operator managed cookie fixture profile',
+      status: 'active',
+      auth_type: 'cookie',
     },
   ];
   const authProfileMutations = [];
@@ -349,6 +358,7 @@ function startFixtureServer() {
   const registrationMode = { conflictNext: false };
   const sourceAddMode = { failNext: false };
   const collectionDetailMode = { failNext: false };
+  let fixtureBaseUrl = '';
   const server = createServer((req, res) => {
     if (req.method === 'POST' && req.url?.startsWith('/api/ai-chat/command-result/')) {
       const requestId = decodeURIComponent(req.url.split('/').pop() || '');
@@ -469,6 +479,64 @@ function startFixtureServer() {
           auth_profile_id: '127_local_profile',
         },
       ]));
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/pathfinder/greet') {
+      readJsonRequest(req, () => {
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        const writeEvent = (event) => res.write(`data: ${JSON.stringify(event)}\n\n`);
+        writeEvent({
+          type: 'context',
+          site: {
+            status: 'matched',
+            host: '127.0.0.1',
+            collection_id: 'fixture-existing',
+            name: 'Fixture Existing',
+          },
+        });
+        writeEvent({
+          type: 'suggestions',
+          items: [{
+            id: 'fixture-read',
+            title: 'Fixture read',
+            intent: 'fixture read request',
+            tool_name: 'fixtureRead',
+          }],
+        });
+        writeEvent({ type: 'token', content: 'Fixture tools ready.' });
+        writeEvent({ type: 'done' });
+        res.end();
+      });
+      return;
+    }
+
+    const collectionRunMatch = req.url?.match(
+      /^\/api\/tools\/api-collections\/([^/]+)\/run$/,
+    );
+    if (req.method === 'POST' && collectionRunMatch) {
+      const collectionId = decodeURIComponent(collectionRunMatch[1]);
+      readJsonRequest(req, (body) => {
+        collectionRunRequests.push({ collectionId, headers: req.headers, body });
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+        res.write(`data: ${JSON.stringify({
+          type: 'intent.parsed',
+          target: body.force_target || 'fixtureRead',
+        })}\n\n`);
+        res.write(`data: ${JSON.stringify({
+          type: 'response.generated',
+          answer: 'Fixture collection run complete.',
+        })}\n\n`);
+        res.end();
+      });
       return;
     }
 
@@ -686,7 +754,19 @@ function startFixtureServer() {
         },
         auth_profile_id: collectionId === 'graphql-customer-test'
           ? null
-          : '127_local_profile',
+          : collectionId === 'fixture-cookie-auth'
+            || collectionId === 'fixture-cross-host-cookie-auth'
+            || collectionId === 'fixture-invalid-cookie-domain'
+            ? '127_cookie_profile'
+            : '127_local_profile',
+        base_url: collectionId === 'fixture-cross-host-cookie-auth'
+          ? fixtureBaseUrl.replace('127.0.0.1', 'localhost')
+          : fixtureBaseUrl,
+        domain_patterns: [collectionId === 'fixture-cross-host-cookie-auth'
+          ? 'localhost'
+          : collectionId === 'fixture-invalid-cookie-domain'
+            ? 'mismatched.invalid'
+            : '127.0.0.1'],
         workspace_status: 'ready',
       }));
       return;
@@ -1050,9 +1130,10 @@ self.addEventListener('message', (event) => {
     server.on('error', reject);
     server.listen(0, '0.0.0.0', () => {
       const address = server.address();
+      fixtureBaseUrl = `http://127.0.0.1:${address.port}`;
       resolve({
         server,
-        url: `http://127.0.0.1:${address.port}/`,
+        url: `${fixtureBaseUrl}/`,
         commandResults,
         chatRequests,
         registrationRequests,
@@ -1063,6 +1144,7 @@ self.addEventListener('message', (event) => {
         sourceAddRequests,
         collectionDeleteRequests,
         capabilityRequests,
+        collectionRunRequests,
         mcpSessionRequests,
         mcpSourcePreviewRequests,
         mcpSourceAddRequests,
@@ -1421,6 +1503,14 @@ async function verifyDeniedOptionalPermissions(extensionPage, targetPage, url) {
   });
   assert.equal(deniedCookies?.ok, false, 'cookie lookup must fail without host permission');
   assert.equal(deniedCookies?.reason, 'host_permission_required');
+
+  const mismatchedCookies = await sendExtensionMessage(extensionPage, {
+    type: 'GET_LIVE_COOKIES',
+    host: 'mismatched.invalid',
+    url,
+  });
+  assert.equal(mismatchedCookies?.ok, false);
+  assert.equal(mismatchedCookies?.reason, 'cookie_target_mismatch');
 }
 
 async function verifyOptionalPermissionLifecycle(extensionPage, context, targetPage, url) {
@@ -2672,6 +2762,121 @@ async function verifySidepanelChatRelay(extensionPage, targetPage, distractorPag
   await extensionPage.waitForFunction(() => document.body.innerText.includes('UI bridge done.'));
 }
 
+async function verifyTabAndCollectionAuthIsolation(
+  extensionPage,
+  targetPage,
+  distractorPage,
+  collectionRunRequests,
+) {
+  const targetTabId = await findTabIdByUrl(extensionPage, '/workspace/details$');
+  const distractorTabId = await findTabIdByUrl(extensionPage, '/distractor$');
+  assert.ok(targetTabId, 'target tab should be discoverable for context isolation');
+  assert.ok(distractorTabId, 'distractor tab should be discoverable for context isolation');
+
+  const targetConfig = await sendExtensionMessage(extensionPage, {
+    type: 'GET_CHAT_CONFIG',
+    tabId: targetTabId,
+  });
+  assert.match(targetConfig?.pageContext?.elements || '', /Search term/);
+
+  const distractorConfig = await sendExtensionMessage(extensionPage, {
+    type: 'GET_CHAT_CONFIG',
+    tabId: distractorTabId,
+  });
+  assert.doesNotMatch(
+    distractorConfig?.pageContext?.elements || '',
+    /Search term/,
+    'tab B must never receive tab A page context as a cache fallback',
+  );
+  if (distractorConfig?.pageContext) {
+    assert.match(distractorConfig.pageContext.url || '', /\/distractor$/);
+  }
+
+  const bearerAuth = await sendExtensionMessage(extensionPage, {
+    type: 'PREPARE_COLLECTION_RUN_AUTH',
+    collectionId: 'fixture-existing',
+    tabId: targetTabId,
+  });
+  assert.equal(bearerAuth?.ok, true);
+  assert.equal(bearerAuth?.readiness?.authType, 'bearer');
+  assert.equal(bearerAuth?.readiness?.liveCookiesRequired, false);
+  assert.equal(bearerAuth?.cookieHeader, undefined);
+
+  const cookieAuth = await sendExtensionMessage(extensionPage, {
+    type: 'PREPARE_COLLECTION_RUN_AUTH',
+    collectionId: 'fixture-cookie-auth',
+    tabId: targetTabId,
+  });
+  assert.equal(cookieAuth?.ok, true);
+  assert.equal(cookieAuth?.readiness?.authType, 'cookie');
+  assert.equal(cookieAuth?.readiness?.liveCookiesRequired, true);
+  assert.equal(cookieAuth?.readiness?.targetHost, new URL(targetPage.url()).hostname);
+  assert.equal(cookieAuth?.readiness?.pageHostMatches, true);
+  assert.match(cookieAuth?.cookieHeader || '', /xgen_access_token=/);
+
+  const crossHostUrl = new URL(targetPage.url());
+  crossHostUrl.hostname = 'localhost';
+  await targetPage.context().addCookies([{
+    name: 'cross_host_session',
+    value: 'cross-host-runtime-secret',
+    url: `${crossHostUrl.origin}/`,
+    httpOnly: true,
+    sameSite: 'Lax',
+  }]);
+  const crossHostCookieAuth = await sendExtensionMessage(extensionPage, {
+    type: 'PREPARE_COLLECTION_RUN_AUTH',
+    collectionId: 'fixture-cross-host-cookie-auth',
+    tabId: targetTabId,
+  });
+  assert.equal(crossHostCookieAuth?.ok, true);
+  assert.equal(crossHostCookieAuth?.readiness?.pageHostMatches, false);
+  assert.equal(crossHostCookieAuth?.readiness?.permission?.ready, true);
+  assert.match(crossHostCookieAuth?.cookieHeader || '', /cross_host_session=/);
+
+  const invalidDomainAuth = await sendExtensionMessage(extensionPage, {
+    type: 'PREPARE_COLLECTION_RUN_AUTH',
+    collectionId: 'fixture-invalid-cookie-domain',
+    tabId: targetTabId,
+  });
+  assert.equal(invalidDomainAuth?.ok, false);
+  assert.equal(
+    invalidDomainAuth?.readiness?.reason,
+    'collection_base_url_mismatch',
+  );
+  assert.equal(invalidDomainAuth?.cookieHeader, undefined);
+
+  // Server URL was switched from the dev-origin probe to the local fixture after the
+  // first proactive greet. Reloading represents a new sidepanel mount and proves the
+  // collection contract is used by the product UI, not only by direct messages.
+  const localXgenUrl = new URL(targetPage.url());
+  localXgenUrl.hostname = 'localhost';
+  const localXgenOrigin = localXgenUrl.origin;
+  await setExtensionStorage(extensionPage, {
+    serverUrl: localXgenOrigin,
+    authToken: 'verify-token',
+    [`token:${localXgenOrigin}`]: 'verify-token',
+  });
+  await extensionPage.reload();
+  await pinSidepanelToTarget(extensionPage, targetPage);
+  const runButton = extensionPage.getByRole('button', { name: /Fixture read/ });
+  await runButton.waitFor();
+  await runButton.click();
+  const run = await waitForItem(
+    collectionRunRequests,
+    (entry) => entry.collectionId === 'fixture-existing',
+    'bearer collection run request',
+  );
+  assert.equal(run.body.force_target, 'fixtureRead');
+  assert.equal(
+    Object.hasOwn(run.body, 'live_cookies'),
+    false,
+    'non-cookie collection run must omit live_cookies entirely',
+  );
+  await extensionPage.waitForFunction(
+    () => document.body.innerText.includes('Fixture collection run complete.'),
+  );
+}
+
 async function verifySessionResultRegistration(extensionPage, targetPage, registrationRequests) {
   await extensionPage.waitForFunction(() => document.body.innerText.includes('컬렉션으로 등록'));
   await clickSidepanelButton(extensionPage, targetPage, 'Session result registration', /컬렉션으로 등록/);
@@ -2942,6 +3147,7 @@ async function main() {
     sourceAddRequests,
     collectionDeleteRequests,
     capabilityRequests,
+    collectionRunRequests,
     registrationMode,
     sourceAddMode,
     collectionDetailMode,
@@ -3036,6 +3242,12 @@ async function main() {
     );
     await verifyRelayCommandBridge(extensionPage, targetPage, commandResults);
     await verifySidepanelChatRelay(extensionPage, targetPage, distractorPage, commandResults, chatRequests);
+    await verifyTabAndCollectionAuthIsolation(
+      extensionPage,
+      targetPage,
+      distractorPage,
+      collectionRunRequests,
+    );
     await verifyHarImportUi(extensionPage);
     await verifyOpenApiImportUi(
       extensionPage,
@@ -3490,6 +3702,7 @@ async function main() {
       'stored server cookie auth verified',
       'page_command relay callback verified',
       'sidepanel chat relay verified',
+      'tab context and collection auth isolation verified',
       'OpenAPI URL/YAML import and rollback verified',
       'GraphQL introspection preview and registration verified',
       'manual tool contract preview and registration verified',

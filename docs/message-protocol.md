@@ -18,10 +18,23 @@
 | `SET_TOKEN` | Content Script → Service Worker | 검증된 XGEN origin의 token 갱신 |
 | `GET_CHAT_CONFIG` | Side Panel → Service Worker | server URL, provider, model, token 존재 여부 및 page context 조회 |
 | `CHAT_CONFIG` | Service Worker → Side Panel | 채팅 실행 설정 반환 |
-| `GET_LIVE_COOKIES` | Side Panel → Service Worker | 대상 host의 현재 cookie를 실행 직전에 조회 |
+| `PREPARE_COLLECTION_RUN_AUTH` | Side Panel → Service Worker | Collection과 auth profile을 확인하고 필요한 실행 인증만 준비 |
+| `GET_LIVE_COOKIES` | Side Panel → Service Worker | 검증된 단일 URL의 cookie 조회를 진단하는 하위 호환 경로 |
 | `LOOKUP_AUTH_PROFILE_FOR_HOST` | Side Panel → Service Worker | host에 연결된 XGEN auth profile 조회 |
 
 `SET_TOKEN`은 임의 origin의 token 저장 API가 아니다. Service Worker의 XGEN origin 검증을 통과해야 한다.
+
+Collection 실행은 현재 페이지 host를 인증 대상으로 추정하지 않는다.
+`PREPARE_COLLECTION_RUN_AUTH`가 Collection `auth_profile_id`, profile `auth_type`,
+Collection `base_url`을 순서대로 확인한다. `auth_type=cookie`일 때만 `base_url`의
+optional host/cookie 권한을 확인하고 live cookie를 만든다. 페이지와 API host가
+달라도 사용자가 API host 권한을 승인한 경우에만 허용하며, 그 외에는
+`collection_cookie_permission_required`로 중단한다. Bearer 등 다른 profile과
+인증이 없는 Collection 요청에는 `live_cookies` 필드가 존재하지 않는다.
+
+Page context cache는 tab ID별로 격리된다. `PAGE_CONTEXT_UPDATE`,
+`PAGE_COMMAND_RESULT`, `CANVAS_RESULT`는 sender tab만 갱신하고, Side Panel도 자신이
+고정된 tab의 update만 수신한다. 탭 제거 또는 host 권한 회수 시 해당 cache를 폐기한다.
 
 ## Page Agent
 
