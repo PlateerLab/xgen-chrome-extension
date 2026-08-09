@@ -4,6 +4,10 @@ import type {
   ChatMessage, ToolCall, ExtensionMessage, PageContext, AiChatRequest,
   PipelineState, PlanQuestion, Chip, SiteInfo,
 } from '../../shared/types';
+import {
+  findFirstMissingPlanArgument,
+  findSuspiciousRuntimeArgument,
+} from '../../shared/plan-arguments';
 
 function tabTarget(tabId: number | null | undefined): { tabId?: number } {
   return typeof tabId === 'number' ? { tabId } : {};
@@ -66,7 +70,13 @@ export function useChat(targetTabId?: number | null) {
           type: 'GET_CHAT_CONFIG',
           ...tabTarget(targetTabId),
         } satisfies ExtensionMessage);
-        console.log('[useChat] GET_CHAT_CONFIG 응답:', config);
+        console.log('[useChat] GET_CHAT_CONFIG 응답:', {
+          serverUrl: config?.serverUrl,
+          hasToken: Boolean(config?.authToken),
+          provider: config?.provider,
+          model: config?.model,
+          hasPageContext: Boolean(config?.pageContext),
+        });
 
         if (!config?.serverUrl) {
           addSystemMessage('XGEN에 먼저 로그인해주세요');
@@ -119,7 +129,7 @@ export function useChat(targetTabId?: number | null) {
             case 'canvas_command':
             case 'page_command':
               // SW에 위임 → content script로 전달
-              console.log('[useChat] RELAY_COMMAND 전송:', event.type, event);
+              console.log('[useChat] RELAY_COMMAND 전송:', event.type, event.action);
               await chrome.runtime.sendMessage({
                 type: 'RELAY_COMMAND',
                 event,
@@ -152,7 +162,10 @@ export function useChat(targetTabId?: number | null) {
           }
         }
       } catch (err) {
-        console.error('[useChat] 에러:', err);
+        console.error(
+          '[useChat] 요청 실패:',
+          err instanceof Error ? err.name : 'UnknownError',
+        );
         if (err instanceof DOMException && err.name === 'AbortError') {
           // 사용자 중단 — 무시
         } else {
@@ -253,7 +266,6 @@ export function useChat(targetTabId?: number | null) {
         ...tabTarget(targetTabId),
       } satisfies ExtensionMessage);
       console.log('[PathFinder] greet config:', {
-        url,
         serverUrl: config?.serverUrl,
         hasToken: !!config?.authToken,
         provider: config?.provider,
@@ -299,7 +311,9 @@ export function useChat(targetTabId?: number | null) {
             if (ev.site?.collection_id) {
               setCollectionId(ev.site.collection_id);
             }
-            console.log('[PathFinder] context:', ev.site);
+            console.log('[PathFinder] context received:', {
+              hasCollection: Boolean(ev.site?.collection_id),
+            });
             break;
           case 'suggestions':
             chipsCaptured = ev.items || [];
@@ -352,14 +366,17 @@ export function useChat(targetTabId?: number | null) {
             }
             break;
           case 'error':
-            console.warn('[useChat] greet error:', ev.content);
+            console.warn('[useChat] greet error event received');
             break;
         }
       }
     } catch (err) {
       // greet은 사이드패널 진입 자동 제안일 뿐 — 실패해도 채팅창에 박지 않는다.
       // 백엔드 도달 실패(502 등)는 사용자가 행동할 수 없어서 노이즈만 됨. console만.
-      console.warn('[useChat] greetProactive failed:', err);
+      console.warn(
+        '[useChat] greetProactive failed:',
+        err instanceof Error ? err.name : 'UnknownError',
+      );
     }
   }, [targetTabId]);
 
@@ -438,7 +455,10 @@ export function useChat(targetTabId?: number | null) {
           }
         }
       } catch (err) {
-        console.warn('[useChat] live cookie collection failed:', err);
+        console.warn(
+          '[useChat] live cookie collection failed:',
+          err instanceof Error ? err.name : 'UnknownError',
+        );
       }
 
       abortRef.current = new AbortController();
@@ -462,7 +482,7 @@ export function useChat(targetTabId?: number | null) {
           switch (ev.type) {
             case 'intent.parsed':
               // 디버깅용 로그만 — UI 노출은 안 함.
-              console.log('[run] intent.parsed:', ev);
+              console.log('[run] intent.parsed');
               break;
 
             case 'plan.synthesized': {
@@ -470,7 +490,7 @@ export function useChat(targetTabId?: number | null) {
               // 경우 (e.g. parse_intent가 빈 값으로 채움) — 실행하면 4xx/5xx로 죽음.
               // 능동적으로 잡아서 사용자한테 직접 물어본다.
               const plan = ev.plan;
-              const missing = plan?.steps ? _findFirstMissingArgInPlan(plan) : null;
+              const missing = plan?.steps ? findFirstMissingPlanArgument(plan) : null;
               if (missing) {
                 console.log('[run] plan has missing arg, aborting + asking:', missing);
                 abortRef.current?.abort();
@@ -492,8 +512,10 @@ export function useChat(targetTabId?: number | null) {
                 );
                 // for-await는 abort로 자연스럽게 catch에 떨어짐.
               } else {
-                // 항상 로깅 — backend가 args를 어떤 형태로 채우는지 디버깅 신호.
-                console.log('[run] plan.synthesized (no missing detected):', JSON.stringify(plan));
+                // 값은 기록하지 않고 plan의 구조적 크기만 진단 신호로 남긴다.
+                console.log('[run] plan.synthesized:', {
+                  stepCount: plan?.steps?.length ?? 0,
+                });
               }
               break;
             }
@@ -526,13 +548,13 @@ export function useChat(targetTabId?: number | null) {
             }
 
             case 'plan.started':
-              console.log('[run] plan.started:', ev);
+              console.log('[run] plan.started');
               break;
 
             case 'step.started':
               run.lastStepArgs = ev.args_resolved;
               run.lastStepTool = ev.tool;
-              console.log('[run] step.started args_resolved:', ev.tool, ev.args_resolved);
+              console.log('[run] step.started:', ev.tool);
               appendToolCallTo(run.msgId, {
                 id: ev.step_id,
                 tool: ev.tool,
@@ -674,7 +696,7 @@ export function useChat(targetTabId?: number | null) {
     if (pendingQuestionRef.current) return true;
 
     let target: string | null = missingPathMatch ? missingPathMatch[1] : null;
-    if (!target) target = _findSuspiciousArg(run.lastStepArgs);
+    if (!target) target = findSuspiciousRuntimeArgument(run.lastStepArgs);
     if (!target) return false;
 
     pendingQuestionRef.current = {
@@ -839,52 +861,6 @@ function _previewToString(preview: unknown): string {
   } catch {
     return String(preview);
   }
-}
-
-/**
- * Plan 의 첫 step에서 빈 값(null/undefined/"")인 인자 필드를 찾아 반환.
- * 백엔드 synthesizer가 미해결 entity를 빈 값으로 채워 그대로 실행되는 케이스를 잡는 안전망.
- * 바인딩 표현식("${s1.body.id}" 같은 placeholder)은 다음 step의 binding이므로 통과.
- */
-function _findFirstMissingArgInPlan(
-  plan: { steps?: { tool: string; args?: Record<string, unknown> }[] },
-): { tool: string; field: string } | null {
-  for (const step of plan.steps || []) {
-    const found = _findSuspiciousArg(step.args);
-    if (found) return { tool: step.tool, field: found };
-  }
-  return null;
-}
-
-/**
- * args dict에서 "비어있거나 미해결로 보이는" 첫 필드 키를 반환.
- * - null/undefined
- * - 빈 문자열
- * - placeholder string ("${...}", "{key}")
- * 중첩 객체는 재귀로 검사하되 dotted path("a.b")로 반환.
- */
-function _findSuspiciousArg(
-  args: Record<string, unknown> | undefined,
-  prefix = '',
-): string | null {
-  if (!args || typeof args !== 'object') return null;
-  for (const [k, v] of Object.entries(args)) {
-    const path = prefix ? `${prefix}.${k}` : k;
-    if (v === null || v === undefined) return path;
-    if (typeof v === 'string') {
-      const s = v.trim();
-      if (s === '') return path;
-      // backend가 binding/placeholder 그대로 보낸 케이스
-      if (/^\$\{.+\}$/.test(s)) return path;
-      if (/^\{[A-Za-z_][\w-]*\}$/.test(s)) return path;
-      continue;
-    }
-    if (typeof v === 'object' && !Array.isArray(v)) {
-      const nested = _findSuspiciousArg(v as Record<string, unknown>, path);
-      if (nested) return nested;
-    }
-  }
-  return null;
 }
 
 /** step output preview에서 401/403 패턴 감지. 백엔드는 `{"status": 401, "error": "Unauthorized", ...}` 형태로 보냄. */

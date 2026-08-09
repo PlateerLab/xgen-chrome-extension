@@ -120,12 +120,12 @@ export function App() {
   // pageContext.url 변경 → 외부 사이트면 greet (같은 host는 세션 동안 1번)
   useEffect(() => {
     if (!pageContext?.url) {
-      console.log('[PathFinder] greet skipped: no pageContext.url', { pageContext });
+      console.log('[PathFinder] greet skipped: no pageContext.url');
       return;
     }
     const host = extractHost(pageContext.url);
     if (!host) {
-      console.log('[PathFinder] greet skipped: cannot extract host', pageContext.url);
+      console.log('[PathFinder] greet skipped: cannot extract host');
       return;
     }
     (async () => {
@@ -142,9 +142,12 @@ export function App() {
       }
       if (greetedHostsRef.current.has(host)) return;
       greetedHostsRef.current.add(host);
-      console.log('[PathFinder] greeting:', pageContext.url);
+      console.log('[PathFinder] greeting host:', host);
       greetProactive(pageContext.url);
-    })().catch((err) => console.warn('[PathFinder] greet trigger failed:', err));
+    })().catch((err) => console.warn(
+      '[PathFinder] greet trigger failed:',
+      err instanceof Error ? err.name : 'UnknownError',
+    ));
   }, [pageContext?.url, greetProactive, targetTabId]);
 
   return (

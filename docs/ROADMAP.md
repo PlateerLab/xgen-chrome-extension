@@ -31,6 +31,32 @@ npx playwright install --with-deps chromium
 npm run verify:pathfinder
 ```
 
+## P0-H. Correctness, Privacy and MV3 Hardening
+
+상태: `in progress`
+
+목표: 최신 `main` 점검에서 확인된 비밀정보 노출 경로, 다단계 plan 오판,
+캡처 신뢰 경계 및 Manifest V3 생명주기 공백을 릴리스 전에 해소한다.
+
+상세 작업 순서와 수용 기준은
+[`tasks/pathfinder-hardening-todo.md`](../tasks/pathfinder-hardening-todo.md)를 따른다.
+
+- [x] config/command 로그에서 token과 업무 payload 제거
+- [x] legacy `register_tool`의 captured body → `static_body` 저장 차단
+- [x] 정상적인 step binding을 누락 인자로 오판하는 plan guard 수정
+- [ ] `API_CAPTURED` runtime validation, 상대 URL 정규화 및 body read 상한
+- [ ] 단일 캡처 세션 상태 머신과 Service Worker 재시작 처리
+- [ ] 탭별 page context 격리와 Cookie 실행 인증 최소 권한
+- [ ] 공통 SSE parser, abort generation 및 Service Worker 모듈 분리
+- [ ] Page Agent 의존성 갱신을 기능 변경과 분리해 검증
+
+완료 gate:
+
+- synthetic secret이 console, command result 및 Tool 저장 payload에 없음
+- multi-step binding, malformed capture, multi-tab 및 Service Worker restart fixture 통과
+- `npm run verify:pathfinder`와 대상 변경의 T2 read-only flow 통과
+- raw request/response body를 복구 목적으로 extension storage에 영속화하지 않음
+
 ## P1. Verification Automation
 
 상태: `done`

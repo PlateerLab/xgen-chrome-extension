@@ -308,6 +308,7 @@ function startFixtureServer() {
   const commandResults = [];
   const chatRequests = [];
   const registrationRequests = [];
+  const legacyToolSaveRequests = [];
   const mergeRequests = [];
   const collectionCreateRequests = [];
   const sourcePreviewRequests = [];
@@ -746,6 +747,15 @@ function startFixtureServer() {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/api/tools/storage/save') {
+      readJsonRequest(req, (body) => {
+        legacyToolSaveRequests.push({ headers: req.headers, body });
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, function_name: body.function_name }));
+      });
+      return;
+    }
+
     if (req.method === 'POST' && req.url === '/api/ai-chat/stream') {
       let rawBody = '';
       req.setEncoding('utf8');
@@ -1005,6 +1015,7 @@ self.addEventListener('message', (event) => {
         commandResults,
         chatRequests,
         registrationRequests,
+        legacyToolSaveRequests,
         mergeRequests,
         collectionCreateRequests,
         sourcePreviewRequests,
@@ -2452,6 +2463,116 @@ async function verifySessionResultRegistration(extensionPage, targetPage, regist
   );
 }
 
+async function verifyLegacyCaptureCommandPrivacy(
+  extensionPage,
+  targetPage,
+  commandResults,
+  legacyToolSaveRequests,
+  fixtureUrl,
+) {
+  await targetPage.waitForTimeout(200);
+  const tabId = await findTabIdByUrl(extensionPage, '/workspace/details$');
+
+  const listRequestId = `verify-value-free-capture-list-${Date.now()}`;
+  const relayed = await sendExtensionMessage(extensionPage, {
+    type: 'RELAY_COMMAND',
+    tabId,
+    event: {
+      type: 'page_command',
+      requestId: listRequestId,
+      action: 'get_captured_apis',
+      params: {},
+    },
+  });
+  assert.equal(relayed?.ok, true, `capture list relay failed: ${JSON.stringify(relayed)}`);
+  const callback = await waitForCommandResult(
+    commandResults,
+    listRequestId,
+    'Value-free capture list',
+  );
+  const summaries = callback.body?.result?.apis || [];
+  const loginSummary = summaries.find((entry) => (
+    entry.method === 'POST' && entry.url?.endsWith('/api/login')
+  ));
+  assert.ok(loginSummary, `value-free login summary missing: ${JSON.stringify(summaries)}`);
+  assert.ok(loginSummary.request?.field_paths?.includes('password'));
+  assert.ok(loginSummary.response?.field_paths?.includes('data.access_token'));
+  assert.equal(loginSummary.sample_values_persisted, false);
+  assert.equal('request_body_preview' in loginSummary, false);
+  assert.equal('response_body_preview' in loginSummary, false);
+
+  const listText = JSON.stringify(callback.body);
+  for (const secret of [
+    'runtime-login-request-secret',
+    'runtime-login-concurrent-secret',
+    'runtime-auth-response-secret',
+  ]) {
+    assert.ok(!listText.includes(secret), `capture command result leaked ${secret}`);
+  }
+
+  const legacyRequestId = `verify-value-free-legacy-save-${Date.now()}`;
+  const legacyRelay = await sendExtensionMessage(extensionPage, {
+    type: 'RELAY_COMMAND',
+    tabId,
+    event: {
+      type: 'page_command',
+      requestId: legacyRequestId,
+      action: 'register_tool',
+      params: {
+        function_name: 'runtime_login_tool',
+        api_url: `${fixtureUrl}api/login?accessToken=runtime-query-secret`,
+        api_method: 'POST',
+        auth_profile_id: '127_local_profile',
+        api_header: {
+          Authorization: 'Bearer runtime-header-secret',
+          'Content-Type': 'application/json',
+        },
+        static_body: {
+          password: 'runtime-static-secret',
+        },
+        metadata: {
+          email: 'runtime-metadata@example.com',
+        },
+      },
+    },
+  });
+  assert.equal(legacyRelay?.ok, true, `legacy Tool relay failed: ${JSON.stringify(legacyRelay)}`);
+  const legacyResult = await waitForCommandResult(
+    commandResults,
+    legacyRequestId,
+    'Value-free legacy Tool registration',
+  );
+  assert.equal(
+    legacyResult.body?.success,
+    true,
+    `legacy Tool registration failed: ${JSON.stringify(legacyResult)}`,
+  );
+  const saved = await waitForItem(
+    legacyToolSaveRequests,
+    (entry) => entry.body?.function_name === 'runtime_login_tool',
+    'Value-free legacy Tool save',
+  );
+  assert.equal(saved.body.content.api_url, `${fixtureUrl}api/login`);
+  assert.deepEqual(saved.body.content.static_body, {});
+  assert.deepEqual(saved.body.content.api_header, { 'Content-Type': 'application/json' });
+  assert.equal(saved.body.content.metadata.sample_values_persisted, false);
+  assert.ok(saved.body.content.api_body?.properties?.username);
+  assert.ok(saved.body.content.api_body?.properties?.password);
+
+  const savedText = JSON.stringify(saved.body);
+  for (const secret of [
+    'runtime-login-request-secret',
+    'runtime-login-concurrent-secret',
+    'runtime-auth-response-secret',
+    'runtime-query-secret',
+    'runtime-header-secret',
+    'runtime-static-secret',
+    'runtime-metadata@example.com',
+  ]) {
+    assert.ok(!savedText.includes(secret), `legacy Tool save leaked ${secret}`);
+  }
+}
+
 async function verifyCaptureObservationStopped(
   extensionPage,
   targetPage,
@@ -2557,6 +2678,7 @@ async function main() {
     commandResults,
     chatRequests,
     registrationRequests,
+    legacyToolSaveRequests,
     mergeRequests,
     collectionCreateRequests,
     sourcePreviewRequests,
@@ -2801,6 +2923,13 @@ async function main() {
         (entry) => entry.url === '/api/worker/v1/background',
         'Service Worker fixture request',
       );
+      await verifyLegacyCaptureCommandPrivacy(
+        extensionPage,
+        targetPage,
+        commandResults,
+        legacyToolSaveRequests,
+        url,
+      );
     }, 'fetch+xhr capture', distractorPage);
     const firstApis = firstResult.apis;
     const createdAuthProfile = await waitForItem(
@@ -2997,6 +3126,7 @@ async function main() {
       'auth profile explicit link, managed create, and refresh verified',
       'approved iframe capture, blocked iframe coverage, and worker limitation verified',
       'capture result registration verified',
+      'value-free capture summary and legacy Tool registration verified',
       'capture result merge conflict verified',
       'privacy-safe HAR import verified',
       'capture payload memory release verified',

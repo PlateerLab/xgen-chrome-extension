@@ -94,6 +94,22 @@ schema에 포함하지 않고 XGEN Collection 인증 프로필에서 해석한�
 - 보존 기간과 삭제 정책
 - audit event에 값이 아닌 field path만 기록
 
+## Legacy 요소 선택 Tool 등록
+
+요소 선택 UI의 `register_tool` → `/api/tools/storage/save` 경로는 deprecated다.
+이 경로는 Collection `from-trace` 등록과 기능이 같아질 때까지 호환 목적으로만
+유지하며 새 기능을 추가하지 않는다. `v0.8` 릴리스 전 요소 선택 등록을
+privacy-safe Collection 경로로 통합한 뒤 제거하는 것을 목표로 한다.
+
+호환 기간에도 다음 제약을 강제한다.
+
+- captured request/response 값과 AI가 제안한 literal을 `static_body`에 저장하지 않음
+- JSON request body는 field name과 JSON Schema type만 추론
+- API URL의 userinfo, query 및 fragment 제거
+- `Authorization`, `Cookie` 등 실행 인증 header는 Tool에 저장하지 않고 auth profile 사용
+- command result에는 body preview 대신 body kind와 field path만 포함
+- metadata에 `sample_values_persisted: false` 기록
+
 ## 로그 정책
 
 허용:

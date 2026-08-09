@@ -13,6 +13,11 @@ import type {
   CaptureCoverage,
   CapturedApi,
 } from '../shared/api-hook-types';
+import {
+  buildValueFreeLegacyToolContent,
+  normalizeLegacyApiUrl,
+  summarizeCapturedApiForCommand,
+} from '../shared/legacy-tool-registration';
 import { mainWorldHookFunction, mainWorldUnhookFunction } from '../content/api-hook/main-world-hook';
 import { apiHookRelayFunction } from '../content/api-hook/relay';
 import {
@@ -207,6 +212,16 @@ function safeFrameOrigin(url?: string): string | undefined {
       : undefined;
   } catch {
     return undefined;
+  }
+}
+
+function safeUrlForLog(url?: string): string {
+  if (!url) return 'unknown-url';
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return 'invalid-url';
   }
 }
 
@@ -498,7 +513,7 @@ chrome.storage.local.get(null, (items) => {
   const stored = items[STORAGE_KEYS.SERVER_URL] as string | undefined;
   if (stored && !isXgenOrigin(stored)) {
     toRemove.push(STORAGE_KEYS.SERVER_URL);
-    console.warn('[XGEN SW] Removing stale non-XGEN serverUrl:', stored);
+    console.warn('[XGEN SW] Removing stale non-XGEN serverUrl:', safeUrlForLog(stored));
   }
   for (const key of Object.keys(items)) {
     if (key.startsWith('token:')) {
@@ -603,7 +618,7 @@ chrome.runtime.onMessage.addListener(
         // sidePanel이 SSE에서 받은 canvas_command/page_command를 SW로 위임
         const event = (message as any).event as SSEEvent;
         const targetTabId = getMessageTabId(message);
-        console.log('[XGEN SW] RELAY_COMMAND received:', event.type, event);
+        console.log('[XGEN SW] RELAY_COMMAND received:', event.type);
         (async () => {
           const targetTab = await getTargetTab(targetTabId);
 
@@ -1035,8 +1050,8 @@ async function getXgenCookieToken(origin: string): Promise<string> {
       const found = cookies.find((cookie) => cookie.name === name && cookie.value);
       if (found) return found.value;
     }
-  } catch (err) {
-    console.warn('[XGEN SW] cookie token lookup failed:', err);
+  } catch {
+    console.warn('[XGEN SW] cookie token lookup failed');
   }
   return '';
 }
@@ -1118,11 +1133,10 @@ async function dispatchPageCommand(
     } as ExtensionMessage);
     // sendMessage resolved = content script가 sendResponse() 호출 = 정상 완료.
     // 결과는 content script가 별도 PAGE_COMMAND_RESULT 메시지로 이미 전송함.
-  } catch (err) {
+  } catch {
     // ── content script 소멸 — 대부분 페이지 네비게이션 때문 ──
     console.log(
-      `[XGEN SW] PAGE_COMMAND delivery failed (action=${action}), ` +
-      `waiting for navigation: ${err}`,
+      `[XGEN SW] PAGE_COMMAND delivery failed (action=${action}); waiting for navigation`,
     );
 
     try {
@@ -1204,7 +1218,7 @@ function waitForNavigationContext(
 
     const onNavCompleted = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => {
       if (details.tabId !== tabId || details.frameId !== 0) return;
-      console.log(`[XGEN SW] Navigation completed: ${details.url}`);
+      console.log(`[XGEN SW] Navigation completed: ${safeUrlForLog(details.url)}`);
       extractAndResolve();
     };
 
@@ -1538,17 +1552,9 @@ async function handleApiHookAction(
           filtered = filtered.filter((a) => a.responseStatus <= (params.max_status as number));
         }
 
-        // 요약 형태로 반환 (토큰 효율)
-        const summary = filtered.map((a) => ({
-          id: a.id,
-          method: a.method,
-          url: a.url,
-          status: a.responseStatus,
-          content_type: a.contentType,
-          duration: a.duration,
-          request_body_preview: a.requestBody?.slice(0, 200) || null,
-          response_body_preview: a.responseBody?.slice(0, 500) || null,
-        }));
+        // command result는 XGEN backend로 전달된다. 캡처 원문 값은 보내지 않고
+        // URL/query key, body kind 및 field path 같은 구조만 반환한다.
+        const summary = filtered.map(summarizeCapturedApiForCommand);
 
         return {
           success: true,
@@ -1570,9 +1576,11 @@ async function handleApiHookAction(
 
       case 'register_tool': {
         const toolData = params as Record<string, unknown>;
+        const apiUrl = normalizeLegacyApiUrl(toolData.api_url);
+        const apiMethod = ((toolData.api_method as string) || 'GET').toUpperCase();
 
         // XGEN 서버 URL 결정
-        let serverUrl = (toolData.server_url as string | undefined) || await resolveXgenServerUrl(targetTabId);
+        const serverUrl = (toolData.server_url as string | undefined) || await resolveXgenServerUrl(targetTabId);
         if (!serverUrl) {
           return { success: false, action, error: 'XGEN server URL not found. Log in to XGEN first.' };
         }
@@ -1588,7 +1596,7 @@ async function handleApiHookAction(
           const resolution = await autoMatchAuthProfile(
             serverUrl,
             authToken,
-            toolData.api_url as string,
+            apiUrl,
           );
           if (resolution.status === 'login_required') {
             return {
@@ -1609,101 +1617,33 @@ async function handleApiHookAction(
           authProfileId = resolution.authProfileId;
         }
 
-        // ── 캡처된 원본 request body로 static_body/api_body 보정 ──
-        // 전략: 원본 body 전체를 static_body에 주입 → 런타임에서 AI 파라미터가 있으면 덮어쓰고,
-        // 없으면 원본 값으로 호출되므로 "body 빈 채로 나가서 500" 문제를 원천 차단.
-        // api_body는 AI 스키마를 그대로 두되, JSON Schema 형식(properties/required)로 래핑한다.
-        let aiApiBody = (toolData.api_body as Record<string, unknown>) || {};
-        let aiStaticBody = (toolData.static_body as Record<string, unknown>) || {};
-        let aiBodyType = (toolData.body_type as string) || 'application/json';
-
-        try {
-          const targetUrl = toolData.api_url as string;
-          const targetMethod = ((toolData.api_method as string) || 'GET').toUpperCase();
-          const stripQuery = (u: string) => u.split('?')[0].split('#')[0];
-          const targetBase = stripQuery(targetUrl);
-
-          // 모든 탭 캡처에서 url(쿼리 제외) + method 매칭, 가장 최근 것
-          let matched: CapturedApi | undefined;
-          for (const [, apis] of capturedApisByTab) {
-            for (const a of apis) {
-              if (a.method.toUpperCase() === targetMethod && stripQuery(a.url) === targetBase) {
-                if (!matched || a.timestamp > matched.timestamp) matched = a;
-              }
+        // 모든 탭 캡처에서 query/fragment를 제외한 URL + method가 일치하는
+        // 가장 최근 요청을 찾는다. 원문 값은 저장하지 않고 body schema 추론에만 쓴다.
+        let matched: CapturedApi | undefined;
+        for (const [, apis] of capturedApisByTab) {
+          for (const capture of apis) {
+            let capturedUrl: string;
+            try {
+              capturedUrl = normalizeLegacyApiUrl(capture.url);
+            } catch {
+              continue;
+            }
+            if (capture.method.toUpperCase() === apiMethod && capturedUrl === apiUrl) {
+              if (!matched || capture.timestamp > matched.timestamp) matched = capture;
             }
           }
-
-          if (matched?.requestBody) {
-            const ct = (matched.contentType || '').toLowerCase();
-            if (ct.includes('application/json') || matched.requestBody.trim().startsWith('{')) {
-              try {
-                const original = JSON.parse(matched.requestBody) as Record<string, unknown>;
-                if (original && typeof original === 'object' && !Array.isArray(original)) {
-                  // 1) static_body = 원본 전체 (AI static_body보다 우선)
-                  aiStaticBody = { ...aiStaticBody, ...original };
-
-                  // 2) api_body 정규화: AI가 flat하게 만들든 JSON Schema로 만들든 다 처리
-                  //    - 이미 properties 키가 있으면 그대로 (JSON Schema)
-                  //    - 아니면 flat 형식으로 보고 properties로 래핑
-                  //    - 원본에 없는 AI 상상 필드는 제거
-                  const hasProperties = 'properties' in aiApiBody &&
-                    typeof (aiApiBody as any).properties === 'object';
-
-                  if (hasProperties) {
-                    const props = (aiApiBody as any).properties as Record<string, unknown>;
-                    const cleanedProps: Record<string, unknown> = {};
-                    for (const [k, v] of Object.entries(props)) {
-                      if (k in original) cleanedProps[k] = v;
-                    }
-                    aiApiBody = { ...aiApiBody, properties: cleanedProps };
-                  } else {
-                    // flat → JSON Schema로 래핑 (기존 엔트리가 {type, description} 형태라고 가정)
-                    const cleanedProps: Record<string, unknown> = {};
-                    for (const [k, v] of Object.entries(aiApiBody)) {
-                      if (k in original) cleanedProps[k] = v;
-                    }
-                    aiApiBody = { type: 'object', properties: cleanedProps, required: [] };
-                  }
-
-                  aiBodyType = 'application/json';
-                  console.log(`[XGEN SW] register_tool: body normalized. ` +
-                    `static_body keys=${Object.keys(aiStaticBody).join(',')}, ` +
-                    `api_body.properties keys=${Object.keys((aiApiBody as any).properties || {}).join(',')}`);
-                }
-              } catch (e) {
-                console.warn('[XGEN SW] register_tool: captured JSON body parse failed, keeping AI values', e);
-              }
-            } else {
-              console.log(`[XGEN SW] register_tool: non-JSON captured body (contentType=${ct}), keeping AI values`);
-            }
-          } else {
-            console.log(`[XGEN SW] register_tool: no captured match for ${targetMethod} ${targetBase}, keeping AI values`);
-          }
-        } catch (e) {
-          console.warn('[XGEN SW] register_tool: body normalization error, keeping AI values', e);
         }
+
+        const safeContent = buildValueFreeLegacyToolContent(
+          { ...toolData, api_url: apiUrl, api_method: apiMethod },
+          matched,
+        );
 
         // tool 저장 요청
         const savePayload = {
-          function_name: toolData.function_name as string,
+          function_name: safeContent.function_name,
           content: {
-            function_name: toolData.function_name as string,
-            function_id: (toolData.function_id as string) || `tool_${Date.now().toString(36)}`,
-            description: (toolData.description as string) || '',
-            api_url: toolData.api_url as string,
-            api_method: (toolData.api_method as string) || 'GET',
-            api_header: (toolData.api_header as Record<string, string>) || {},
-            api_body: aiApiBody,
-            static_body: aiStaticBody,
-            body_type: aiBodyType,
-            api_timeout: (toolData.api_timeout as number) || 30,
-            is_query_string: (toolData.is_query_string as boolean) || false,
-            response_filter: (toolData.response_filter as boolean) || false,
-            html_parser: (toolData.html_parser as boolean) || false,
-            response_filter_path: (toolData.response_filter_path as string) || '',
-            response_filter_field: (toolData.response_filter_field as string) || '',
-            status: 'active',
-            metadata: (toolData.metadata as Record<string, unknown>) || {},
+            ...safeContent,
             ...(authProfileId ? { auth_profile_id: authProfileId } : {}),
           },
         };
@@ -1728,7 +1668,7 @@ async function handleApiHookAction(
         return {
           success: true,
           action,
-          result: `Tool "${toolData.function_name}" registered successfully to ${serverUrl}${authInfo}`,
+          result: `Tool "${safeContent.function_name}" registered successfully to ${serverUrl}${authInfo}`,
         };
       }
 
@@ -2236,7 +2176,7 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
   // hook 자동 재주입 (페이지 이동으로 이전 hook 소멸)
   try {
     await injectApiHookIntoTab(tabId);
-    console.log(`[XGEN SW] API hook re-injected after navigation: ${details.url}`);
+    console.log(`[XGEN SW] API hook re-injected after navigation: ${safeUrlForLog(details.url)}`);
   } catch (err) {
     hookedTabs.delete(tabId);
     console.warn('[XGEN SW] Failed to re-inject hook:', err);
