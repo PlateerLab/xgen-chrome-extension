@@ -127,6 +127,53 @@ async function loadTraceRegistration() {
   };
 }
 
+async function loadLegacyToolRegistration() {
+  const sourcePath = path.join(repoRoot, 'src/shared/legacy-tool-registration.ts');
+  const source = await readFile(sourcePath, 'utf8');
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+      verbatimModuleSyntax: true,
+    },
+    fileName: sourcePath,
+  });
+
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-legacy-tool-'));
+  const outputPath = path.join(tmpDir, 'legacy-tool-registration.mjs');
+  await writeFile(outputPath, compiled.outputText, 'utf8');
+  const mod = await import(pathToFileURL(outputPath).href);
+  return {
+    buildValueFreeLegacyToolContent: mod.buildValueFreeLegacyToolContent,
+    summarizeCapturedApiForCommand: mod.summarizeCapturedApiForCommand,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
+async function loadPlanArguments() {
+  const sourcePath = path.join(repoRoot, 'src/shared/plan-arguments.ts');
+  const source = await readFile(sourcePath, 'utf8');
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+      verbatimModuleSyntax: true,
+    },
+    fileName: sourcePath,
+  });
+
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-plan-args-'));
+  const outputPath = path.join(tmpDir, 'plan-arguments.mjs');
+  await writeFile(outputPath, compiled.outputText, 'utf8');
+  const mod = await import(pathToFileURL(outputPath).href);
+  return {
+    findFirstMissingPlanArgument: mod.findFirstMissingPlanArgument,
+    findSuspiciousRuntimeArgument: mod.findSuspiciousRuntimeArgument,
+    isStepBinding: mod.isStepBinding,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
 async function loadHarImporter() {
   const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-har-'));
   const registrationSourcePath = path.join(
@@ -1112,6 +1159,191 @@ function testTraceRegistrationPayloadHardening(analyzeTrace, buildTraceRegistrat
   );
   assert.ok(!structureOnlySerialized.includes('customer@example.com'));
   assert.ok(!structureOnlySerialized.includes('010-1234-5678'));
+}
+
+function testLegacyToolRegistrationHardening({
+  buildValueFreeLegacyToolContent,
+  summarizeCapturedApiForCommand,
+}) {
+  const loginCapture = captured({
+    id: 'legacy-login',
+    timestamp: 10,
+    method: 'POST',
+    url: 'https://shop.example.com/api/login?keyword=keep&accessToken=query-secret-must-not-persist',
+    requestContentType: 'application/json; charset=utf-8',
+    requestMetadata: {
+      bodyKind: 'json',
+      fieldPaths: ['username', 'password', 'profile.email'],
+      fileFields: [],
+    },
+    requestBody: {
+      username: 'runtime-user-must-not-persist',
+      password: 'runtime-password-must-not-persist',
+      profile: { email: 'private@example.com' },
+    },
+    responseBody: {
+      accessToken: 'response-token-must-not-persist',
+      user: { id: 'customer-id-must-not-persist' },
+    },
+  });
+
+  const content = buildValueFreeLegacyToolContent({
+    function_name: 'login_tool',
+    api_url: loginCapture.url,
+    api_method: 'POST',
+    api_header: {
+      Authorization: 'Bearer header-secret-must-not-persist',
+      Cookie: 'session=cookie-secret-must-not-persist',
+      'Content-Type': 'application/json',
+    },
+    api_body: {
+      type: 'object',
+      properties: {
+        username: { type: 'string', default: 'schema-default-must-not-persist' },
+        password: { type: 'string', example: 'schema-example-must-not-persist' },
+        imagined: { type: 'string', const: 'hallucinated-value-must-not-persist' },
+      },
+      required: ['username', 'password', 'imagined'],
+    },
+    static_body: {
+      password: 'static-password-must-not-persist',
+    },
+    metadata: {
+      customerEmail: 'metadata@example.com',
+    },
+  }, loginCapture);
+
+  const serializedContent = JSON.stringify(content);
+  assert.deepEqual(content.static_body, {});
+  assert.deepEqual(content.api_header, { 'Content-Type': 'application/json' });
+  assert.equal(content.api_url, 'https://shop.example.com/api/login');
+  assert.equal(content.body_type, 'application/json');
+  assert.deepEqual(
+    Object.keys(content.api_body.properties || {}),
+    ['username', 'password', 'profile'],
+  );
+  assert.deepEqual(content.api_body.required, ['username', 'password']);
+  assert.equal(content.metadata.sample_values_persisted, false);
+  assert.throws(
+    () => buildValueFreeLegacyToolContent({
+      function_name: 'invalid_method',
+      api_url: 'https://shop.example.com/api/items',
+      api_method: 'TRACE',
+    }),
+    /api_method is not supported/,
+  );
+  for (const secret of [
+    'runtime-user-must-not-persist',
+    'runtime-password-must-not-persist',
+    'private@example.com',
+    'query-secret-must-not-persist',
+    'header-secret-must-not-persist',
+    'cookie-secret-must-not-persist',
+    'schema-default-must-not-persist',
+    'schema-example-must-not-persist',
+    'hallucinated-value-must-not-persist',
+    'static-password-must-not-persist',
+    'metadata@example.com',
+  ]) {
+    assert.ok(!serializedContent.includes(secret), `legacy Tool content leaked: ${secret}`);
+  }
+
+  const summary = summarizeCapturedApiForCommand(loginCapture);
+  const serializedSummary = JSON.stringify(summary);
+  assert.equal(summary.url, 'https://shop.example.com/api/login');
+  assert.deepEqual(summary.query_param_keys, ['keyword']);
+  assert.deepEqual(summary.request.field_paths, ['username', 'password', 'profile.email']);
+  assert.ok(summary.response.field_paths.includes('accessToken'));
+  assert.equal(summary.sample_values_persisted, false);
+  assert.equal('request_body_preview' in summary, false);
+  assert.equal('response_body_preview' in summary, false);
+  for (const secret of [
+    'runtime-user-must-not-persist',
+    'runtime-password-must-not-persist',
+    'private@example.com',
+    'query-secret-must-not-persist',
+    'response-token-must-not-persist',
+    'customer-id-must-not-persist',
+  ]) {
+    assert.ok(!serializedSummary.includes(secret), `capture command summary leaked: ${secret}`);
+  }
+}
+
+async function testSensitiveLoggingContract() {
+  const useChatSource = await readFile(
+    path.join(repoRoot, 'src/sidepanel/hooks/useChat.ts'),
+    'utf8',
+  );
+  const appSource = await readFile(path.join(repoRoot, 'src/sidepanel/App.tsx'), 'utf8');
+  const serviceWorkerSource = await readFile(
+    path.join(repoRoot, 'src/background/service-worker.ts'),
+    'utf8',
+  );
+
+  assert.doesNotMatch(useChatSource, /GET_CHAT_CONFIG 응답:',\s*config\)/);
+  assert.doesNotMatch(useChatSource, /RELAY_COMMAND 전송:',\s*event\.type,\s*event\)/);
+  assert.doesNotMatch(useChatSource, /intent\.parsed:',\s*ev\)/);
+  assert.doesNotMatch(useChatSource, /JSON\.stringify\(plan\)/);
+  assert.doesNotMatch(useChatSource, /step\.started args_resolved/);
+  assert.doesNotMatch(appSource, /greeting:',\s*pageContext\.url/);
+  assert.doesNotMatch(serviceWorkerSource, /RELAY_COMMAND received:',\s*event\.type,\s*event\)/);
+  assert.doesNotMatch(serviceWorkerSource, /request_body_preview/);
+  assert.doesNotMatch(serviceWorkerSource, /response_body_preview/);
+  assert.doesNotMatch(serviceWorkerSource, /aiStaticBody\s*=\s*\{[^\n]*original/);
+}
+
+function testPlanArgumentClassification({
+  findFirstMissingPlanArgument,
+  findSuspiciousRuntimeArgument,
+  isStepBinding,
+}) {
+  assert.equal(isStepBinding('${s1.body.id}'), true);
+  assert.equal(isStepBinding(' ${lookup.items[0].goodsNo} '), true);
+  assert.equal(isStepBinding('{customerId}'), false);
+
+  const multiStepPlan = {
+    steps: [
+      {
+        tool: 'create_order',
+        args: {
+          quantity: 0,
+          enabled: false,
+          tags: [],
+          note: 'ready',
+        },
+      },
+      {
+        tool: 'get_order',
+        args: {
+          orderId: '${s1.body.id}',
+          nested: { goodsNo: '${s1.body.goodsNo}' },
+        },
+      },
+    ],
+  };
+  assert.equal(
+    findFirstMissingPlanArgument(multiStepPlan),
+    null,
+    'valid prior-step bindings must not trigger a user question',
+  );
+
+  assert.deepEqual(
+    findFirstMissingPlanArgument({
+      steps: [{ tool: 'create_order', args: { customer: { id: '  ' } } }],
+    }),
+    { tool: 'create_order', field: 'customer.id' },
+  );
+  assert.deepEqual(
+    findFirstMissingPlanArgument({
+      steps: [{ tool: 'create_order', args: { customerId: '{customerId}' } }],
+    }),
+    { tool: 'create_order', field: 'customerId' },
+  );
+  assert.equal(
+    findSuspiciousRuntimeArgument({ orderId: '${s1.body.id}' }),
+    'orderId',
+    'an unresolved binding after HTTP failure remains a recovery candidate',
+  );
 }
 
 function testTraceRegistrationPayloadCaps(buildTraceRegistrationPayload) {
@@ -2390,6 +2622,14 @@ async function main() {
     cleanup: cleanupRegistration,
   } = await loadTraceRegistration();
   const {
+    cleanup: cleanupLegacyToolRegistration,
+    ...legacyToolRegistration
+  } = await loadLegacyToolRegistration();
+  const {
+    cleanup: cleanupPlanArguments,
+    ...planArguments
+  } = await loadPlanArguments();
+  const {
     importHarArchive,
     cleanup: cleanupHarImporter,
   } = await loadHarImporter();
@@ -2453,6 +2693,9 @@ async function main() {
     testObservedEdges(analyzeTrace);
     testTraceRegistrationPayload(analyzeTrace, buildTraceRegistrationPayload);
     testTraceRegistrationPayloadHardening(analyzeTrace, buildTraceRegistrationPayload);
+    testLegacyToolRegistrationHardening(legacyToolRegistration);
+    await testSensitiveLoggingContract();
+    testPlanArgumentClassification(planArguments);
     testTraceRegistrationPayloadCaps(buildTraceRegistrationPayload);
     testPrivacySafeHarImport(
       importHarArchive,
@@ -2482,6 +2725,8 @@ async function main() {
   } finally {
     await cleanup();
     await cleanupRegistration();
+    await cleanupLegacyToolRegistration();
+    await cleanupPlanArguments();
     await cleanupHarImporter();
     await cleanupManualToolContract();
     await cleanupPostmanImporter();

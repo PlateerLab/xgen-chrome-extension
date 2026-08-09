@@ -78,6 +78,16 @@ runtime test는 `PAGE_COMMAND` 자체와 Side Panel의 `RELAY_COMMAND` 흐름을
 
 `page_command`에 `requestId`가 있으면 실행 결과를 `/api/ai-chat/command-result/{requestId}`로 반환한다. runtime mock은 고정 request ID를 사용해 라우팅을 검증하지만, 실제 backend는 요청마다 고유 ID를 발급해야 한다.
 
+Collection plan의 step argument는 다음 placeholder 계약을 따른다.
+
+- `${s1.body.id}`: 이전 step 결과를 실행 시 해석하는 binding이며 사용자 입력 누락이 아님
+- `{customerId}`: 현재 contract에서는 해석되지 않은 literal placeholder이며 사용자 입력 필요
+- `null`, `undefined`, 빈 문자열: 사용자 입력이 필요한 누락값
+- 숫자 `0`, boolean `false`, 빈 배열: 유효한 명시 값
+
+실행 전 plan guard는 정상 step binding을 통과시킨다. 실행 후에도 binding 문자열이
+그대로 남아 HTTP 호출이 실패한 경우에만 사용자 입력으로 복구할 후보로 취급한다.
+
 ## 변경 규칙
 
 메시지 필드를 변경할 때 다음을 같은 PR에 포함한다.
@@ -88,4 +98,3 @@ runtime test는 `PAGE_COMMAND` 자체와 Side Panel의 `RELAY_COMMAND` 흐름을
 4. 이 문서
 
 새 필드는 가능한 additive하게 추가하고, 기존 sender가 없는 필드를 처리할 수 있도록 optional로 시작한다.
-
