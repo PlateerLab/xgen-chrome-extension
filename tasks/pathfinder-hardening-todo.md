@@ -1,7 +1,7 @@
 # Pathfinder Hardening TODO
 
 기준일: 2026-08-05
-기준 소스: `main@588be42` (`origin/main`과 동일)
+기준 소스: `main@cfe816a` (`origin/main`과 동일)
 
 이 문서는 코드 점검에서 확인된 보안, 실행 정확성, Manifest V3 생명주기 및
 유지보수성 개선을 실제 머지 가능한 작업으로 나눈 실행 계획이다. 현재 우선순위와
@@ -45,7 +45,7 @@ H6 SSE/취소·모듈 분리·의존성 갱신
 - [ ] 현재 결함을 재현하는 synthetic fixture를 먼저 추가한다.
   - [x] 정상 binding `${s1.body.id}`를 포함한 다단계 plan
   - [x] password/token/PII 필드를 포함한 캡처 body
-  - [ ] 잘못된 타입, 과대 body 및 비정상 URL을 가진 `API_CAPTURED`
+  - [x] 잘못된 타입, 과대 body 및 비정상 URL을 가진 `API_CAPTURED`
   - [ ] 탭 A/B가 교차해 `PAGE_COMMAND_RESULT`를 보내는 시나리오
 - [x] fixture 문자열은 실제 credential과 구분되는 synthetic marker만 사용한다.
 - [x] 추가된 검증을 `npm run verify:pathfinder`에 포함한다.
@@ -133,20 +133,20 @@ TODO:
 
 TODO:
 
-- [ ] Service Worker 진입점에서 `CapturedApi` runtime validator를 적용한다.
-- [ ] method, URL protocol, timestamp, status, duration, header/body 타입과 최대 크기를
+- [x] Service Worker 진입점에서 `CapturedApi` runtime validator를 적용한다.
+- [x] method, URL protocol, timestamp, status, duration, header/body 타입과 최대 크기를
   검증하고 알 수 없는 필드는 폐기한다.
-- [ ] relay에서 받은 객체를 그대로 변형하지 않고 bounded normalized object로
+- [x] relay에서 받은 객체를 그대로 변형하지 않고 bounded normalized object로
   새로 생성한다.
-- [ ] `fetch`와 XHR 상대 URL을 `new URL(rawUrl, document.baseURI)`로 해석한다.
-- [ ] `//host/path`, `<base href>`, query-only URL 및 malformed URL fixture를 추가한다.
-- [ ] `Response.clone().text()`로 전체 body를 읽은 뒤 자르는 방식을 제한된 stream
+- [x] `fetch`와 XHR 상대 URL을 `new URL(rawUrl, document.baseURI)`로 해석한다.
+- [x] `//host/path`, `<base href>`, query-only URL 및 malformed URL fixture를 추가한다.
+- [x] `Response.clone().text()`로 전체 body를 읽은 뒤 자르는 방식을 제한된 stream
   reader로 교체한다.
-- [ ] `Content-Length`가 상한을 넘거나 binary/streaming 응답이면 body를 읽지 않고
+- [x] `Content-Length`가 상한을 넘거나 binary/streaming 응답이면 body를 읽지 않고
   limitation metadata만 기록한다.
-- [ ] 대상 페이지가 `xgen:api-captured` CustomEvent를 위조할 수 있음을 provenance에
+- [x] 대상 페이지가 `xgen:api-captured` CustomEvent를 위조할 수 있음을 provenance에
   표시하고, 사용자 검토 전 자동 등록·실행하지 않는다.
-- [ ] malformed/oversized event가 캡처 세션이나 Service Worker listener를 중단시키지
+- [x] malformed/oversized event가 캡처 세션이나 Service Worker listener를 중단시키지
   않는 runtime test를 추가한다.
 
 완료 gate:

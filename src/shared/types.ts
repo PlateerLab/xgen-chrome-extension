@@ -200,6 +200,10 @@ export type ExtensionMessage =
   | { type: 'CANVAS_RESULT'; requestId: string; result: unknown }
   // ── API Hook (content script → service worker) ──
   | { type: 'API_CAPTURED'; data: import('./api-hook-types').CapturedApi }
+  | {
+      type: 'API_CAPTURE_REJECTED';
+      reason: import('./api-hook-types').CaptureRejectionReason;
+    }
   // ── SSE 직접 소비 (sidePanel ↔ SW) ──
   | { type: 'GET_CHAT_CONFIG'; tabId?: number }
   | { type: 'CHAT_CONFIG'; serverUrl: string; authToken: string; provider: string; model: string; pageContext: PageContext | null }

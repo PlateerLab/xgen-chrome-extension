@@ -174,6 +174,28 @@ async function loadPlanArguments() {
   };
 }
 
+async function loadCaptureValidation() {
+  const sourcePath = path.join(repoRoot, 'src/shared/capture-validation.ts');
+  const source = await readFile(sourcePath, 'utf8');
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+      verbatimModuleSyntax: true,
+    },
+    fileName: sourcePath,
+  });
+
+  const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-capture-validation-'));
+  const outputPath = path.join(tmpDir, 'capture-validation.mjs');
+  await writeFile(outputPath, compiled.outputText, 'utf8');
+  const mod = await import(pathToFileURL(outputPath).href);
+  return {
+    normalizeCapturedApi: mod.normalizeCapturedApi,
+    cleanup: () => rm(tmpDir, { recursive: true, force: true }),
+  };
+}
+
 async function loadHarImporter() {
   const tmpDir = await mkdtemp(path.join(tmpdir(), 'xgen-pathfinder-har-'));
   const registrationSourcePath = path.join(
@@ -1343,6 +1365,136 @@ function testPlanArgumentClassification({
     findSuspiciousRuntimeArgument({ orderId: '${s1.body.id}' }),
     'orderId',
     'an unresolved binding after HTTP failure remains a recovery candidate',
+  );
+}
+
+function testCaptureValidation(normalizeCapturedApi) {
+  const now = Date.UTC(2026, 7, 10, 0, 0, 0);
+  const valid = {
+    id: 'capture-1',
+    timestamp: now - 10,
+    url: '../api/goods?token=opaque-query-value',
+    method: 'post',
+    requestHeaders: { 'content-type': 'application/json' },
+    requestBody: '{"goodsNo":"G10001"}',
+    requestContentType: 'application/json',
+    requestMetadata: {
+      bodyKind: 'json',
+      fieldPaths: ['goodsNo'],
+      fileFields: [{
+        fieldPath: 'attachment',
+        fileName: 'customer-private-name.pdf',
+        contentType: 'application/pdf',
+        size: 42,
+      }],
+    },
+    responseStatus: 200,
+    responseHeaders: { 'content-type': 'application/json' },
+    responseBody: '{"ok":true}',
+    responseMetadata: {
+      bodyCaptured: true,
+      bodyTruncated: false,
+      limitations: [],
+    },
+    contentType: 'application/json',
+    duration: 8,
+    provenance: {
+      source: 'forged-source',
+      trust: 'trusted',
+      transport: 'fetch',
+    },
+    operatorInjectedField: 'must-be-dropped',
+  };
+  const accepted = normalizeCapturedApi(valid, {
+    baseUrl: 'https://customer.example/workspace/base/',
+    now,
+  });
+  assert.equal(accepted.ok, true);
+  assert.equal(
+    accepted.capture.url,
+    'https://customer.example/workspace/api/goods?token=opaque-query-value',
+  );
+  assert.equal(accepted.capture.method, 'POST');
+  assert.equal(accepted.capture.provenance.source, 'page_hook');
+  assert.equal(accepted.capture.provenance.trust, 'untrusted_page_event');
+  assert.equal(accepted.capture.provenance.transport, 'fetch');
+  assert.equal('operatorInjectedField' in accepted.capture, false);
+  assert.equal('fileName' in accepted.capture.requestMetadata.fileFields[0], false);
+
+  const protocolRelative = normalizeCapturedApi({ ...valid, url: '//api.example.net/v1/items' }, {
+    baseUrl: 'https://customer.example/workspace/base/',
+    now,
+  });
+  assert.equal(protocolRelative.ok, true);
+  assert.equal(protocolRelative.capture.url, 'https://api.example.net/v1/items');
+  const queryOnly = normalizeCapturedApi({ ...valid, url: '?page=2' }, {
+    baseUrl: 'https://customer.example/workspace/base/',
+    now,
+  });
+  assert.equal(queryOnly.ok, true);
+  assert.equal(queryOnly.capture.url, 'https://customer.example/workspace/base/?page=2');
+
+  const emptyContentType = normalizeCapturedApi({
+    ...valid,
+    id: 'capture-network-error',
+    responseStatus: 0,
+    responseHeaders: {},
+    responseBody: null,
+    responseMetadata: {
+      bodyCaptured: false,
+      bodyTruncated: false,
+      limitations: ['fetch_failed'],
+    },
+    contentType: '',
+  }, { baseUrl: 'https://customer.example/', now });
+  assert.equal(emptyContentType.ok, true, 'network failures should retain value-free diagnostics');
+
+  assert.deepEqual(
+    normalizeCapturedApi({ ...valid, responseBody: 'x'.repeat((100 * 1024) + 1) }, {
+      baseUrl: 'https://customer.example/',
+      now,
+    }),
+    { ok: false, reason: 'oversized_payload' },
+  );
+  assert.deepEqual(
+    normalizeCapturedApi({ ...valid, url: 'javascript:alert(1)' }, {
+      baseUrl: 'https://customer.example/',
+      now,
+    }),
+    { ok: false, reason: 'unsupported_url' },
+  );
+  assert.deepEqual(
+    normalizeCapturedApi({ ...valid, url: 'http://[' }, {
+      baseUrl: 'https://customer.example/',
+      now,
+    }),
+    { ok: false, reason: 'unsupported_url' },
+  );
+  assert.deepEqual(
+    normalizeCapturedApi({
+      ...valid,
+      responseMetadata: { bodyCaptured: true, limitations: 'not-an-array' },
+    }, { baseUrl: 'https://customer.example/', now }),
+    { ok: false, reason: 'invalid_payload' },
+  );
+  assert.deepEqual(
+    normalizeCapturedApi({
+      ...valid,
+      responseBody: null,
+      responseMetadata: {
+        bodyCaptured: true,
+        bodyTruncated: false,
+        limitations: [],
+      },
+    }, { baseUrl: 'https://customer.example/', now }),
+    { ok: false, reason: 'invalid_payload' },
+  );
+  assert.deepEqual(
+    normalizeCapturedApi({ ...valid, timestamp: now - (25 * 60 * 60 * 1000) }, {
+      baseUrl: 'https://customer.example/',
+      now,
+    }),
+    { ok: false, reason: 'invalid_payload' },
   );
 }
 
@@ -2630,6 +2782,10 @@ async function main() {
     ...planArguments
   } = await loadPlanArguments();
   const {
+    normalizeCapturedApi,
+    cleanup: cleanupCaptureValidation,
+  } = await loadCaptureValidation();
+  const {
     importHarArchive,
     cleanup: cleanupHarImporter,
   } = await loadHarImporter();
@@ -2696,6 +2852,7 @@ async function main() {
     testLegacyToolRegistrationHardening(legacyToolRegistration);
     await testSensitiveLoggingContract();
     testPlanArgumentClassification(planArguments);
+    testCaptureValidation(normalizeCapturedApi);
     testTraceRegistrationPayloadCaps(buildTraceRegistrationPayload);
     testPrivacySafeHarImport(
       importHarArchive,
@@ -2727,6 +2884,7 @@ async function main() {
     await cleanupRegistration();
     await cleanupLegacyToolRegistration();
     await cleanupPlanArguments();
+    await cleanupCaptureValidation();
     await cleanupHarImporter();
     await cleanupManualToolContract();
     await cleanupPostmanImporter();

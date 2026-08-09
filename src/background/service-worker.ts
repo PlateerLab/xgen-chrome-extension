@@ -11,8 +11,10 @@ import type {
 } from '../shared/types';
 import type {
   CaptureCoverage,
+  CaptureRejectionReason,
   CapturedApi,
 } from '../shared/api-hook-types';
+import { normalizeCapturedApi } from '../shared/capture-validation';
 import {
   buildValueFreeLegacyToolContent,
   normalizeLegacyApiUrl,
@@ -58,6 +60,7 @@ interface FrameCaptureState {
   blockedOrigins: Set<string>;
   observedRequestCount: number;
   observedSubframeRequestCount: number;
+  rejectedCaptureCounts: Map<CaptureRejectionReason, number>;
   serviceWorkerControlled: boolean;
 }
 const frameCaptureStateByTab = new Map<number, FrameCaptureState>();
@@ -199,8 +202,22 @@ function newFrameCaptureState(): FrameCaptureState {
     blockedOrigins: new Set(),
     observedRequestCount: 0,
     observedSubframeRequestCount: 0,
+    rejectedCaptureCounts: new Map(),
     serviceWorkerControlled: false,
   };
+}
+
+function recordCaptureRejection(tabId: number, reason: CaptureRejectionReason): void {
+  const state = frameCaptureStateByTab.get(tabId) ?? newFrameCaptureState();
+  state.rejectedCaptureCounts.set(
+    reason,
+    (state.rejectedCaptureCounts.get(reason) ?? 0) + 1,
+  );
+  frameCaptureStateByTab.set(tabId, state);
+}
+
+function isCaptureRejectionReason(value: unknown): value is CaptureRejectionReason {
+  return ['invalid_payload', 'oversized_payload', 'unsupported_url'].includes(String(value));
 }
 
 function safeFrameOrigin(url?: string): string | undefined {
@@ -250,6 +267,27 @@ function captureCoverageForTab(tabId: number): CaptureCoverage {
       code: 'service_worker_fetch_not_observable',
       severity: 'warning',
       message: '이 페이지는 Service Worker의 제어를 받고 있습니다. Worker 내부 fetch는 HAR/CDP 입력으로 보완해야 합니다.',
+    });
+  }
+  const invalidCaptureCount = (
+    (state.rejectedCaptureCounts.get('invalid_payload') ?? 0)
+    + (state.rejectedCaptureCounts.get('unsupported_url') ?? 0)
+  );
+  if (invalidCaptureCount > 0) {
+    issues.push({
+      code: 'capture_payload_invalid',
+      severity: 'warning',
+      count: invalidCaptureCount,
+      message: '페이지가 전달한 비정상 API 관찰 이벤트를 제외했습니다.',
+    });
+  }
+  const oversizedCaptureCount = state.rejectedCaptureCounts.get('oversized_payload') ?? 0;
+  if (oversizedCaptureCount > 0) {
+    issues.push({
+      code: 'capture_payload_oversized',
+      severity: 'warning',
+      count: oversizedCaptureCount,
+      message: '안전 크기 상한을 넘는 API 관찰 이벤트를 제외했습니다.',
     });
   }
   issues.push({
@@ -705,7 +743,13 @@ chrome.runtime.onMessage.addListener(
       // ── API Hook: content script relay → SW 저장 ──
       case 'API_CAPTURED': {
         const tabId = sender.tab?.id || 0;
-        const captured = message.data as CapturedApi;
+        const normalized = normalizeCapturedApi(message.data, { baseUrl: sender.url });
+        if (!normalized.ok) {
+          recordCaptureRejection(tabId, normalized.reason);
+          sendResponse({ ok: false, reason: normalized.reason });
+          break;
+        }
+        const captured = normalized.capture;
         const frameId = sender.frameId ?? 0;
         captured.tabId = tabId;
         captured.origin = isAiDriving(tabId) ? 'ai' : 'user';
@@ -747,6 +791,21 @@ chrome.runtime.onMessage.addListener(
           autoCreateAuthProfileFromCapture(captured.url, tabId).catch(() => {});
         }
 
+        sendResponse({ ok: true });
+        break;
+      }
+
+      case 'API_CAPTURE_REJECTED': {
+        const tabId = sender.tab?.id;
+        if (
+          tabId == null
+          || activeCaptureSession?.tabId !== tabId
+          || !isCaptureRejectionReason(message.reason)
+        ) {
+          sendResponse({ ok: false, reason: 'invalid_rejection_report' });
+          break;
+        }
+        recordCaptureRejection(tabId, message.reason);
         sendResponse({ ok: true });
         break;
       }

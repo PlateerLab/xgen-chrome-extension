@@ -18,9 +18,44 @@ export function mainWorldHookFunction() {
 
   const MAX_BODY = 100 * 1024; // 100KB
 
-  function truncate(str: string | null): string | null {
-    if (!str) return str;
-    return str.length > MAX_BODY ? str.slice(0, MAX_BODY) + '...[truncated]' : str;
+  function resolveHttpUrl(rawUrl: string): string | null {
+    try {
+      const resolved = new URL(rawUrl, document.baseURI);
+      return ['http:', 'https:'].includes(resolved.protocol) ? resolved.toString() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function boundedText(value: string | null): { text: string | null; truncated: boolean } {
+    if (value == null || value.length <= MAX_BODY) return { text: value, truncated: false };
+    return { text: value.slice(0, MAX_BODY), truncated: true };
+  }
+
+  function addLimitation(
+    metadata: Record<string, unknown>,
+    limitation: string,
+  ): Record<string, unknown> {
+    const limitations = Array.isArray(metadata.limitations)
+      ? metadata.limitations.filter((item): item is string => typeof item === 'string')
+      : [];
+    return {
+      ...metadata,
+      limitations: [...new Set([...limitations, limitation])],
+    };
+  }
+
+  function limitSerializedRequest(serialized: {
+    requestBody: string | null;
+    requestMetadata: Record<string, unknown>;
+  }) {
+    const limited = boundedText(serialized.requestBody);
+    return {
+      requestBody: limited.text,
+      requestMetadata: limited.truncated
+        ? addLimitation(serialized.requestMetadata, 'request_body_truncated')
+        : serialized.requestMetadata,
+    };
   }
 
   function shouldIgnore(url: string): boolean {
@@ -52,6 +87,104 @@ export function mainWorldHookFunction() {
     // 일부 SSR 프레임워크가 RSC를 multipart 형식으로 반환
     if (ct.includes('multipart/x-component')) return true;
     return false;
+  }
+
+  function shouldSkipBodyCapture(contentType: string): boolean {
+    const ct = contentType.toLowerCase();
+    return (
+      ct.includes('text/event-stream')
+      || ct.includes('application/octet-stream')
+      || ct.includes('application/pdf')
+      || ct.includes('application/zip')
+      || ct.includes('application/x-zip')
+      || ct.includes('application/gzip')
+      || ct.includes('application/x-gzip')
+      || ct.includes('application/x-rar')
+      || ct.startsWith('audio/')
+      || ct.startsWith('video/')
+    );
+  }
+
+  async function readLimitedBody(
+    body: ReadableStream<Uint8Array> | null,
+    contentType: string,
+    contentLength: string | null,
+    scope: 'request' | 'response',
+  ): Promise<{
+    text: string | null;
+    bodyCaptured: boolean;
+    bodyTruncated: boolean;
+    limitations: string[];
+  }> {
+    if (!body) {
+      return { text: null, bodyCaptured: false, bodyTruncated: false, limitations: [] };
+    }
+    if (shouldSkipBodyCapture(contentType)) {
+      return {
+        text: null,
+        bodyCaptured: false,
+        bodyTruncated: false,
+        limitations: [`${scope}_binary_or_streaming_body_not_captured`],
+      };
+    }
+    const declaredLength = Number(contentLength || '');
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY) {
+      return {
+        text: null,
+        bodyCaptured: false,
+        bodyTruncated: true,
+        limitations: [`${scope}_content_length_exceeds_limit`],
+      };
+    }
+
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let truncated = false;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value?.length) continue;
+        const remaining = MAX_BODY - total;
+        if (remaining <= 0) {
+          truncated = true;
+          try { await reader.cancel(); } catch { /* bounded data is still usable */ }
+          break;
+        }
+        if (value.length > remaining) {
+          chunks.push(value.slice(0, remaining));
+          total += remaining;
+          truncated = true;
+          try { await reader.cancel(); } catch { /* bounded data is still usable */ }
+          break;
+        }
+        chunks.push(value);
+        total += value.length;
+      }
+    } catch {
+      return {
+        text: null,
+        bodyCaptured: false,
+        bodyTruncated: false,
+        limitations: [`${scope}_body_unavailable`],
+      };
+    } finally {
+      reader.releaseLock();
+    }
+
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return {
+      text: new TextDecoder().decode(bytes),
+      bodyCaptured: true,
+      bodyTruncated: truncated,
+      limitations: truncated ? [`${scope}_body_truncated`] : [],
+    };
   }
 
   function headersToObject(headers: Headers | HeadersInit | undefined): Record<string, string> {
@@ -255,21 +388,36 @@ export function mainWorldHookFunction() {
     }
     const startTime = Date.now();
     const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : (input as Request).url;
-    // 상대 경로를 절대 URL로 변환
-    const url = rawUrl.startsWith('/') ? `${window.location.origin}${rawUrl}` : rawUrl.startsWith('http') ? rawUrl : `${window.location.origin}/${rawUrl}`;
+    const url = resolveHttpUrl(rawUrl);
 
-    if (shouldIgnore(url)) {
+    if (!url || shouldIgnore(url)) {
       return originalFetch.call(this, input, init);
     }
 
     const method = init?.method || (input instanceof Request ? input.method : 'GET');
     const requestHeaders = headersToObject(init?.headers || (input instanceof Request ? input.headers : undefined));
     const requestContentType = headerValue(requestHeaders, 'content-type');
-    let serializedRequest = serializeRequestBody(init?.body ?? null, requestContentType);
+    let serializedRequest = limitSerializedRequest(
+      serializeRequestBody(init?.body ?? null, requestContentType),
+    );
     if (init?.body == null && input instanceof Request && !['GET', 'HEAD'].includes(method.toUpperCase())) {
       try {
-        const requestText = await input.clone().text();
-        serializedRequest = serializeRequestBody(requestText || null, requestContentType);
+        const requestClone = input.clone();
+        const observedRequest = await readLimitedBody(
+          requestClone.body,
+          requestContentType,
+          requestClone.headers.get('content-length'),
+          'request',
+        );
+        serializedRequest = limitSerializedRequest(
+          serializeRequestBody(observedRequest.text, requestContentType),
+        );
+        for (const limitation of observedRequest.limitations) {
+          serializedRequest.requestMetadata = addLimitation(
+            serializedRequest.requestMetadata,
+            limitation,
+          );
+        }
       } catch {
         serializedRequest.requestMetadata = {
           ...serializedRequest.requestMetadata,
@@ -282,13 +430,6 @@ export function mainWorldHookFunction() {
       const response = await originalFetch.call(this, input, init);
       const duration = Date.now() - startTime;
 
-      // response를 clone해서 body 읽기
-      const clone = response.clone();
-      let responseBody: string | null = null;
-      try {
-        responseBody = await clone.text();
-      } catch { responseBody = '[unreadable]'; }
-
       const responseHeaders: Record<string, string> = {};
       response.headers.forEach((value, key) => { responseHeaders[key] = value; });
 
@@ -298,6 +439,24 @@ export function mainWorldHookFunction() {
         return response;
       }
 
+      let observedResponse: Awaited<ReturnType<typeof readLimitedBody>> = {
+        text: null,
+        bodyCaptured: false,
+        bodyTruncated: false,
+        limitations: [],
+      };
+      try {
+        const clone = response.clone();
+        observedResponse = await readLimitedBody(
+          clone.body,
+          respContentType,
+          response.headers.get('content-length'),
+          'response',
+        );
+      } catch {
+        observedResponse.limitations = ['response_body_unavailable'];
+      }
+
       if ((window as any).__xgenApiHookActive) {
         dispatch({
           id: crypto.randomUUID(),
@@ -305,14 +464,20 @@ export function mainWorldHookFunction() {
           url,
           method: method.toUpperCase(),
           requestHeaders,
-          requestBody: truncate(serializedRequest.requestBody),
+          requestBody: serializedRequest.requestBody,
           requestContentType,
           requestMetadata: serializedRequest.requestMetadata,
           responseStatus: response.status,
           responseHeaders,
-          responseBody: truncate(responseBody),
-          contentType: response.headers.get('content-type') || '',
+          responseBody: observedResponse.text,
+          responseMetadata: {
+            bodyCaptured: observedResponse.bodyCaptured,
+            bodyTruncated: observedResponse.bodyTruncated,
+            limitations: observedResponse.limitations,
+          },
+          contentType: respContentType,
           duration,
+          provenance: { transport: 'fetch' },
         });
       }
 
@@ -326,14 +491,20 @@ export function mainWorldHookFunction() {
           url,
           method: method.toUpperCase(),
           requestHeaders,
-          requestBody: truncate(serializedRequest.requestBody),
+          requestBody: serializedRequest.requestBody,
           requestContentType,
           requestMetadata: serializedRequest.requestMetadata,
           responseStatus: 0,
           responseHeaders: {},
-          responseBody: `[fetch error: ${(err as Error).message}]`,
+          responseBody: null,
+          responseMetadata: {
+            bodyCaptured: false,
+            bodyTruncated: false,
+            limitations: ['fetch_failed'],
+          },
           contentType: '',
           duration,
+          provenance: { transport: 'fetch' },
         });
       }
       throw err;
@@ -347,10 +518,10 @@ export function mainWorldHookFunction() {
 
   XMLHttpRequest.prototype.open = function (method: string, url: string | URL, ...rest: any[]) {
     const rawUrl = typeof url === 'string' ? url : url.toString();
-    const fullUrl = rawUrl.startsWith('/') ? `${window.location.origin}${rawUrl}` : rawUrl.startsWith('http') ? rawUrl : `${window.location.origin}/${rawUrl}`;
+    const fullUrl = resolveHttpUrl(rawUrl);
     (this as any).__xgen = {
       method: method.toUpperCase(),
-      url: fullUrl,
+      url: fullUrl || '',
       requestHeaders: {} as Record<string, string>,
       startTime: 0,
     };
@@ -372,7 +543,9 @@ export function mainWorldHookFunction() {
 
     meta.startTime = Date.now();
     const requestContentType = headerValue(meta.requestHeaders, 'content-type');
-    const serializedRequest = serializeRequestBody(body as BodyInit | null, requestContentType);
+    const serializedRequest = limitSerializedRequest(
+      serializeRequestBody(body as BodyInit | null, requestContentType),
+    );
 
     this.addEventListener('loadend', function () {
       const duration = Date.now() - meta.startTime;
@@ -388,20 +561,47 @@ export function mainWorldHookFunction() {
       // HTML/이미지 등 비-API 응답 제외
       const xhrContentType = this.getResponseHeader('content-type') || '';
       if ((window as any).__xgenApiHookActive && !shouldSkipResponse(xhrContentType)) {
+        let responseBody: string | null = null;
+        let bodyCaptured = false;
+        let bodyTruncated = false;
+        const limitations: string[] = [];
+        const declaredLength = Number(this.getResponseHeader('content-length') || '');
+        if (
+          shouldSkipBodyCapture(xhrContentType)
+          || ['arraybuffer', 'blob', 'document', 'json'].includes(this.responseType)
+        ) {
+          limitations.push('response_binary_or_streaming_body_not_captured');
+        } else if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY) {
+          bodyTruncated = true;
+          limitations.push('response_content_length_exceeds_limit');
+        } else {
+          try {
+            const rawResponse = this.responseText;
+            const limited = boundedText(rawResponse || null);
+            responseBody = limited.text;
+            bodyCaptured = responseBody != null;
+            bodyTruncated = limited.truncated;
+            if (limited.truncated) limitations.push('response_body_truncated');
+          } catch {
+            limitations.push('response_body_unavailable');
+          }
+        }
         dispatch({
           id: crypto.randomUUID(),
           timestamp: meta.startTime,
           url: meta.url,
           method: meta.method,
           requestHeaders: meta.requestHeaders,
-          requestBody: truncate(serializedRequest.requestBody),
+          requestBody: serializedRequest.requestBody,
           requestContentType,
           requestMetadata: serializedRequest.requestMetadata,
           responseStatus: this.status,
           responseHeaders,
-          responseBody: truncate(this.responseText || null),
+          responseBody,
+          responseMetadata: { bodyCaptured, bodyTruncated, limitations },
           contentType: xhrContentType,
           duration,
+          provenance: { transport: 'xhr' },
         });
       }
     });
