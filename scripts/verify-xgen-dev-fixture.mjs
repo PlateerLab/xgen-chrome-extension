@@ -10,6 +10,73 @@ const fixtureToken = 'fixture-token-must-not-be-printed';
 const requests = [];
 let deletedCollectionId = null;
 let traceMergedCollectionId = null;
+let savedWorkflow = null;
+let deletedWorkflowId = null;
+let workflowExecuted = false;
+
+function fixtureNodeSpec({ id, functionId, parameters = [], inputs = [], outputs = [] }) {
+  return {
+    id,
+    functionId,
+    nodeName: id,
+    nodeNameKo: id,
+    parameters,
+    inputs,
+    outputs,
+  };
+}
+
+function fixtureNodeCatalog() {
+  return [{
+    categoryId: 'xgen',
+    functions: [{
+      functionId: 'fixture',
+      nodes: [
+        fixtureNodeSpec({
+          id: 'input_string',
+          functionId: 'input',
+          parameters: [
+            { id: 'input_str', value: '' },
+            { id: 'use_stt', value: false },
+          ],
+          outputs: [{ id: 'text', type: 'STR' }],
+        }),
+        fixtureNodeSpec({
+          id: 'mcp/APICollectionLoader',
+          functionId: 'api_loader',
+          parameters: [
+            { id: 'collection_id', value: '' },
+            { id: 'mode', value: 'auto' },
+            { id: 'bind_threshold', value: 20 },
+            { id: 'top_k', value: 0 },
+          ],
+          outputs: [{ id: 'tools', type: 'TOOL' }],
+        }),
+        fixtureNodeSpec({
+          id: 'agents/xgen',
+          functionId: 'agent',
+          parameters: [
+            { id: 'provider', value: 'fixture' },
+            { id: 'streaming', value: false },
+            { id: 'max_tokens', value: 1024 },
+            { id: 'max_iterations', value: 4 },
+            { id: 'system_prompt', value: '' },
+          ],
+          inputs: [
+            { id: 'text', type: 'STREAM STR|STR' },
+            { id: 'tools', type: 'TOOL' },
+          ],
+          outputs: [{ id: 'result', type: 'STR' }],
+        }),
+        fixtureNodeSpec({
+          id: 'tools/print_agent_output',
+          functionId: 'print',
+          inputs: [{ id: 'input_print', type: 'STREAM STR|STR' }],
+        }),
+      ],
+    }],
+  }];
+}
 
 function readJson(req) {
   return new Promise((resolve) => {
@@ -58,6 +125,85 @@ const server = createServer(async (req, res) => {
   }
   if (req.method === 'GET' && url.pathname === '/api/tools/api-collections') {
     json(res, 200, []);
+    return;
+  }
+  if (req.method === 'GET' && url.pathname === '/api/node/get') {
+    json(res, 200, fixtureNodeCatalog());
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/agentflow/save') {
+    const body = await readJson(req);
+    assert.equal(body.content?.nodes?.length, 4);
+    assert.equal(body.content?.edges?.length, 3);
+    assert.deepEqual(
+      new Set(body.content.nodes.map((node) => node.data?.id)),
+      new Set([
+        'input_string',
+        'mcp/APICollectionLoader',
+        'agents/xgen',
+        'tools/print_agent_output',
+      ]),
+    );
+    const loader = body.content.nodes.find(
+      (node) => node.data?.id === 'mcp/APICollectionLoader',
+    );
+    assert.match(
+      String(loader?.data?.parameters?.find((item) => item.id === 'collection_id')?.value),
+      /^pathfinder-t2-/,
+    );
+    assert.equal(
+      loader?.data?.parameters?.find((item) => item.id === 'mode')?.value,
+      'direct',
+    );
+    assert.ok(body.content.edges.some(
+      (edge) => edge.source?.nodeId === 'pathfinder-api-collection'
+        && edge.source?.portId === 'tools'
+        && edge.target?.nodeId === 'pathfinder-agent'
+        && edge.target?.portId === 'tools',
+    ));
+    savedWorkflow = body.content;
+    json(res, 200, { success: true });
+    return;
+  }
+  const workflowLoadMatch = url.pathname.match(/^\/api\/agentflow\/load\/([^/]+)$/);
+  const workflowDeleteMatch = url.pathname.match(/^\/api\/agentflow\/delete\/([^/]+)$/);
+  if (req.method === 'GET' && workflowLoadMatch) {
+    assert.ok(savedWorkflow, 'workflow load occurred before save');
+    assert.equal(savedWorkflow?.workflow_id, decodeURIComponent(workflowLoadMatch[1]));
+    json(res, 200, savedWorkflow);
+    return;
+  }
+  if (
+    req.method === 'POST'
+    && url.pathname === '/api/agentflow/execute/based-id/stream'
+  ) {
+    const body = await readJson(req);
+    assert.equal(body.workflow_id, savedWorkflow?.workflow_id);
+    assert.equal(body.input_data, 'XGEN 서비스 health 상태를 실제 API로 조회해줘.');
+    assert.match(body.interaction_id, /^pathfinder-e2e-/);
+    assert.equal(body.include_logs, true);
+    assert.equal(body.include_node_status, true);
+    assert.equal(body.include_tool_events, true);
+    assert.equal(body.response_format, 'stream');
+    workflowExecuted = true;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end([
+      `data: ${JSON.stringify({ status: 'started', node_id: 'pathfinder-agent' })}`,
+      '',
+      `data: ${JSON.stringify({
+        status: 'completed',
+        node_id: 'pathfinder-agent',
+        message: 'Called pathfinder_t2_getPathfinderT2Health successfully',
+      })}`,
+      '',
+    ].join('\n'));
+    return;
+  }
+  if (req.method === 'DELETE' && workflowDeleteMatch) {
+    assert.ok(savedWorkflow, 'workflow delete occurred before save');
+    deletedWorkflowId = decodeURIComponent(workflowDeleteMatch[1]);
+    assert.equal(deletedWorkflowId, savedWorkflow.workflow_id);
+    json(res, 200, { success: true });
     return;
   }
   if (
@@ -262,6 +408,7 @@ function runVerifier(origin) {
         PATHFINDER_XGEN_RUN_COLLECTION_FLOW: '1',
         PATHFINDER_XGEN_TEST_GRAPHQL: '1',
         PATHFINDER_XGEN_RUN_EXECUTE: '0',
+        PATHFINDER_XGEN_RUN_WORKFLOW: '1',
         PATHFINDER_XGEN_KEEP_COLLECTION: '0',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -315,6 +462,14 @@ try {
   assert.equal(result.collectionAcceptance.search.targetRank, 1);
   assert.equal(result.collectionAcceptance.plan.stepCount, 1);
   assert.equal(result.collectionAcceptance.execute, undefined);
+  assert.equal(result.collectionAcceptance.workflow.nodeCount, 4);
+  assert.equal(result.collectionAcceptance.workflow.edgeCount, 3);
+  assert.equal(result.collectionAcceptance.workflow.targetObserved, true);
+  assert.equal(workflowExecuted, true);
+  assert.equal(
+    deletedWorkflowId,
+    result.collectionAcceptance.workflow.workflowId,
+  );
   assert.equal(deletedCollectionId, result.collectionAcceptance.collectionId);
   assert.equal(
     traceMergedCollectionId,
@@ -335,7 +490,7 @@ try {
     'capability manifest route was not exercised',
   );
   console.log(
-    'XGEN dev verifier fixture passed: capability contract, OpenAPI/GraphQL preview, Pathfinder trace build, search, plan, cleanup.',
+    'XGEN dev verifier fixture passed: capability contract, OpenAPI/GraphQL preview, Pathfinder trace build, search, plan, APICollectionLoader workflow, cleanup.',
   );
 } finally {
   await new Promise((resolve) => server.close(resolve));
