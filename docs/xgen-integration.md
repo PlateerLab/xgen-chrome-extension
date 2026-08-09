@@ -104,6 +104,7 @@ Pathfinder가 특정 고객사의 tool name이나 path를 기반으로 ranking �
 ```bash
 PATHFINDER_XGEN_RUN_COLLECTION_FLOW=1 \
 PATHFINDER_XGEN_TEST_GRAPHQL=1 \
+PATHFINDER_XGEN_RUN_WORKFLOW=1 \
 npm run verify:xgen-dev
 ```
 
@@ -112,4 +113,6 @@ npm run verify:xgen-dev
 `semantic_summary`, `edge_quality_summary`를 확인한다. 이어서 실제
 `test-search`와 `synthesize-plan`을 호출하고 정상 종료와 실패 모두에서 임시
 Collection을 삭제한다. LLM/HTTP 실행은 `PATHFINDER_XGEN_RUN_EXECUTE=1`에서만
-추가된다.
+추가된다. `PATHFINDER_XGEN_RUN_WORKFLOW=1`은 live node catalog로 임시 4노드
+캔버스를 만들고 `APICollectionLoader -> Agent Xgen` 연결을 실제 워크플로우
+저장·SSE 실행 경로로 검증한 뒤 워크플로우와 Collection을 모두 삭제한다.

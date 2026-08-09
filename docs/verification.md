@@ -161,7 +161,8 @@ npm run verify:xgen-dev
 4. build 결과의 tool/source 수, graph-tool-call 및 graph version 확인
 5. readiness, semantic, edge quality summary 확인
 6. health 질의 search Top-K와 deterministic plan synthesis 확인
-7. `finally`에서 임시 Collection 삭제
+7. 선택 시 live node catalog 기반 임시 `APICollectionLoader` 워크플로우 저장·실행
+8. `finally`에서 임시 Workflow와 Collection 삭제
 
 실제 확장 등록 계약을 검증하기 위해 Collection flow는 기본적으로 `from-trace`를
 사용한다. 구버전 backend와 OpenAPI source 경로만 진단해야 하는 경우에만
@@ -179,6 +180,20 @@ execute fixture는 현재 XGEN의 `GET /api/health`만 호출하며 `intent.pars
 요구한다. XGEN 기본 LLM provider를 사용하므로 비용과 provider readiness를
 확인한 뒤 실행한다. 실패 조사 때문에 Collection을 보존해야 할 때만
 `PATHFINDER_XGEN_KEEP_COLLECTION=1`을 사용하고, 이후 수동 삭제한다.
+
+확장 등록 결과가 실제 캔버스의 `API Collection Loader` 노드로 동작하는지까지
+검증할 때는 다음을 추가한다.
+
+```bash
+export PATHFINDER_XGEN_RUN_WORKFLOW=1
+npm run verify:xgen-dev
+```
+
+이 모드는 `/api/node/get`의 현재 노드 스펙으로 Input, API Collection Loader,
+Agent Xgen, Output 노드를 구성한다. 임시 워크플로우를 저장한 뒤 Collection 바인딩
+보존을 다시 읽고, `/api/agentflow/execute/based-id/stream`에서 target tool 관찰과
+구조화된 failure 부재를 확인한다. 특정 사용자 워크플로우를 복제하거나 수정하지
+않으며 실행 후 임시 워크플로우를 삭제한다.
 
 T2 verifier 자체는 실제 credential 없이 다음 명령으로 검증한다.
 

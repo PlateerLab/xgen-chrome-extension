@@ -17,6 +17,7 @@ const allowAnonymous = process.env.PATHFINDER_XGEN_ALLOW_ANONYMOUS === '1';
 const requireOpenapi = process.env.PATHFINDER_XGEN_REQUIRE_OPENAPI === '1';
 const runCollectionFlow = process.env.PATHFINDER_XGEN_RUN_COLLECTION_FLOW === '1';
 const runExecute = process.env.PATHFINDER_XGEN_RUN_EXECUTE === '1';
+const runWorkflow = process.env.PATHFINDER_XGEN_RUN_WORKFLOW === '1';
 const testGraphQL = process.env.PATHFINDER_XGEN_TEST_GRAPHQL === '1';
 const keepCollection = process.env.PATHFINDER_XGEN_KEEP_COLLECTION === '1';
 const testTrace = runCollectionFlow
@@ -368,6 +369,257 @@ async function runReadOnlyExecute(collectionId, target) {
   return { eventTypes };
 }
 
+function findNodeSpec(catalog, nodeId) {
+  let match = null;
+  const visit = (value) => {
+    if (match || value == null) return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (typeof value !== 'object') return;
+    if (value.id === nodeId && Array.isArray(value.parameters)) {
+      match = value;
+      return;
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(catalog);
+  assert.ok(match, `live node catalog is missing ${nodeId}`);
+  return structuredClone(match);
+}
+
+function workflowNode(spec, id, position) {
+  return {
+    id,
+    position,
+    data: {
+      functionId: spec.functionId,
+      id: spec.id,
+      nodeName: spec.nodeName,
+      nodeNameKo: spec.nodeNameKo,
+      parameters: structuredClone(spec.parameters || []),
+      inputs: structuredClone(spec.inputs || []),
+      outputs: structuredClone(spec.outputs || []),
+    },
+  };
+}
+
+function setNodeParameter(node, parameterId, value) {
+  const parameter = node.data.parameters.find((item) => item.id === parameterId);
+  assert.ok(parameter, `${node.data.id} is missing parameter ${parameterId}`);
+  parameter.value = value;
+}
+
+function workflowEdge(id, sourceNode, sourcePort, sourceType, targetNode, targetPort, targetType) {
+  return {
+    id,
+    source: {
+      nodeId: sourceNode,
+      portId: sourcePort,
+      portType: sourceType,
+      type: sourceType,
+    },
+    target: {
+      nodeId: targetNode,
+      portId: targetPort,
+      portType: targetType,
+      type: targetType,
+    },
+  };
+}
+
+function eventContainsFailure(value) {
+  if (Array.isArray(value)) return value.some(eventContainsFailure);
+  if (!value || typeof value !== 'object') return false;
+  const type = String(value.type || value.event || value.kind || '').toLowerCase();
+  const status = String(value.status || '').toLowerCase();
+  const level = String(value.level || '').toLowerCase();
+  if (['error', 'failed', 'step.failed', 'workflow_error', 'execution_error'].includes(type)) {
+    return true;
+  }
+  if (['error', 'failed', 'failure'].includes(status)) return true;
+  if (['error', 'fatal'].includes(level)) return true;
+  if (value.success === false) return true;
+  if (
+    Object.prototype.hasOwnProperty.call(value, 'error')
+    && value.error != null
+    && value.error !== ''
+  ) return true;
+  return Object.values(value).some(eventContainsFailure);
+}
+
+function normalizeToolIdentifier(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9가-힣]/g, '');
+}
+
+async function verifyWorkflowAcceptance(collectionId, target) {
+  const workflowId = `wf_pathfinder_e2e_${Date.now().toString(36)}`;
+  const workflowName = 'Pathfinder API Collection Node E2E';
+  let created = false;
+
+  try {
+    const catalog = await jsonRequest('/api/node/get');
+    const input = workflowNode(
+      findNodeSpec(catalog, 'input_string'),
+      'pathfinder-input',
+      { x: 0, y: 200 },
+    );
+    const loader = workflowNode(
+      findNodeSpec(catalog, 'mcp/APICollectionLoader'),
+      'pathfinder-api-collection',
+      { x: 460, y: 360 },
+    );
+    const agent = workflowNode(
+      findNodeSpec(catalog, 'agents/xgen'),
+      'pathfinder-agent',
+      { x: 920, y: 200 },
+    );
+    const output = workflowNode(
+      findNodeSpec(catalog, 'tools/print_agent_output'),
+      'pathfinder-output',
+      { x: 1380, y: 200 },
+    );
+
+    const requirement = 'XGEN 서비스 health 상태를 실제 API로 조회해줘.';
+    setNodeParameter(input, 'input_str', requirement);
+    setNodeParameter(loader, 'collection_id', collectionId);
+    setNodeParameter(loader, 'mode', 'direct');
+    setNodeParameter(loader, 'bind_threshold', 20);
+    setNodeParameter(loader, 'top_k', 3);
+    setNodeParameter(agent, 'streaming', false);
+    setNodeParameter(agent, 'max_tokens', 800);
+    setNodeParameter(agent, 'max_iterations', 6);
+    setNodeParameter(
+      agent,
+      'system_prompt',
+      '연결된 API 도구를 반드시 호출해서 XGEN health 상태를 확인하고, '
+        + '도구 실행 결과만 간결하게 답하세요.',
+    );
+
+    const workflow = {
+      workflow_name: workflowName,
+      workflow_id: workflowId,
+      view: { x: 80, y: 160, scale: 0.72 },
+      nodes: [input, loader, agent, output],
+      edges: [
+        workflowEdge(
+          'pathfinder-input-agent',
+          input.id,
+          'text',
+          'STR',
+          agent.id,
+          'text',
+          'STREAM STR|STR',
+        ),
+        workflowEdge(
+          'pathfinder-loader-agent',
+          loader.id,
+          'tools',
+          'TOOL',
+          agent.id,
+          'tools',
+          'TOOL',
+        ),
+        workflowEdge(
+          'pathfinder-agent-output',
+          agent.id,
+          'result',
+          'STR',
+          output.id,
+          'input_print',
+          'STREAM STR|STR',
+        ),
+      ],
+      memos: [],
+      interaction_id: 'default',
+      description: 'Temporary Pathfinder APICollectionLoader dev acceptance workflow',
+    };
+
+    await jsonRequest('/api/agentflow/save', {
+      method: 'POST',
+      expected: [200],
+      body: {
+        workflow_name: workflowName,
+        workflow_id: workflowId,
+        content: workflow,
+      },
+    });
+    created = true;
+
+    const saved = await jsonRequest(`/api/agentflow/load/${encodeURIComponent(workflowId)}`);
+    const savedLoader = saved.nodes?.find(
+      (node) => node?.data?.id === 'mcp/APICollectionLoader',
+    );
+    assert.ok(savedLoader, 'saved workflow lost APICollectionLoader');
+    assert.equal(
+      savedLoader.data.parameters?.find((item) => item.id === 'collection_id')?.value,
+      collectionId,
+      'saved workflow lost the collection binding',
+    );
+    assert.equal(saved.nodes?.length, 4, 'saved workflow node count changed');
+    assert.equal(saved.edges?.length, 3, 'saved workflow edge count changed');
+
+    const response = await fetch(`${serverUrl}/api/agentflow/execute/based-id/stream`, {
+      method: 'POST',
+      headers: {
+        ...requestHeaders(),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        workflow_name: workflowName,
+        workflow_id: workflowId,
+        input_data: requirement,
+        interaction_id: `pathfinder-e2e-${Date.now().toString(36)}`,
+        include_logs: true,
+        include_node_status: true,
+        include_tool_events: true,
+        response_format: 'stream',
+      }),
+      signal: AbortSignal.timeout(180_000),
+    });
+    assert.equal(response.status, 200, `workflow execute returned ${response.status}`);
+    assert.match(
+      response.headers.get('content-type') || '',
+      /text\/event-stream/i,
+      'workflow execute must return SSE',
+    );
+    const events = await readSseEvents(response);
+    const serializedEvents = JSON.stringify(events);
+    const eventTypes = events
+      .map((event) => event?.type || event?.event || event?.status || event?.kind)
+      .filter(Boolean);
+    assert.ok(events.length > 0, 'workflow execute emitted no SSE events');
+    assert.ok(
+      normalizeToolIdentifier(serializedEvents).includes(normalizeToolIdentifier(target)),
+      `workflow events never observed the normalized target tool ${target}`,
+    );
+    assert.equal(
+      eventContainsFailure(events),
+      false,
+      'workflow emitted a structured failure event',
+    );
+
+    return {
+      workflowId,
+      nodeCount: saved.nodes.length,
+      edgeCount: saved.edges.length,
+      collectionId,
+      target,
+      targetObserved: true,
+      eventCount: events.length,
+      eventTypes: [...new Set(eventTypes)],
+    };
+  } finally {
+    if (created) {
+      await jsonRequest(`/api/agentflow/delete/${encodeURIComponent(workflowId)}`, {
+        method: 'DELETE',
+        expected: [200],
+      });
+    }
+  }
+}
+
 async function verifyCollectionAcceptance() {
   const collectionId = `pathfinder-t2-${Date.now().toString(36)}`;
   const encodedId = encodeURIComponent(collectionId);
@@ -495,6 +747,9 @@ async function verifyCollectionAcceptance() {
     if (runExecute) {
       acceptance.execute = await runReadOnlyExecute(collectionId, targetResult.name);
     }
+    if (runWorkflow) {
+      acceptance.workflow = await verifyWorkflowAcceptance(collectionId, targetResult.name);
+    }
     return acceptance;
   } finally {
     if (created && !keepCollection) {
@@ -553,6 +808,9 @@ if (openapi) {
 let collectionAcceptance = null;
 if (runExecute && !runCollectionFlow) {
   throw new Error('PATHFINDER_XGEN_RUN_EXECUTE=1 requires PATHFINDER_XGEN_RUN_COLLECTION_FLOW=1');
+}
+if (runWorkflow && !runCollectionFlow) {
+  throw new Error('PATHFINDER_XGEN_RUN_WORKFLOW=1 requires PATHFINDER_XGEN_RUN_COLLECTION_FLOW=1');
 }
 if (testGraphQL && !runCollectionFlow) {
   throw new Error('PATHFINDER_XGEN_TEST_GRAPHQL=1 requires PATHFINDER_XGEN_RUN_COLLECTION_FLOW=1');
