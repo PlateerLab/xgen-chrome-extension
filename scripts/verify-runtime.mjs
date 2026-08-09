@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -72,6 +73,23 @@ function getExtensionSessionStorage(page, key) {
     (storageKey) => chrome.storage.session.get(storageKey),
     key,
   );
+}
+
+async function assertValueFreeCaptureSessionStorage(extensionPage, label) {
+  const stored = await getExtensionSessionStorage(
+    extensionPage,
+    'runtime:capture-session',
+  );
+  const metadata = stored['runtime:capture-session'];
+  assert.ok(metadata, `${label}: persisted capture metadata should exist`);
+  assert.deepEqual(
+    Object.keys(metadata).sort(),
+    ['phase', 'sessionId', 'startedAt', 'tabId'],
+    `${label}: capture storage must contain metadata only`,
+  );
+  assert.equal('captures' in metadata, false);
+  assert.equal('requestBody' in metadata, false);
+  assert.equal('responseBody' in metadata, false);
 }
 
 function findTabIdByUrl(page, urlPatternSource) {
@@ -1074,6 +1092,16 @@ async function findExtensionIdFromPreferences(userDataDir) {
   return '';
 }
 
+function unpackedExtensionId(extensionPath) {
+  const digest = createHash('sha256')
+    .update(path.resolve(extensionPath))
+    .digest('hex')
+    .slice(0, 32);
+  return [...digest]
+    .map((character) => String.fromCharCode(97 + Number.parseInt(character, 16)))
+    .join('');
+}
+
 async function findExtensionIdFromCdp(context, timeoutMs = 5_000) {
   const bootstrapPage = context.pages()[0] || await context.newPage();
   const cdp = await context.newCDPSession(bootstrapPage);
@@ -1104,6 +1132,7 @@ async function resolveExtensionId(context, userDataDir) {
     await wait(1_000);
     extensionId = await findExtensionIdFromPreferences(userDataDir);
   }
+  extensionId ||= unpackedExtensionId(distDir);
   assert.ok(extensionId, 'extension id should be detected from service worker URL or profile');
   return extensionId;
 }
@@ -1117,25 +1146,207 @@ async function openExtensionPage(context, extensionId) {
   return extensionPage;
 }
 
+async function terminateExtensionServiceWorker(context, extensionId) {
+  const bootstrapPage = context.pages()[0] || await context.newPage();
+  const cdp = await context.newCDPSession(bootstrapPage);
+  const { targetInfos } = await cdp.send('Target.getTargets');
+  const target = targetInfos.find((candidate) => (
+    candidate.type === 'service_worker'
+    && candidate.url === `chrome-extension://${extensionId}/service-worker-loader.js`
+  ));
+  assert.ok(target?.targetId, 'extension Service Worker target should be running');
+  const closed = await cdp.send('Target.closeTarget', { targetId: target.targetId });
+  assert.equal(closed.success, true, 'extension Service Worker target should terminate');
+}
+
+async function waitForCaptureSessionStatus(extensionPage, predicate, label) {
+  let response;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    response = await sendExtensionMessage(extensionPage, {
+      type: 'GET_CAPTURE_SESSION_STATUS',
+    }).catch(() => null);
+    if (response && predicate(response)) return response;
+    await wait(100);
+  }
+  assert.fail(`${label}: capture session status not reached: ${JSON.stringify(response)}`);
+}
+
+async function verifyCaptureSessionLifecycle(
+  context,
+  extensionId,
+  targetPage,
+) {
+  const controlPage = await context.newPage();
+  await controlPage.goto(`chrome-extension://${extensionId}/src/demo/index.html`);
+  await targetPage.bringToFront();
+
+  const firstStart = await sendExtensionMessage(controlPage, {
+    type: 'START_CAPTURE_SESSION',
+  });
+  assert.equal(firstStart?.ok, true);
+  assert.ok(firstStart.sessionId, 'capture start should return sessionId');
+  const duplicateStart = await sendExtensionMessage(controlPage, {
+    type: 'START_CAPTURE_SESSION',
+  });
+  assert.equal(duplicateStart?.ok, true);
+  assert.equal(duplicateStart?.alreadyActive, true);
+  assert.equal(duplicateStart?.sessionId, firstStart.sessionId);
+
+  const activeStatus = await sendExtensionMessage(controlPage, {
+    type: 'GET_CAPTURE_SESSION_STATUS',
+  });
+  assert.equal(activeStatus?.state, 'active');
+  assert.equal(activeStatus?.sessionId, firstStart.sessionId);
+  const staleStop = await sendExtensionMessage(controlPage, {
+    type: 'STOP_CAPTURE_SESSION',
+    sessionId: 'stale-session-id',
+  });
+  assert.equal(staleStop?.ok, false);
+  assert.match(staleStop?.error || '', /Stale capture session/);
+  assert.equal(
+    (await sendExtensionMessage(controlPage, { type: 'GET_CAPTURE_SESSION_STATUS' }))?.state,
+    'active',
+  );
+
+  const stopped = await sendExtensionMessage(controlPage, {
+    type: 'STOP_CAPTURE_SESSION',
+    sessionId: firstStart.sessionId,
+  });
+  assert.equal(stopped?.ok, true);
+  assert.ok(stopped?.resultId);
+  const stableResult = await sendExtensionMessage(controlPage, { type: 'GET_CAPTURE_RESULT' });
+  assert.equal(stableResult?.result?.resultId, stopped.resultId);
+  assert.equal(stableResult?.result?.state, 'completed');
+  assert.equal(
+    (await sendExtensionMessage(controlPage, { type: 'GET_CAPTURE_RESULT' }))?.result?.resultId,
+    stopped.resultId,
+  );
+  assert.equal((await sendExtensionMessage(controlPage, {
+    type: 'ACK_CAPTURE_RESULT',
+    resultId: stopped.resultId,
+  }))?.ok, true);
+  assert.equal(
+    (await sendExtensionMessage(controlPage, { type: 'GET_CAPTURE_RESULT' }))?.result,
+    null,
+  );
+
+  const secondPage = await context.newPage();
+  await secondPage.goto(`${targetPage.url()}?capture-tab=second`);
+  const firstTabId = await findTabIdByUrl(
+    controlPage,
+    `^${targetPage.url().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`,
+  );
+  const secondTabId = await findTabIdByUrl(controlPage, 'capture-tab=second');
+  assert.ok(firstTabId && secondTabId, 'both capture lifecycle tabs should be discoverable');
+  const tabAStart = await sendExtensionMessage(controlPage, {
+    type: 'START_CAPTURE_SESSION',
+    tabId: firstTabId,
+  });
+  assert.equal(tabAStart?.ok, true);
+  const tabBStart = await sendExtensionMessage(controlPage, {
+    type: 'START_CAPTURE_SESSION',
+    tabId: secondTabId,
+  });
+  assert.equal(tabBStart?.ok, true);
+  assert.notEqual(tabBStart?.sessionId, tabAStart?.sessionId);
+  const tabBStatus = await sendExtensionMessage(controlPage, {
+    type: 'GET_CAPTURE_SESSION_STATUS',
+  });
+  assert.equal(tabBStatus?.tabId, secondTabId);
+  assert.equal(tabBStatus?.state, 'active');
+  await targetPage.waitForFunction(() => window.__xgenApiHookActive === false);
+  await secondPage.waitForFunction(() => window.__xgenApiHookActive === true);
+  const tabBStop = await sendExtensionMessage(controlPage, {
+    type: 'STOP_CAPTURE_SESSION',
+    sessionId: tabBStart.sessionId,
+  });
+  assert.equal(tabBStop?.ok, true);
+  assert.equal((await sendExtensionMessage(controlPage, {
+    type: 'ACK_CAPTURE_RESULT',
+    resultId: tabBStop.resultId,
+  }))?.ok, true);
+  await secondPage.close();
+
+  await targetPage.bringToFront();
+  const restartStart = await sendExtensionMessage(controlPage, {
+    type: 'START_CAPTURE_SESSION',
+  });
+  assert.equal(restartStart?.ok, true);
+  await targetPage.waitForFunction(() => window.__xgenApiHookActive === true);
+  await terminateExtensionServiceWorker(context, extensionId);
+  const recoveredStatus = await waitForCaptureSessionStatus(
+    controlPage,
+    (status) => status.state === 'idle',
+    'MV3 restart recovery',
+  );
+  assert.equal(recoveredStatus.active, false);
+  const interrupted = await sendExtensionMessage(controlPage, { type: 'GET_CAPTURE_RESULT' });
+  assert.equal(interrupted?.result?.sessionId, restartStart.sessionId);
+  assert.equal(interrupted?.result?.state, 'interrupted');
+  assert.equal(interrupted?.result?.reason, 'service_worker_restarted');
+  assert.deepEqual(interrupted?.result?.apis, []);
+  await targetPage.waitForFunction(
+    () => window.__xgenApiHookActive === false,
+    undefined,
+    { timeout: 5_000 },
+  );
+  assert.equal((await sendExtensionMessage(controlPage, {
+    type: 'ACK_CAPTURE_RESULT',
+    resultId: interrupted.result.resultId,
+  }))?.ok, true);
+  await controlPage.close();
+}
+
 async function runCaptureSession(extensionPage, targetPage, action, label) {
+  await extensionPage.evaluate(() => {
+    const runtimeWindow = window;
+    runtimeWindow.__pathfinderRuntimeCaptureResults = [];
+    if (runtimeWindow.__pathfinderRuntimeCaptureListenerInstalled) return;
+    runtimeWindow.__pathfinderRuntimeCaptureListenerInstalled = true;
+    chrome.runtime.onMessage.addListener((message) => {
+      if (message?.type === 'CAPTURE_SESSION_RESULT') {
+        runtimeWindow.__pathfinderRuntimeCaptureResults.push(message);
+      }
+    });
+  });
   await targetPage.bringToFront();
   const start = await sendExtensionMessage(extensionPage, { type: 'START_CAPTURE_SESSION' });
   assert.equal(start?.ok, true, `${label}: START_CAPTURE_SESSION failed: ${JSON.stringify(start)}`);
 
   await action();
+  await assertValueFreeCaptureSessionStorage(extensionPage, label);
 
   await targetPage.bringToFront();
   const stop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
   assert.equal(stop?.ok, true, `${label}: STOP_CAPTURE_SESSION failed: ${JSON.stringify(stop)}`);
   assert.ok(stop.count >= 1, `${label}: expected at least one captured API, got ${stop.count}`);
-  assert.equal(stop.bufferedCount, 0, `${label}: tab capture buffer was not released after stop`);
+  assert.ok(stop.sessionId, `${label}: stop response should include sessionId`);
+  assert.ok(stop.resultId, `${label}: stop response should include resultId`);
 
   const cached = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
   assert.equal(cached?.ok, true, `${label}: GET_CAPTURE_RESULT failed: ${JSON.stringify(cached)}`);
-  const apis = cached?.result?.apis || [];
+  const broadcastResult = await extensionPage.evaluate(() => (
+    window.__pathfinderRuntimeCaptureResults?.at(-1) || null
+  ));
+  const result = cached?.result || broadcastResult;
+  assert.equal(result?.resultId, stop.resultId, `${label}: resultId mismatch`);
+  const apis = result?.apis || [];
   assert.equal(apis.length, stop.count, `${label}: cached result count mismatch`);
+  if (cached?.result) {
+    const repeated = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
+    assert.equal(
+      repeated?.result?.resultId,
+      stop.resultId,
+      `${label}: result should remain stable until acknowledged`,
+    );
+    const acknowledged = await sendExtensionMessage(extensionPage, {
+      type: 'ACK_CAPTURE_RESULT',
+      resultId: stop.resultId,
+    });
+    assert.equal(acknowledged?.ok, true, `${label}: capture result acknowledgement failed`);
+  }
   const consumed = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
-  assert.equal(consumed?.result, null, `${label}: consumed capture result should be released`);
+  assert.equal(consumed?.result, null, `${label}: acknowledged capture result should be released`);
   return apis;
 }
 
@@ -1153,7 +1364,12 @@ async function bootstrapGrantedContentScript(extensionPage, targetPage, url) {
   assert.equal(start?.ok, true, `granted content injection failed: ${JSON.stringify(start)}`);
   const stop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
   assert.equal(stop?.ok, true, `granted content bootstrap cleanup failed: ${JSON.stringify(stop)}`);
-  await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
+  if (stop.resultId) {
+    await sendExtensionMessage(extensionPage, {
+      type: 'ACK_CAPTURE_RESULT',
+      resultId: stop.resultId,
+    });
+  }
 }
 
 async function verifyDeniedOptionalPermissions(extensionPage, targetPage, url) {
@@ -1358,6 +1574,17 @@ async function clickSidepanelButton(extensionPage, targetPage, label, matcher) {
 }
 
 async function runCaptureSessionViaSidepanel(extensionPage, targetPage, action, label, activePageForControls = targetPage) {
+  await extensionPage.evaluate(() => {
+    const runtimeWindow = window;
+    runtimeWindow.__pathfinderRuntimeCaptureResults = [];
+    if (runtimeWindow.__pathfinderRuntimeCaptureListenerInstalled) return;
+    runtimeWindow.__pathfinderRuntimeCaptureListenerInstalled = true;
+    chrome.runtime.onMessage.addListener((message) => {
+      if (message?.type === 'CAPTURE_SESSION_RESULT') {
+        runtimeWindow.__pathfinderRuntimeCaptureResults.push(message);
+      }
+    });
+  });
   await clickSidepanelButton(extensionPage, activePageForControls, `${label}: start`, /캡처 세션 시작/);
   await extensionPage.waitForFunction(() => document.body.innerText.includes('캡처 중'));
   await targetPage.waitForFunction(
@@ -1367,6 +1594,7 @@ async function runCaptureSessionViaSidepanel(extensionPage, targetPage, action, 
   );
 
   await action();
+  await assertValueFreeCaptureSessionStorage(extensionPage, label);
   await extensionPage.waitForFunction(
     () => /캡처 중[^]*\([1-9]\d*건\)/.test(document.body.innerText),
     undefined,
@@ -1376,13 +1604,14 @@ async function runCaptureSessionViaSidepanel(extensionPage, targetPage, action, 
   await clickSidepanelButton(extensionPage, activePageForControls, `${label}: stop`, /캡처 종료/);
   await extensionPage.waitForFunction(() => document.body.innerText.includes('캡처 분석'));
 
-  const cached = await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
-  assert.equal(cached?.ok, true, `${label}: GET_CAPTURE_RESULT failed: ${JSON.stringify(cached)}`);
-  const apis = cached?.result?.apis || [];
+  const capturedResult = await extensionPage.evaluate(() => (
+    window.__pathfinderRuntimeCaptureResults?.at(-1) || null
+  ));
+  const apis = capturedResult?.apis || [];
   assert.ok(apis.length >= 1, `${label}: expected at least one captured API, got ${apis.length}`);
   return {
     apis,
-    captureCoverage: cached?.result?.captureCoverage,
+    captureCoverage: capturedResult?.captureCoverage,
   };
 }
 
@@ -2323,7 +2552,12 @@ async function verifyDevXgenOriginDetection(extensionPage, browserContext) {
   assert.equal(start?.ok, true, `dev-xgen content injection failed: ${JSON.stringify(start)}`);
   const stop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
   assert.equal(stop?.ok, true, `dev-xgen capture cleanup failed: ${JSON.stringify(stop)}`);
-  await sendExtensionMessage(extensionPage, { type: 'GET_CAPTURE_RESULT' });
+  if (stop.resultId) {
+    await sendExtensionMessage(extensionPage, {
+      type: 'ACK_CAPTURE_RESULT',
+      resultId: stop.resultId,
+    });
+  }
 
   let config;
   for (let attempt = 0; attempt < 25; attempt++) {
@@ -2766,7 +3000,7 @@ async function main() {
 
     const relaunchedExtensionId = await resolveExtensionId(context, userDataDir);
     assert.equal(relaunchedExtensionId, extensionId, 'extension id should remain stable after restart');
-    const extensionPage = await openExtensionPage(context, extensionId);
+    let extensionPage = await openExtensionPage(context, extensionId);
 
     await extensionPage.bringToFront();
     if (process.env.PATHFINDER_RUNTIME_EXPECTED_FAILURE === '1') {
@@ -2784,6 +3018,9 @@ async function main() {
     const targetPage = await context.newPage();
     await targetPage.goto(url);
     await bootstrapGrantedContentScript(extensionPage, targetPage, url);
+    await extensionPage.close();
+    await verifyCaptureSessionLifecycle(context, extensionId, targetPage);
+    extensionPage = await openExtensionPage(context, extensionId);
     await pinSidepanelToTarget(extensionPage, targetPage);
     await verifyCookiePermissionUi(extensionPage);
     const distractorPage = await context.newPage();
@@ -3265,6 +3502,7 @@ async function main() {
       'capture result merge conflict verified',
       'privacy-safe HAR import verified',
       'capture payload memory release verified',
+      'serialized capture lifecycle and MV3 restart recovery verified',
       'optional host/cookie denial, persisted grant, and revoke cleanup verified',
       `fetch/xhr captured ${firstApis.length} API request(s)`,
       `navigation reinjection captured ${secondApis.length} API request(s)`,

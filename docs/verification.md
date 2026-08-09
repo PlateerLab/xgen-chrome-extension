@@ -56,6 +56,9 @@ xvfb-run -a npm run verify:pathfinder:runtime
 - SPA navigation 후 hook 재연결
 - 대상 탭 고정
 - fetch/XHR 요청 캡처
+- 캡처 start/stop 직렬화, 동일 탭 멱등 시작 및 탭 간 세션 교체 cleanup
+- 캡처 결과 ID/ACK 중복 방지와 Manifest V3 Service Worker 강제 종료 후
+  `interrupted` 복구
 - 저장된 XGEN httpOnly cookie 인증
 - dev XGEN origin 및 token 탐지
 - `page_command` 결과 callback
