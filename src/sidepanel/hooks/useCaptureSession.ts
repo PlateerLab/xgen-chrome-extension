@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ExtensionMessage } from '../../shared/types';
 import type {
   CaptureCoverage,
@@ -11,6 +11,10 @@ import {
 } from '../../shared/permissions';
 
 export interface SessionResult {
+  resultId?: string;
+  sessionId?: string;
+  state?: 'completed' | 'interrupted';
+  reason?: string;
   apis: CapturedApi[];
   tabId: number;
   durationMs: number;
@@ -47,6 +51,19 @@ function permissionError(reason: PermissionReadinessReason): string {
   return reason;
 }
 
+function interruptionError(reason?: string): string {
+  if (reason === 'service_worker_restarted') {
+    return '브라우저가 캡처 프로세스를 재시작해 세션이 중단되었습니다. 다시 캡처해 주세요.';
+  }
+  if (reason === 'capture_tab_closed') {
+    return '캡처하던 탭이 닫혀 세션이 중단되었습니다.';
+  }
+  if (reason === 'replaced_by_new_session') {
+    return '다른 탭에서 새 캡처를 시작해 이전 세션을 종료했습니다.';
+  }
+  return reason || '캡처 세션이 중단되었습니다.';
+}
+
 async function captureFrameUrls(
   tabId: number | null | undefined,
   topFrameUrl: string | null | undefined,
@@ -77,13 +94,38 @@ export function useCaptureSession(
   const [error, setError] = useState<string | null>(null);
   const [reason, setReason] = useState<PermissionReadinessReason | null>(null);
   const [result, setResult] = useState<SessionResult | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
+  const acceptedResultIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    const acceptResult = (sessionResult: SessionResult) => {
+      if (
+        sessionResult.resultId
+        && acceptedResultIdRef.current === sessionResult.resultId
+      ) return;
+      acceptedResultIdRef.current = sessionResult.resultId ?? null;
+      activeSessionIdRef.current = null;
+      setActive(false);
+      setPending(false);
+      setCount(0);
+      setError(sessionResult.state === 'interrupted'
+        ? interruptionError(sessionResult.reason)
+        : null);
+      setReason(null);
+      setResult(sessionResult.state === 'interrupted' ? null : sessionResult);
+      if (sessionResult.resultId) {
+        chrome.runtime.sendMessage({
+          type: 'ACK_CAPTURE_RESULT',
+          resultId: sessionResult.resultId,
+        } satisfies ExtensionMessage).catch(() => {});
+      }
+    };
     const listener = (message: ExtensionMessage) => {
       if (message.type === 'CAPTURE_SESSION_STATUS') {
+        activeSessionIdRef.current = message.sessionId ?? null;
         setActive(message.active);
         setCount(message.count ?? 0);
-        setPending(false);
+        setPending(message.state === 'starting' || message.state === 'stopping');
         if (message.error) {
           setError(message.error);
           if (
@@ -98,17 +140,7 @@ export function useCaptureSession(
           setReason(null);
         }
       } else if (message.type === 'CAPTURE_SESSION_RESULT') {
-        setActive(false);
-        setPending(false);
-        setCount(0);
-        setError(null);
-        setReason(null);
-        setResult({
-          apis: message.apis,
-          tabId: message.tabId,
-          durationMs: message.durationMs,
-          captureCoverage: message.captureCoverage,
-        });
+        acceptResult(message);
       }
     };
     chrome.runtime.onMessage.addListener(listener);
@@ -120,13 +152,23 @@ export function useCaptureSession(
       .sendMessage({ type: 'GET_CAPTURE_RESULT' } satisfies ExtensionMessage)
       .then((resp: { ok?: boolean; result?: SessionResult | null } | undefined) => {
         if (resp?.result) {
-          setActive(false);
-          setPending(false);
-          setCount(0);
-          setError(null);
-          setReason(null);
-          setResult(resp.result);
+          acceptResult(resp.result);
         }
+      })
+      .catch(() => {});
+
+    chrome.runtime
+      .sendMessage({ type: 'GET_CAPTURE_SESSION_STATUS' } satisfies ExtensionMessage)
+      .then((resp: {
+        active?: boolean;
+        state?: string;
+        sessionId?: string;
+        count?: number;
+      } | undefined) => {
+        activeSessionIdRef.current = resp?.sessionId ?? null;
+        setActive(resp?.active === true);
+        setPending(resp?.state === 'starting' || resp?.state === 'stopping');
+        setCount(resp?.count ?? 0);
       })
       .catch(() => {});
 
@@ -153,8 +195,9 @@ export function useCaptureSession(
           ...tabTarget(targetTabId),
         } satisfies ExtensionMessage);
       })
-      .then((resp: { ok?: boolean; error?: string } | undefined) => {
+      .then((resp: { ok?: boolean; error?: string; sessionId?: string } | undefined) => {
         if (!resp) return;
+        if (resp.sessionId) activeSessionIdRef.current = resp.sessionId;
         if (resp?.ok === false) {
           setActive(false);
           setCount(0);
@@ -173,7 +216,12 @@ export function useCaptureSession(
     setError(null);
     setPending(true);
     chrome.runtime
-      .sendMessage({ type: 'STOP_CAPTURE_SESSION' } satisfies ExtensionMessage)
+      .sendMessage({
+        type: 'STOP_CAPTURE_SESSION',
+        ...(activeSessionIdRef.current
+          ? { sessionId: activeSessionIdRef.current }
+          : {}),
+      } satisfies ExtensionMessage)
       .then((resp: { ok?: boolean; error?: string } | undefined) => {
         if (resp?.ok === false) {
           setError(resp.error || '캡처 세션을 종료하지 못했습니다.');

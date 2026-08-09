@@ -215,17 +215,33 @@ export type ExtensionMessage =
   | { type: 'ELEMENT_PICKER_RESULT'; apis: import('./api-hook-types').CapturedApi[]; elementInfo: { tag: string; text: string; url: string } }
   // ── Capture Session (사용자 클릭 캡처 누적용; AI 자동 탐색은 제외) ──
   | { type: 'START_CAPTURE_SESSION'; tabId?: number }
-  | { type: 'STOP_CAPTURE_SESSION' }
-  | { type: 'CAPTURE_SESSION_STATUS'; active: boolean; tabId?: number; count?: number; error?: string }
+  | { type: 'STOP_CAPTURE_SESSION'; sessionId?: string }
+  | {
+      type: 'GET_CAPTURE_SESSION_STATUS';
+    }
+  | {
+      type: 'CAPTURE_SESSION_STATUS';
+      active: boolean;
+      state?: 'idle' | 'starting' | 'active' | 'stopping' | 'completed' | 'interrupted';
+      sessionId?: string;
+      tabId?: number;
+      count?: number;
+      error?: string;
+    }
   | {
       type: 'CAPTURE_SESSION_RESULT';
+      resultId: string;
+      sessionId: string;
+      state: 'completed' | 'interrupted';
       apis: import('./api-hook-types').CapturedApi[];
       tabId: number;
       durationMs: number;
       captureCoverage: import('./api-hook-types').CaptureCoverage;
+      reason?: string;
     }
   /** sidepanel이 stop 이후에 처음 열렸을 때 SW에 캐시된 마지막 결과를 직접 가져오기 위한 query. */
   | { type: 'GET_CAPTURE_RESULT' }
+  | { type: 'ACK_CAPTURE_RESULT'; resultId: string }
   | { type: 'CONTENT_SCRIPT_SHUTDOWN'; reason: 'host_permission_revoked' }
   | { type: 'GET_PERMISSION_READINESS'; url?: string }
   /** 특정 host의 현재 살아있는 쿠키를 SW에서 chrome.cookies API로 읽어 반환.

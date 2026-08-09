@@ -134,29 +134,64 @@ function isAiDriving(tabId: number): boolean {
 // 사용자가 🔴 버튼으로 시작 → 같은 탭에서 발생한 origin='user' 캡처를 누적 → ⏹로 종료.
 // 다른 탭으로 전환해도 원래 탭의 캡처만 모음 (사용자 요청).
 interface CaptureSession {
+  sessionId: string;
+  phase: 'starting' | 'active' | 'stopping';
   tabId: number;
   startedAt: number;
   captures: CapturedApi[];
 }
 let activeCaptureSession: CaptureSession | null = null;
+let captureSessionTransition: Promise<void> = Promise.resolve();
 const CAPTURE_SESSION_MAX = 500;
 const CAPTURE_RESULT_TTL_MS = 5 * 60 * 1000;
+const CAPTURE_SESSION_METADATA_KEY = 'runtime:capture-session';
+const CAPTURE_INTERRUPTED_RESULT_KEY = 'runtime:capture-interrupted-result';
+
+interface PersistedCaptureSession {
+  sessionId: string;
+  phase: CaptureSession['phase'];
+  tabId: number;
+  startedAt: number;
+}
+
+type CaptureSessionResult = Extract<ExtensionMessage, { type: 'CAPTURE_SESSION_RESULT' }>;
 
 // 캡처 종료 후 sidepanel이 mount되기 전 broadcast가 발사되는 race를 막기 위한 캐시.
 // sidepanel이 GET_CAPTURE_RESULT로 한 번 가져가면 null로 소비.
-let cachedCaptureResult: {
-  apis: CapturedApi[];
-  tabId: number;
-  durationMs: number;
-  captureCoverage: CaptureCoverage;
-} | null = null;
+let cachedCaptureResult: Omit<CaptureSessionResult, 'type'> | null = null;
 let cachedCaptureResultTimer: ReturnType<typeof setTimeout> | null = null;
 
-function clearCachedCaptureResult(): void {
+async function clearCachedCaptureResult(): Promise<void> {
   cachedCaptureResult = null;
+  await chrome.storage.session.remove(CAPTURE_INTERRUPTED_RESULT_KEY).catch(() => {});
   if (cachedCaptureResultTimer) {
     clearTimeout(cachedCaptureResultTimer);
     cachedCaptureResultTimer = null;
+  }
+}
+
+function serializeCaptureTransition<T>(operation: () => Promise<T>): Promise<T> {
+  const result = captureSessionTransition.then(operation, operation);
+  captureSessionTransition = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function captureSessionMetadata(session: CaptureSession): PersistedCaptureSession {
+  return {
+    sessionId: session.sessionId,
+    phase: session.phase,
+    tabId: session.tabId,
+    startedAt: session.startedAt,
+  };
+}
+
+async function persistCaptureSession(session: CaptureSession | null): Promise<void> {
+  if (session) {
+    await chrome.storage.session.set({
+      [CAPTURE_SESSION_METADATA_KEY]: captureSessionMetadata(session),
+    });
+  } else {
+    await chrome.storage.session.remove(CAPTURE_SESSION_METADATA_KEY);
   }
 }
 
@@ -425,19 +460,28 @@ async function abortTabForPermission(
   capturedApisByTab.delete(tabId);
   aiDrivingTabIds.delete(tabId);
   if (cachedCaptureResult?.tabId === tabId) {
-    clearCachedCaptureResult();
+    await clearCachedCaptureResult();
   }
   if (activeCaptureSession?.tabId === tabId) {
     activeCaptureSession = null;
+    await persistCaptureSession(null);
     broadcastCaptureStatus({
       active: false,
+      state: 'interrupted',
       tabId,
       error: reason,
     });
   }
 }
 
-function completeCaptureSession(session: CaptureSession, options: { openPanel: boolean } = { openPanel: true }): void {
+async function completeCaptureSession(
+  session: CaptureSession,
+  options: {
+    openPanel: boolean;
+    state?: 'completed' | 'interrupted';
+    reason?: string;
+  } = { openPanel: true },
+): Promise<Omit<CaptureSessionResult, 'type'>> {
   const durationMs = Date.now() - session.startedAt;
   const captureCoverage = captureCoverageForTab(session.tabId);
   if (options.openPanel) {
@@ -446,28 +490,68 @@ function completeCaptureSession(session: CaptureSession, options: { openPanel: b
     });
   }
 
-  clearCachedCaptureResult();
-  cachedCaptureResult = {
+  await clearCachedCaptureResult();
+  await persistCaptureSession(null);
+  const result: Omit<CaptureSessionResult, 'type'> = {
+    resultId: crypto.randomUUID(),
+    sessionId: session.sessionId,
+    state: options.state ?? 'completed',
     apis: session.captures,
     tabId: session.tabId,
     durationMs,
     captureCoverage,
+    ...(options.reason ? { reason: options.reason } : {}),
   };
-  cachedCaptureResultTimer = setTimeout(clearCachedCaptureResult, CAPTURE_RESULT_TTL_MS);
+  cachedCaptureResult = result;
+  cachedCaptureResultTimer = setTimeout(() => {
+    clearCachedCaptureResult().catch(() => {});
+  }, CAPTURE_RESULT_TTL_MS);
 
-  broadcastCaptureStatus({ active: false, tabId: session.tabId });
+  broadcastCaptureStatus({
+    active: false,
+    state: result.state,
+    sessionId: session.sessionId,
+    tabId: session.tabId,
+    ...(options.reason ? { error: options.reason } : {}),
+  });
   broadcastToSidePanel({
     type: 'CAPTURE_SESSION_RESULT',
-    apis: session.captures,
-    tabId: session.tabId,
-    durationMs,
-    captureCoverage,
+    ...result,
   });
+  return result;
+}
+
+async function finishCaptureSession(
+  session: CaptureSession,
+  options: {
+    openPanel: boolean;
+    state: 'completed' | 'interrupted';
+    reason?: string;
+  },
+): Promise<Omit<CaptureSessionResult, 'type'>> {
+  session.phase = 'stopping';
+  await persistCaptureSession(session);
+  await unhookApiFrames(session.tabId).catch(() => {});
+  await chrome.tabs.sendMessage(session.tabId, {
+    type: 'HIDE_FLOATING_OVERLAY',
+  } satisfies ExtensionMessage).catch(() => {});
+  hookedTabs.delete(session.tabId);
+  if (activeCaptureSession?.sessionId === session.sessionId) {
+    activeCaptureSession = null;
+  }
+  const result = await completeCaptureSession(session, options);
+  capturedApisByTab.delete(session.tabId);
+  frameCaptureStateByTab.delete(session.tabId);
+  return result;
 }
 
 async function unhookApiFrames(tabId: number): Promise<void> {
   const state = frameCaptureStateByTab.get(tabId);
-  const frameIds = [...(state?.instrumentedFrameIds ?? new Set([0]))];
+  const discoveredFrames = await chrome.webNavigation.getAllFrames({ tabId }).catch(() => null);
+  const frameIds = [...new Set([
+    ...(state?.instrumentedFrameIds ?? new Set([0])),
+    ...(discoveredFrames ?? []).map((frame) => frame.frameId),
+  ])];
   await Promise.all(frameIds.map((frameId) =>
     chrome.scripting.executeScript({
       target: { tabId, frameIds: [frameId] },
@@ -475,6 +559,48 @@ async function unhookApiFrames(tabId: number): Promise<void> {
       world: 'MAIN' as any,
     }).catch(() => {})));
 }
+
+async function recoverInterruptedCaptureSession(): Promise<void> {
+  const stored = await chrome.storage.session.get(CAPTURE_SESSION_METADATA_KEY);
+  const value = stored[CAPTURE_SESSION_METADATA_KEY] as Partial<PersistedCaptureSession> | undefined;
+  if (!value) return;
+  if (
+    typeof value.sessionId !== 'string'
+    || typeof value.tabId !== 'number'
+    || typeof value.startedAt !== 'number'
+  ) {
+    await chrome.storage.session.remove(CAPTURE_SESSION_METADATA_KEY);
+    return;
+  }
+
+  const session: CaptureSession = {
+    sessionId: value.sessionId,
+    phase: 'stopping',
+    tabId: value.tabId,
+    startedAt: value.startedAt,
+    captures: [],
+  };
+  await unhookApiFrames(session.tabId).catch(() => {});
+  await chrome.tabs.sendMessage(session.tabId, {
+    type: 'HIDE_FLOATING_OVERLAY',
+  } satisfies ExtensionMessage).catch(() => {});
+  hookedTabs.delete(session.tabId);
+  capturedApisByTab.delete(session.tabId);
+  frameCaptureStateByTab.delete(session.tabId);
+
+  const result = await completeCaptureSession(session, {
+    openPanel: false,
+    state: 'interrupted',
+    reason: 'service_worker_restarted',
+  });
+  await chrome.storage.session.set({
+    [CAPTURE_INTERRUPTED_RESULT_KEY]: result,
+  });
+}
+
+const captureRecoveryPromise = recoverInterruptedCaptureSession().catch((err) => {
+  console.warn('[XGEN SW] capture recovery failed:', errorMessage(err));
+});
 
 // ── Side Panel open on icon click ──
 
@@ -742,10 +868,16 @@ chrome.runtime.onMessage.addListener(
 
       // ── API Hook: content script relay → SW 저장 ──
       case 'API_CAPTURED': {
-        const tabId = sender.tab?.id || 0;
+        const tabId = sender.tab?.id;
+        if (tabId == null) {
+          sendResponse({ ok: false, reason: 'invalid_sender' });
+          break;
+        }
         const normalized = normalizeCapturedApi(message.data, { baseUrl: sender.url });
         if (!normalized.ok) {
-          recordCaptureRejection(tabId, normalized.reason);
+          if (activeCaptureSession?.tabId === tabId) {
+            recordCaptureRejection(tabId, normalized.reason);
+          }
           sendResponse({ ok: false, reason: normalized.reason });
           break;
         }
@@ -771,6 +903,7 @@ chrome.runtime.onMessage.addListener(
         // 사용자 capture session에 누적: 같은 탭 + origin='user'만
         if (
           activeCaptureSession &&
+          activeCaptureSession.phase === 'active' &&
           activeCaptureSession.tabId === tabId &&
           captured.origin === 'user'
         ) {
@@ -781,6 +914,8 @@ chrome.runtime.onMessage.addListener(
           }
           broadcastCaptureStatus({
             active: true,
+            state: 'active',
+            sessionId: activeCaptureSession.sessionId,
             tabId: activeCaptureSession.tabId,
             count: activeCaptureSession.captures.length,
           });
@@ -813,7 +948,8 @@ chrome.runtime.onMessage.addListener(
       // ── User Capture Session ──
       case 'START_CAPTURE_SESSION': {
         const targetTabId = getMessageTabId(message);
-        (async () => {
+        captureRecoveryPromise.then(() => serializeCaptureTransition(async () => {
+          let startingSession: CaptureSession | null = null;
           try {
             const tab = await getTargetTab(targetTabId);
             const tabId = tab?.id;
@@ -831,51 +967,164 @@ chrome.runtime.onMessage.addListener(
               });
               return;
             }
+            if (
+              activeCaptureSession?.tabId === tabId
+              && ['starting', 'active'].includes(activeCaptureSession.phase)
+            ) {
+              sendResponse({
+                ok: true,
+                tabId,
+                sessionId: activeCaptureSession.sessionId,
+                state: activeCaptureSession.phase,
+                alreadyActive: true,
+              });
+              return;
+            }
+            if (activeCaptureSession) {
+              await finishCaptureSession(activeCaptureSession, {
+                openPanel: false,
+                state: 'interrupted',
+                reason: 'replaced_by_new_session',
+              });
+            }
+            await clearCachedCaptureResult();
+            startingSession = {
+              sessionId: crypto.randomUUID(),
+              phase: 'starting',
+              tabId,
+              startedAt: Date.now(),
+              captures: [],
+            };
+            activeCaptureSession = startingSession;
+            await persistCaptureSession(startingSession);
+            broadcastCaptureStatus({
+              active: false,
+              state: 'starting',
+              sessionId: startingSession.sessionId,
+              tabId,
+              count: 0,
+            });
             frameCaptureStateByTab.set(tabId, newFrameCaptureState());
             await handlePickerHookInject(tabId);
-            clearCachedCaptureResult();
-            activeCaptureSession = { tabId, startedAt: Date.now(), captures: [] };
-            broadcastCaptureStatus({ active: true, tabId, count: 0 });
-            sendResponse({ ok: true, tabId });
+            startingSession.phase = 'active';
+            await persistCaptureSession(startingSession);
+            broadcastCaptureStatus({
+              active: true,
+              state: 'active',
+              sessionId: startingSession.sessionId,
+              tabId,
+              count: 0,
+            });
+            sendResponse({
+              ok: true,
+              tabId,
+              sessionId: startingSession.sessionId,
+              state: 'active',
+            });
           } catch (err) {
-            const message = errorMessage(err);
-            activeCaptureSession = null;
+            const failure = errorMessage(err);
+            if (
+              startingSession
+              && activeCaptureSession?.sessionId === startingSession.sessionId
+            ) {
+              activeCaptureSession = null;
+              await persistCaptureSession(null);
+              await unhookApiFrames(startingSession.tabId).catch(() => {});
+              hookedTabs.delete(startingSession.tabId);
+              capturedApisByTab.delete(startingSession.tabId);
+              frameCaptureStateByTab.delete(startingSession.tabId);
+            }
             console.warn('[XGEN SW] START_CAPTURE_SESSION failed:', err);
-            broadcastCaptureStatus({ active: false, error: message });
-            sendResponse({ ok: false, error: message });
+            broadcastCaptureStatus({ active: false, state: 'idle', error: failure });
+            sendResponse({ ok: false, error: failure });
           }
-        })();
+        })).catch((err) => {
+          const failure = errorMessage(err);
+          console.warn('[XGEN SW] capture start transition failed:', failure);
+          sendResponse({ ok: false, error: failure });
+        });
         return true;
       }
 
       case 'STOP_FLOATING_CAPTURE':
       case 'STOP_CAPTURE_SESSION': {
-        if (!activeCaptureSession) {
-          sendResponse({ ok: false, error: 'No active session' });
-          break;
-        }
-        const session = activeCaptureSession;
-        activeCaptureSession = null;
-        unhookApiFrames(session.tabId).catch(() => {});
-        hookedTabs.delete(session.tabId);
-        completeCaptureSession(session, { openPanel: true });
-        capturedApisByTab.delete(session.tabId);
-        frameCaptureStateByTab.delete(session.tabId);
-        sendResponse({
-          ok: true,
-          count: session.captures.length,
-          bufferedCount: capturedApisByTab.get(session.tabId)?.length ?? 0,
+        captureRecoveryPromise.then(() => serializeCaptureTransition(async () => {
+          if (!activeCaptureSession) {
+            sendResponse({ ok: false, error: 'No active session' });
+            return;
+          }
+          const session = activeCaptureSession;
+          if (
+            message.type === 'STOP_CAPTURE_SESSION'
+            && message.sessionId
+            && message.sessionId !== session.sessionId
+          ) {
+            sendResponse({ ok: false, error: 'Stale capture session' });
+            return;
+          }
+          const result = await finishCaptureSession(session, {
+            openPanel: true,
+            state: 'completed',
+          });
+          sendResponse({
+            ok: true,
+            sessionId: session.sessionId,
+            resultId: result.resultId,
+            state: result.state,
+            count: session.captures.length,
+          });
+        })).catch((err) => {
+          const failure = errorMessage(err);
+          console.warn('[XGEN SW] capture stop transition failed:', failure);
+          sendResponse({ ok: false, error: failure });
         });
-        break;
+        return true;
       }
 
       case 'GET_CAPTURE_RESULT': {
-        // sidepanel이 STOP 이후 새로 열린 경우 broadcast를 놓쳤으니 직접 가져감.
-        // 한 번 읽으면 소비 (다음 mount 시 재노출 방지).
-        const result = cachedCaptureResult;
-        clearCachedCaptureResult();
-        sendResponse({ ok: true, result });
-        break;
+        captureRecoveryPromise.then(async () => {
+          let result = cachedCaptureResult;
+          if (!result) {
+            const stored = await chrome.storage.session.get(CAPTURE_INTERRUPTED_RESULT_KEY);
+            result = stored[CAPTURE_INTERRUPTED_RESULT_KEY] ?? null;
+          }
+          sendResponse({ ok: true, result });
+        }).catch((err) => sendResponse({ ok: false, error: errorMessage(err) }));
+        return true;
+      }
+
+      case 'ACK_CAPTURE_RESULT': {
+        captureRecoveryPromise.then(async () => {
+          const stored = await chrome.storage.session.get(CAPTURE_INTERRUPTED_RESULT_KEY);
+          const persistedResult = stored[CAPTURE_INTERRUPTED_RESULT_KEY] as {
+            resultId?: string;
+          } | undefined;
+          if (
+            cachedCaptureResult?.resultId === message.resultId
+            || persistedResult?.resultId === message.resultId
+          ) {
+            await clearCachedCaptureResult();
+            sendResponse({ ok: true });
+            return;
+          }
+          sendResponse({ ok: false, error: 'Capture result not found' });
+        }).catch((err) => sendResponse({ ok: false, error: errorMessage(err) }));
+        return true;
+      }
+
+      case 'GET_CAPTURE_SESSION_STATUS': {
+        captureRecoveryPromise.then(() => {
+          const session = activeCaptureSession;
+          sendResponse({
+            ok: true,
+            active: session?.phase === 'active',
+            state: session?.phase ?? 'idle',
+            sessionId: session?.sessionId,
+            tabId: session?.tabId,
+            count: session?.captures.length ?? 0,
+          });
+        }).catch((err) => sendResponse({ ok: false, error: errorMessage(err) }));
+        return true;
       }
 
       case 'GET_PERMISSION_READINESS': {
@@ -1338,6 +1587,8 @@ function broadcastToSidePanel(message: ExtensionMessage) {
  */
 function broadcastCaptureStatus(payload: {
   active: boolean;
+  state?: 'idle' | 'starting' | 'active' | 'stopping' | 'completed' | 'interrupted';
+  sessionId?: string;
   tabId?: number;
   count?: number;
   error?: string;
@@ -1390,14 +1641,6 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     return;
   }
 
-  // 이미 다른 탭에서 캡처 중이면 우선 종료. (단순화: 동시 1개 세션만)
-  if (activeCaptureSession && activeCaptureSession.tabId !== tab.id) {
-    const prev = activeCaptureSession;
-    activeCaptureSession = null;
-    broadcastCaptureStatus({ active: false, tabId: prev.tabId });
-    chrome.tabs.sendMessage(prev.tabId, { type: 'HIDE_FLOATING_OVERLAY' }).catch(() => {});
-  }
-
   // Start 단계에서는 사이드패널을 열지 않는다 — 페이지 시야 확보가 우선.
   // 사이드패널은 정지 시(STOP_FLOATING_CAPTURE 핸들러)에 열어서 결과 리스트를 보여준다.
 
@@ -1412,19 +1655,62 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       });
       return;
     }
-    frameCaptureStateByTab.set(tab.id, newFrameCaptureState());
-    await handlePickerHookInject(tab.id);
-    activeCaptureSession = { tabId: tab.id, startedAt: Date.now(), captures: [] };
+    await captureRecoveryPromise;
+    await serializeCaptureTransition(async () => {
+      const existingSession = activeCaptureSession;
+      if (
+        existingSession
+        && existingSession.tabId === tab.id
+        && ['starting', 'active'].includes(existingSession.phase)
+      ) {
+        await showFloatingOverlayOnTab(tab.id!);
+        return;
+      }
+      if (existingSession) {
+        await finishCaptureSession(existingSession, {
+          openPanel: false,
+          state: 'interrupted',
+          reason: 'replaced_by_new_session',
+        });
+      }
+      await clearCachedCaptureResult();
+      const session: CaptureSession = {
+        sessionId: crypto.randomUUID(),
+        phase: 'starting',
+        tabId: tab.id!,
+        startedAt: Date.now(),
+        captures: [],
+      };
+      activeCaptureSession = session;
+      await persistCaptureSession(session);
+      frameCaptureStateByTab.set(tab.id!, newFrameCaptureState());
+      await handlePickerHookInject(tab.id!);
+      session.phase = 'active';
+      await persistCaptureSession(session);
 
-    // overlay 표시 — content script가 안 떠있는 탭(확장 reload 후 기존 탭)에서도 동작하도록
-    // tabs.sendMessage 실패하면 scripting.executeScript로 직접 주입.
-    await showFloatingOverlayOnTab(tab.id);
-    broadcastCaptureStatus({ active: true, tabId: tab.id, count: 0 });
+      // overlay 표시 — content script가 안 떠있는 탭(확장 reload 후 기존 탭)에서도 동작하도록
+      // tabs.sendMessage 실패하면 scripting.executeScript로 직접 주입.
+      await showFloatingOverlayOnTab(tab.id!);
+      broadcastCaptureStatus({
+        active: true,
+        state: 'active',
+        sessionId: session.sessionId,
+        tabId: tab.id!,
+        count: 0,
+      });
+    });
   } catch (err) {
-    const message = errorMessage(err);
-    activeCaptureSession = null;
+    const failure = errorMessage(err);
+    if (activeCaptureSession?.tabId === tab.id) {
+      activeCaptureSession = null;
+      await persistCaptureSession(null);
+      await unhookApiFrames(tab.id).catch(() => {});
+      hookedTabs.delete(tab.id);
+      capturedApisByTab.delete(tab.id);
+      frameCaptureStateByTab.delete(tab.id);
+    }
     console.warn('[XGEN SW] context capture start failed:', err);
-    broadcastCaptureStatus({ active: false, tabId: tab.id, error: message });
+    broadcastCaptureStatus({ active: false, state: 'idle', tabId: tab.id, error: failure });
   }
 });
 
@@ -2173,11 +2459,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   capturedApisByTab.delete(tabId);
   aiDrivingTabIds.delete(tabId);
   if (activeCaptureSession?.tabId === tabId) {
-    // 세션 중인 탭이 닫혔으면 그 시점까지의 캡처를 사이드패널로 보내고 세션 종료.
-    // 탭이 이미 사라졌으니 tabs.sendMessage는 fail하지만 broadcastCaptureStatus가 catch.
     const session = activeCaptureSession;
-    activeCaptureSession = null;
-    completeCaptureSession(session, { openPanel: false });
+    serializeCaptureTransition(() => finishCaptureSession(session, {
+      openPanel: false,
+      state: 'interrupted',
+      reason: 'capture_tab_closed',
+    })).catch((err) => {
+      console.warn('[XGEN SW] tab-close capture cleanup failed:', errorMessage(err));
+    });
   }
 });
 

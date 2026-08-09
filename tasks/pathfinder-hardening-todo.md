@@ -168,21 +168,21 @@ TODO:
 
 TODO:
 
-- [ ] 전역 nullable 상태를 `idle → starting → active → stopping → completed/interrupted`
+- [x] 전역 nullable 상태를 `idle → starting → active → stopping → completed/interrupted`
   상태 머신으로 교체한다.
-- [ ] session ID와 tab ID를 start/stop/status/result 메시지에 포함한다.
-- [ ] start/stop을 직렬화해 빠른 더블 클릭과 탭 A/B 동시 시작을 막는다.
-- [ ] 새 세션 시작 전 이전 탭의 main-world hook, relay, overlay, frame state 및 raw
+- [x] session ID와 tab ID를 start/stop/status/result 메시지에 포함한다.
+- [x] start/stop을 직렬화해 빠른 더블 클릭과 탭 A/B 동시 시작을 막는다.
+- [x] 새 세션 시작 전 이전 탭의 main-world hook, relay, overlay, frame state 및 raw
   buffer를 모두 정리한다.
-- [ ] STOP 응답의 `bufferedCount`를 삭제 전에 계산하거나 의미 없는 필드를 제거한다.
-- [ ] 완료 결과에 result ID와 acknowledgement를 추가해 broadcast/query 중복 노출을
+- [x] STOP 응답의 `bufferedCount`를 삭제 전에 계산하거나 의미 없는 필드를 제거한다.
+- [x] 완료 결과에 result ID와 acknowledgement를 추가해 broadcast/query 중복 노출을
   막는다.
-- [ ] `chrome.storage.session`에는 session ID, tab ID, 시작 시각 및 interrupted marker
+- [x] `chrome.storage.session`에는 session ID, tab ID, 시작 시각 및 interrupted marker
   같은 비민감 메타데이터만 저장한다.
-- [ ] Service Worker 재시작 시 active metadata가 남아 있으면 세션을 조용히 유실하지
+- [x] Service Worker 재시작 시 active metadata가 남아 있으면 세션을 조용히 유실하지
   않고 `interrupted`로 종료하며 hook/buffer cleanup을 수행한다.
-- [ ] raw request/response body는 MV3 복구 목적으로 storage에 저장하지 않는다.
-- [ ] runtime test에서 캡처 중 Service Worker를 종료·재시작한 뒤 상태와 cleanup을
+- [x] raw request/response body는 MV3 복구 목적으로 storage에 저장하지 않는다.
+- [x] runtime test에서 캡처 중 Service Worker를 종료·재시작한 뒤 상태와 cleanup을
   검증한다.
 
 완료 gate:
