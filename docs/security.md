@@ -53,6 +53,10 @@ Collection 등록 전에 다음을 적용한다.
 - host 권한 회수 시 main-world hook/relay 종료, tab buffer와 cached result 즉시 폐기
 - XGEN origin 검증
 - 캡처 시점 cookie 대신 실행 시점 live cookie 사용
+- live cookie는 Collection의 활성 `auth_profile_id`가 Cookie 방식일 때만 사용
+- cookie 대상은 현재 페이지가 아니라 검증된 Collection `base_url`에서 파생하며,
+  해당 origin의 optional host/cookie 권한을 사용자가 승인해야 함
+- tab별 page context를 분리하고 tab 제거·host 권한 회수 시 즉시 폐기
 
 HAR 파일은 브라우저 개발자 도구가 인증 헤더, 쿠키 및 응답 원문을 포함해
 내보낼 수 있으므로 더 강한 입력 경계로 취급한다. 가져오는 즉시 URL userinfo,

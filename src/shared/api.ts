@@ -216,6 +216,8 @@ export interface ApiCollectionSummary {
 }
 
 export interface ApiCollectionDetail extends ApiCollectionSummary {
+  base_url?: string | null;
+  domain_patterns?: string[];
   edge_count?: number;
   version?: number;
   graph_tool_call_version?: string | null;

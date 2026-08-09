@@ -3,6 +3,7 @@ export interface AuthProfileSummary {
   name?: string;
   description?: string | null;
   status?: string;
+  auth_type?: string;
 }
 
 export interface CollectionAuthSummary {

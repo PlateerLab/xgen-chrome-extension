@@ -205,19 +205,19 @@ TODO:
 
 TODO:
 
-- [ ] 단일 `cachedPageContext`를 `Map<tabId, PageContext>` 또는 동등한 탭별 cache로
+- [x] 단일 `cachedPageContext`를 `Map<tabId, PageContext>` 또는 동등한 탭별 cache로
   교체한다.
-- [ ] `PAGE_COMMAND_RESULT`와 `CANVAS_RESULT`가 sender tab의 context만 갱신하도록
+- [x] `PAGE_COMMAND_RESULT`와 `CANVAS_RESULT`가 sender tab의 context만 갱신하도록
   한다.
-- [ ] `GET_CHAT_CONFIG` fallback은 요청한 tab의 cache만 사용하며 다른 탭 context를
+- [x] `GET_CHAT_CONFIG` fallback은 요청한 tab의 cache만 사용하며 다른 탭 context를
   반환하지 않는다.
-- [ ] 탭 제거·권한 회수 시 해당 context cache를 정리한다.
-- [ ] `GET_LIVE_COOKIES`의 `host`와 `url`을 하나의 검증된 URL에서 파생한다.
-- [ ] Collection auth contract가 Cookie 인증을 요구하고 사용자가 연결한 경우에만
+- [x] 탭 제거·권한 회수 시 해당 context cache를 정리한다.
+- [x] `GET_LIVE_COOKIES`의 `host`와 `url`을 하나의 검증된 URL에서 파생한다.
+- [x] Collection auth contract가 Cookie 인증을 요구하고 사용자가 연결한 경우에만
   live cookie를 전송한다.
-- [ ] 현재 페이지 host와 실제 Tool endpoint/auth service host가 다를 때 사용할
+- [x] 현재 페이지 host와 실제 Tool endpoint/auth service host가 다를 때 사용할
   명시적 정책과 사용자 표시를 정의한다.
-- [ ] 서로 다른 두 탭의 context/result/cookie가 섞이지 않는 T1 fixture를 추가한다.
+- [x] 서로 다른 두 탭의 context/result/cookie가 섞이지 않는 T1 fixture를 추가한다.
 
 완료 gate:
 

@@ -42,6 +42,9 @@ xvfb-run -a npm run verify:pathfinder:runtime
 - semantic metadata 생성
 - 등록 payload 크기 제한
 - token, cookie, authorization 및 API key 제거
+- 두 탭의 page/command context 격리와 sender tab 전용 cache 갱신
+- Collection auth profile별 Cookie admission, host/url mismatch 거절 및
+  non-Cookie run의 `live_cookies` 부재
 - Collection 생성 요청 계약
 - 수동 Tool Contract의 URL/schema/security 정규화와 민감 literal 차단
 - Postman v2.0/v2.1 중첩 request, auth, body/response variation과 민감값 비노출

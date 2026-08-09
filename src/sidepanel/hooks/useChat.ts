@@ -13,15 +13,6 @@ function tabTarget(tabId: number | null | undefined): { tabId?: number } {
   return typeof tabId === 'number' ? { tabId } : {};
 }
 
-async function getTabUrl(tabId: number | null | undefined): Promise<string | undefined> {
-  if (typeof tabId === 'number') {
-    return (await chrome.tabs.get(tabId).catch(() => null))?.url;
-  }
-
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tabs[0]?.url;
-}
-
 export function useChat(targetTabId?: number | null) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -39,6 +30,7 @@ export function useChat(targetTabId?: number | null) {
     const listener = (message: ExtensionMessage) => {
       switch (message.type) {
         case 'PAGE_CONTEXT_UPDATE':
+          if (typeof targetTabId !== 'number' || message.tabId !== targetTabId) break;
           setPageContext(message.context);
           break;
       }
@@ -46,7 +38,7 @@ export function useChat(targetTabId?: number | null) {
 
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
-  }, []);
+  }, [targetTabId]);
 
   const sendMessage = useCallback(
     async (content: string) => {
@@ -440,25 +432,58 @@ export function useChat(targetTabId?: number | null) {
         ? `${config.provider}/${config.model}`
         : undefined;
 
-      // 사용자 현재 탭 host의 fresh 쿠키 수집 — 캡처 시점의 stale 쿠키 대신 사용.
-      // 호출 직전마다 새로 읽어서 사용자 세션이 갱신되면 자동 반영됨.
+      // Collection의 auth profile을 먼저 확인한다. Cookie 방식인 경우에만 collection
+      // base URL에 대해 사용자가 승인한 live cookie를 읽는다. 현재 탭 host를 임의로
+      // 사용하지 않으므로 다른 탭/도메인의 쿠키가 실행 요청에 섞이지 않는다.
       let liveCookies: string | undefined;
       try {
-        const tabUrl = await getTabUrl(targetTabId);
-        if (tabUrl) {
-          const host = new URL(tabUrl).hostname;
-          const resp = await chrome.runtime.sendMessage({
-            type: 'GET_LIVE_COOKIES', host, url: tabUrl,
+        let authPreparation = await chrome.runtime.sendMessage({
+          type: 'PREPARE_COLLECTION_RUN_AUTH',
+          collectionId,
+          requestPermission: false,
+          ...tabTarget(targetTabId),
+        } satisfies ExtensionMessage);
+        if (
+          authPreparation?.readiness?.reason === 'collection_cookie_permission_required'
+        ) {
+          authPreparation = await chrome.runtime.sendMessage({
+            type: 'PREPARE_COLLECTION_RUN_AUTH',
+            collectionId,
+            requestPermission: true,
+            ...tabTarget(targetTabId),
           } satisfies ExtensionMessage);
-          if (resp?.ok && typeof resp.cookieHeader === 'string' && resp.cookieHeader) {
-            liveCookies = resp.cookieHeader;
-          }
+        }
+        if (!authPreparation?.readiness?.ready) {
+          const readiness = authPreparation?.readiness;
+          const reason = String(readiness?.reason || 'backend_error');
+          const target = readiness?.targetHost ? ` (${readiness.targetHost})` : '';
+          const labels: Record<string, string> = {
+            auth_profile_missing: '컬렉션 인증 프로필을 찾을 수 없습니다.',
+            auth_profile_inactive: '컬렉션 인증 프로필이 비활성 상태입니다.',
+            collection_base_url_invalid: '컬렉션의 실행 주소가 올바르지 않습니다.',
+            collection_base_url_mismatch:
+              '컬렉션 실행 주소와 허용 도메인 설정이 일치하지 않습니다.',
+            collection_cookie_permission_required:
+              `컬렉션 API 쿠키 연결 권한이 필요합니다${target}.`,
+            collection_cookie_missing:
+              `컬렉션 API에 로그인된 쿠키가 없습니다${target}.`,
+            backend_error: '컬렉션 실행 인증 상태를 확인할 수 없습니다.',
+          };
+          addSystemMessage(labels[reason] || '컬렉션 실행 인증을 준비할 수 없습니다.');
+          return;
+        }
+        if (
+          authPreparation.readiness.liveCookiesRequired
+          && typeof authPreparation.cookieHeader === 'string'
+          && authPreparation.cookieHeader
+        ) {
+          liveCookies = authPreparation.cookieHeader;
         }
       } catch (err) {
-        console.warn(
-          '[useChat] live cookie collection failed:',
-          err instanceof Error ? err.name : 'UnknownError',
-        );
+        console.warn('[useChat] collection auth preparation failed:',
+          err instanceof Error ? err.name : 'UnknownError');
+        addSystemMessage('컬렉션 실행 인증 상태를 확인할 수 없습니다.');
+        return;
       }
 
       abortRef.current = new AbortController();
