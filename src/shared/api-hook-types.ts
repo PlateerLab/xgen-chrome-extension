@@ -30,6 +30,23 @@ export interface CapturedRequestMetadata {
   limitations?: string[];
 }
 
+export interface CapturedResponseMetadata {
+  bodyCaptured: boolean;
+  bodyTruncated: boolean;
+  limitations: string[];
+}
+
+export interface CaptureProvenance {
+  source: 'page_hook';
+  trust: 'untrusted_page_event';
+  transport?: 'fetch' | 'xhr' | 'unknown';
+}
+
+export type CaptureRejectionReason =
+  | 'invalid_payload'
+  | 'oversized_payload'
+  | 'unsupported_url';
+
 export interface CapturedFrameContext {
   kind: 'top_frame' | 'subframe';
   frameId: number;
@@ -41,7 +58,9 @@ export interface CaptureCoverageIssue {
     | 'cross_origin_frame_permission_required'
     | 'frame_hook_injection_failed'
     | 'service_worker_fetch_not_observable'
-    | 'worker_fetch_not_observable';
+    | 'worker_fetch_not_observable'
+    | 'capture_payload_invalid'
+    | 'capture_payload_oversized';
   severity: 'info' | 'warning';
   count?: number;
   origins?: string[];
@@ -75,6 +94,7 @@ export interface CapturedApi {
   responseStatus: number;
   responseHeaders: Record<string, string>;
   responseBody: string | null;
+  responseMetadata?: CapturedResponseMetadata;
   contentType: string;
   duration: number; // ms
   // 'ai': AI agent의 page_command/canvas_command 디스패치 시점에 캡처됨 (자동 탐색)
@@ -83,6 +103,9 @@ export interface CapturedApi {
   origin?: 'ai' | 'user';
   // SW가 sender frame에서 계산한다. query/path를 포함한 frame URL은 저장하지 않는다.
   captureContext?: CapturedFrameContext;
+  // MAIN world CustomEvent는 대상 페이지가 위조할 수 있다. SW validator를 통과해도
+  // 관찰 evidence일 뿐, 사용자 확인 전에 자동 실행을 허용하는 신뢰 표시가 아니다.
+  provenance?: CaptureProvenance;
 }
 
 // ── XGEN Tool 정의 (saveTool API 스키마) ──

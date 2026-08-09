@@ -44,7 +44,7 @@ npm run verify:pathfinder
 - [x] config/command 로그에서 token과 업무 payload 제거
 - [x] legacy `register_tool`의 captured body → `static_body` 저장 차단
 - [x] 정상적인 step binding을 누락 인자로 오판하는 plan guard 수정
-- [ ] `API_CAPTURED` runtime validation, 상대 URL 정규화 및 body read 상한
+- [x] `API_CAPTURED` runtime validation, 상대 URL 정규화 및 body read 상한
 - [ ] 단일 캡처 세션 상태 머신과 Service Worker 재시작 처리
 - [ ] 탭별 page context 격리와 Cookie 실행 인증 최소 권한
 - [ ] 공통 SSE parser, abort generation 및 Service Worker 모듈 분리

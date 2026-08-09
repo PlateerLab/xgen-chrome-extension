@@ -829,6 +829,28 @@ function startFixtureServer() {
       return;
     }
 
+    if (req.url?.startsWith('/fixture-base/api/relative/v1/list')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ rows: [{ id: 'REL-10001' }] }));
+      return;
+    }
+
+    if (req.url === '/api/large/v1/report') {
+      const body = JSON.stringify({ data: 'x'.repeat((100 * 1024) + 20_000) });
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+      });
+      res.end(body);
+      return;
+    }
+
+    if (req.url === '/api/binary/v1/export') {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.end(Buffer.from([0, 1, 2, 3, 4, 5]));
+      return;
+    }
+
     if (req.url?.startsWith('/api/member/v1/me')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
@@ -955,6 +977,7 @@ self.addEventListener('message', (event) => {
 <html>
   <head>
     <title>PathFinder fixture</title>
+    <base href="/fixture-base/" />
     <style>
       body { min-height: 2200px; font-family: system-ui, sans-serif; }
       main { max-width: 720px; margin: 40px auto; }
@@ -2827,7 +2850,44 @@ async function main() {
     await targetPage.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
 
     const firstResult = await runCaptureSessionViaSidepanel(extensionPage, targetPage, async () => {
+      const extensionSpoof = await sendExtensionMessage(extensionPage, {
+        type: 'API_CAPTURE_REJECTED',
+        reason: 'invalid_payload',
+      });
+      assert.equal(
+        extensionSpoof?.ok,
+        false,
+        'extension pages without a sender tab must not mutate capture diagnostics',
+      );
       await targetPage.evaluate(async () => {
+        const forgedBase = {
+          timestamp: Date.now(),
+          method: 'GET',
+          requestHeaders: {},
+          requestBody: null,
+          responseStatus: 200,
+          responseHeaders: { 'content-type': 'application/json' },
+          responseBody: '{}',
+          contentType: 'application/json',
+          duration: 1,
+        };
+        window.dispatchEvent(new CustomEvent('xgen:api-captured', { detail: null }));
+        window.dispatchEvent(new CustomEvent('xgen:api-captured', {
+          detail: {
+            ...forgedBase,
+            id: 'forged-oversized',
+            url: '/api/forged/oversized',
+            responseBody: 'x'.repeat((100 * 1024) + 1),
+          },
+        }));
+        window.dispatchEvent(new CustomEvent('xgen:api-captured', {
+          detail: {
+            ...forgedBase,
+            id: 'forged-unsupported-url',
+            url: 'javascript:alert(1)',
+          },
+        }));
+
         const logins = await Promise.all([
           'runtime-login-request-secret',
           'runtime-login-concurrent-secret',
@@ -2850,6 +2910,27 @@ async function main() {
         const search = await fetch('/api/goods/v1/search?keyword=jeju');
         if (!search.ok) throw new Error(`fixture fetch failed: ${search.status}`);
         await search.json();
+
+        const relative = await fetch('api/relative/v1/list');
+        if (!relative.ok) throw new Error(`fixture relative fetch failed: ${relative.status}`);
+        await relative.json();
+
+        const large = await fetch('/api/large/v1/report');
+        if (!large.ok) throw new Error(`fixture large fetch failed: ${large.status}`);
+        await large.text();
+
+        const binary = await fetch('/api/binary/v1/export');
+        if (!binary.ok) throw new Error(`fixture binary fetch failed: ${binary.status}`);
+        await binary.arrayBuffer();
+
+        await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open('GET', '/api/binary/v1/export');
+          xhr.responseType = 'arraybuffer';
+          xhr.onload = () => resolve(undefined);
+          xhr.onerror = () => reject(new Error('fixture binary xhr failed'));
+          xhr.send();
+        });
 
         const html = await fetch('/fragment');
         if (!html.ok) throw new Error(`fixture html fetch failed: ${html.status}`);
@@ -2959,6 +3040,48 @@ async function main() {
     );
     assert.equal(searchApi.responseStatus, 200);
     assert.match(searchApi.responseBody || '', /987654/);
+    assert.equal(searchApi.provenance?.source, 'page_hook');
+    assert.equal(searchApi.provenance?.trust, 'untrusted_page_event');
+    assert.equal(searchApi.provenance?.transport, 'fetch');
+    const relativeApi = findApi(firstApis, 'GET', '/fixture-base/api/relative/v1/list');
+    assert.ok(
+      relativeApi,
+      `document.baseURI-relative API not captured: ${JSON.stringify(captureSummary(firstApis))}`,
+    );
+    const largeApi = findApi(firstApis, 'GET', '/api/large/v1/report');
+    assert.ok(largeApi, 'large API response should retain endpoint-level evidence');
+    assert.equal(largeApi.responseBody, null);
+    assert.equal(largeApi.responseMetadata?.bodyCaptured, false);
+    assert.equal(largeApi.responseMetadata?.bodyTruncated, true);
+    assert.ok(
+      largeApi.responseMetadata?.limitations?.includes('response_content_length_exceeds_limit'),
+    );
+    const binaryApi = findApi(firstApis, 'GET', '/api/binary/v1/export');
+    assert.ok(binaryApi, 'binary API response should retain endpoint-level evidence');
+    assert.equal(binaryApi.responseBody, null);
+    assert.equal(binaryApi.responseMetadata?.bodyCaptured, false);
+    assert.ok(
+      binaryApi.responseMetadata?.limitations?.includes(
+        'response_binary_or_streaming_body_not_captured',
+      ),
+    );
+    const binaryXhrApi = firstApis.find((api) => (
+      api.method === 'GET'
+      && api.url.includes('/api/binary/v1/export')
+      && api.provenance?.transport === 'xhr'
+    ));
+    assert.ok(binaryXhrApi, 'binary XHR should retain endpoint-level evidence');
+    assert.equal(binaryXhrApi.responseBody, null);
+    assert.equal(binaryXhrApi.responseMetadata?.bodyCaptured, false);
+    assert.ok(
+      binaryXhrApi.responseMetadata?.limitations?.includes(
+        'response_binary_or_streaming_body_not_captured',
+      ),
+    );
+    assert.ok(
+      !firstApis.some((api) => String(api.id).startsWith('forged-')),
+      'page-forged capture events must not reach the accepted capture set',
+    );
     const memberApi = findApi(firstApis, 'POST', '/api/member/v1/me');
     assert.ok(
       memberApi,
@@ -3017,6 +3140,18 @@ async function main() {
         (issue) => issue.code === 'service_worker_fetch_not_observable',
       ),
       'Service Worker limitation should be explicit',
+    );
+    assert.ok(
+      firstResult.captureCoverage.issues.some(
+        (issue) => issue.code === 'capture_payload_invalid' && issue.count >= 2,
+      ),
+      `invalid or unsupported page events should be diagnosed: ${JSON.stringify(firstResult.captureCoverage)}`,
+    );
+    assert.ok(
+      firstResult.captureCoverage.issues.some(
+        (issue) => issue.code === 'capture_payload_oversized' && issue.count >= 1,
+      ),
+      `oversized page events should be diagnosed: ${JSON.stringify(firstResult.captureCoverage)}`,
     );
     await extensionPage.getByText(/iframe 요청 1건/).waitFor();
     await extensionPage.getByText('Service Worker 제어 감지').waitFor();
