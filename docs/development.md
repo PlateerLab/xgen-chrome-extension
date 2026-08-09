@@ -47,6 +47,10 @@ Vite watch가 새 `dist/`를 만들면 `chrome://extensions`에서 Pathfinder를
 | `npm run verify:pathfinder:runtime` | Chromium에 실제 확장을 로드한 runtime 검증 |
 | `npm run verify:pathfinder` | build, trace, runtime 전체 검증 |
 | `npm run verify:xgen-dev` | 인증된 dev XGEN read-only T2 smoke |
+| `npm run package:release` | production build 후 설치용 ZIP 생성·무결성 검사 |
+
+릴리스 패키징 명령은 Linux/macOS의 `zip`과 `unzip` 실행 파일을 사용한다. GitHub
+Actions Ubuntu runner에는 기본 제공되며, 로컬에 없으면 OS 패키지 관리자로 설치한다.
 
 ## 개발 구조
 

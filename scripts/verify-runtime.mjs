@@ -11,7 +11,9 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const distDir = path.join(repoRoot, 'dist');
+const distDir = path.resolve(
+  process.env.PATHFINDER_EXTENSION_DIR || path.join(repoRoot, 'dist'),
+);
 const artifactDir = path.resolve(
   process.env.PATHFINDER_ARTIFACT_DIR || path.join(repoRoot, 'artifacts/pathfinder-runtime'),
 );

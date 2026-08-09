@@ -220,6 +220,29 @@ secret 비노출만 보장한다. 특히 `/capabilities`가 동적 Collection �
 
 mutating API는 dev host allowlist, 명시적 허용 및 cleanup이 모두 있을 때만 실행한다.
 
+## Release Archive
+
+설치용 ZIP은 저장소 루트가 아니라 production `dist/` 내용만 archive 루트에
+배치해야 한다. 다음 명령은 build, 버전 일치, ZIP 무결성, 필수 파일, 경로 안전성,
+source map 제외를 확인한다.
+
+```bash
+npm run package:release
+```
+
+압축 해제한 실제 배포물을 전체 Chromium runtime에 넣어 확인할 때는 build 디렉터리
+override를 사용한다.
+
+```bash
+unzip -q artifacts/release/xgen-pathfinder-v0.8.0.zip -d /tmp/xgen-pathfinder-v0.8.0
+PATHFINDER_EXTENSION_DIR=/tmp/xgen-pathfinder-v0.8.0 \
+  npm run verify:pathfinder:runtime
+```
+
+이 검증은 source tree의 `dist/`가 아니라 사용자가 실제로 설치할 압축 해제본을
+로드한다. GitHub Release 업로드 후에는 release asset을 새 디렉터리에 다시 내려받아
+같은 명령을 한 번 더 수행한다.
+
 ## 결과물
 
 CI나 수동 검증 실패 시 다음 정보를 남긴다.
