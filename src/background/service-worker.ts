@@ -770,7 +770,8 @@ chrome.runtime.onMessage.addListener(
             STORAGE_KEYS.PROVIDER,
             STORAGE_KEYS.MODEL,
           ]);
-          const serverUrl = await resolveXgenServerUrl(targetTabId);
+          const activeXgenOrigin = await syncXgenSessionFromTab(targetTabId);
+          const serverUrl = activeXgenOrigin || await resolveXgenServerUrl(targetTabId);
           const authToken = serverUrl ? (tokensByOrigin[serverUrl] || await getStoredToken(serverUrl)) : '';
           const pageContext = await getPageContextFromTab(targetTabId).catch(() => null);
 
@@ -1359,13 +1360,111 @@ async function getOriginFromTab(tabId?: number): Promise<string | null> {
 }
 
 /**
+ * 현재 XGEN 탭의 세션을 패널이 열리는 즉시 동기화한다.
+ *
+ * XGEN은 access token을 readable cookie에 저장한다. action 클릭으로 얻은 activeTab
+ * 권한이 있으면 별도 캡처 시작 없이 현재 탭에서만 읽고, 권한이 없으면 cookie API
+ * fallback이 처리하도록 origin만 동기화한다.
+ */
+async function syncXgenSessionFromTab(tabId?: number): Promise<string | null> {
+  const tab = await getTargetTab(tabId);
+  if (!tab?.id || !tab.url) return null;
+
+  let origin: string;
+  try {
+    origin = new URL(tab.url).origin;
+  } catch {
+    return null;
+  }
+  if (!isXgenHostedOrigin(origin)) return null;
+
+  let token = '';
+  let pageSessionInspected = false;
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, frameIds: [0] },
+      world: 'ISOLATED' as any,
+      func: () => {
+        const storageKeys = [
+          'xgen_access_token',
+          'access_token',
+          'accessToken',
+          'token',
+          'jwt',
+        ];
+        for (const key of storageKeys) {
+          const value = window.localStorage.getItem(key);
+          if (value) return value;
+        }
+        const cookieNames = [
+          'xgen_access_token',
+          'access_token',
+          'accessToken',
+          'token',
+          'jwt',
+        ];
+        for (const name of cookieNames) {
+          const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+          if (match?.[1]) return match[1];
+        }
+        return '';
+      },
+    });
+    pageSessionInspected = true;
+    token = typeof results[0]?.result === 'string' ? results[0].result : '';
+  } catch {
+    // activeTab/host 권한이 없는 재개 경로는 getStoredToken의 cookie fallback을 사용한다.
+  }
+
+  if (!token) {
+    token = await getXgenCookieToken(origin);
+  }
+
+  const previous = await chrome.storage.local.get([
+    STORAGE_KEYS.SERVER_URL,
+    STORAGE_KEYS.AUTH_TOKEN,
+  ]);
+  const previousUrl = previous[STORAGE_KEYS.SERVER_URL] as string | undefined;
+  const update: Record<string, string> = {
+    [STORAGE_KEYS.SERVER_URL]: origin,
+  };
+  if (token) {
+    tokensByOrigin[origin] = token;
+    update[`token:${origin}`] = token;
+    update[STORAGE_KEYS.AUTH_TOKEN] = token;
+  } else if (pageSessionInspected) {
+    delete tokensByOrigin[origin];
+    await chrome.storage.local.remove([
+      `token:${origin}`,
+      STORAGE_KEYS.AUTH_TOKEN,
+    ]);
+  } else if (
+    previous[STORAGE_KEYS.AUTH_TOKEN]
+    && previousUrl
+    && !sameOrigin(previousUrl, origin)
+  ) {
+    await chrome.storage.local.remove(STORAGE_KEYS.AUTH_TOKEN);
+  }
+  await chrome.storage.local.set(update);
+  return origin;
+}
+
+/**
  * XGEN 서버 URL을 결정한다. 모든 단계에서 isXgenOrigin으로 검증 — 비-XGEN origin은 절대 반환 X.
  *
- * 1순위: storage에 저장된 serverUrl (단, XGEN origin인지 검증)
- * 2순위: active tab의 origin (xgen.* 또는 저장된 local serverUrl과 같은 origin)
- * 3순위: 토큰이 있는 XGEN origin (메모리 캐시)
+ * 1순위: 현재 active tab의 hosted XGEN origin
+ * 2순위: storage에 저장된 serverUrl (단, XGEN origin인지 검증)
+ * 3순위: 저장된 local serverUrl과 같은 active tab origin
+ * 4순위: 토큰이 있는 XGEN origin (메모리 캐시)
  */
 async function resolveXgenServerUrl(tabId?: number): Promise<string | null> {
+  // 사용자가 보고 있는 hosted XGEN 환경이 명시적인 source of truth다. 이전 개발에서
+  // 저장된 localhost나 다른 환경 URL이 현재 로그인 세션을 가리지 않게 한다.
+  const tabOrigin = await getOriginFromTab(tabId);
+  if (tabOrigin && isXgenHostedOrigin(tabOrigin)) {
+    return tabOrigin;
+  }
+
   // 1순위: storage에 저장된 서버 URL — 반드시 XGEN origin이어야 함.
   // 이전 버그로 fo.x2bee.com 같은 게 저장돼있을 수 있어서 startup migration이 청소하지만
   // 런타임에서도 한 번 더 가드.
@@ -1375,9 +1474,8 @@ async function resolveXgenServerUrl(tabId?: number): Promise<string | null> {
     return storedUrl;
   }
 
-  // 2순위: active tab의 origin. xgen.* 도메인은 바로 허용하되, localhost/127은
+  // 3순위: localhost/127 active tab은
   // 저장된 serverUrl과 같은 origin일 때만 허용해 로컬 업무 사이트 오인을 줄인다.
-  const tabOrigin = await getOriginFromTab(tabId);
   if (tabOrigin && (isXgenHostedOrigin(tabOrigin) || sameOrigin(tabOrigin, storedUrl))) {
     return tabOrigin;
   }
@@ -1390,12 +1488,20 @@ async function resolveXgenServerUrl(tabId?: number): Promise<string | null> {
 }
 
 async function getStoredToken(origin: string): Promise<string> {
-  const result = await chrome.storage.local.get([`token:${origin}`, STORAGE_KEYS.AUTH_TOKEN]);
+  const result = await chrome.storage.local.get([
+    `token:${origin}`,
+    STORAGE_KEYS.AUTH_TOKEN,
+    STORAGE_KEYS.SERVER_URL,
+  ]);
   let token = result[`token:${origin}`] || '';
   if (!token) {
     token = await getXgenCookieToken(origin);
   }
-  if (!token && result[STORAGE_KEYS.AUTH_TOKEN]) {
+  if (
+    !token
+    && result[STORAGE_KEYS.AUTH_TOKEN]
+    && sameOrigin(result[STORAGE_KEYS.SERVER_URL], origin)
+  ) {
     token = result[STORAGE_KEYS.AUTH_TOKEN];
   }
   if (token) {
