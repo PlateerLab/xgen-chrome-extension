@@ -2,9 +2,10 @@
 
 ## 결정
 
-`<all_urls>` host permission과 `cookies` permission을 설치 시 필수 권한에서
-제거했다. 두 권한은 manifest에 선택 권한으로만 선언하며, 기능을 사용하는
-시점에 최소 범위로 요청한다.
+고객 사이트용 `<all_urls>` host permission과 `cookies` permission을 설치 시
+필수 권한에서 제거했다. XGEN 제어 페이지의 기존 로그인 세션을 안정적으로
+연결하기 위한 공식 prod/dev origin만 필수 host permission으로 한정하고,
+그 밖의 권한은 기능을 사용하는 시점에 최소 범위로 요청한다.
 
 ## 목표 권한 모델
 
@@ -16,15 +17,19 @@
 - `scripting`
 - `webNavigation`
 - `contextMenus`
+- `https://xgen.x2bee.com/*`
+- `https://dev-xgen.x2bee.com/*`
 
 사용 시 선택 권한:
 
 - `optional_host_permissions: ["<all_urls>"]`
 - `optional_permissions: ["cookies"]`
 
-host 권한은 사용자가 특정 사이트에서 캡처를 시작할 때 해당 origin 단위로
-요청한다. `cookies`는 live cookie 기반 auth 연결에 필요하며 host 권한과
-별도로 확인한다. 권한 거부는 빈 결과가 아니라
+XGEN 두 origin의 host 권한은 로그인 쿠키를 페이지 context에서 읽고 현재
+환경을 판별하는 데만 사용한다. 고객 사이트 host 권한은 사용자가 특정
+사이트에서 캡처를 시작할 때 해당 origin 단위로 요청한다. `cookies`는 외부
+API의 live cookie 기반 auth 연결에 필요하며 host 권한과 별도로 확인한다.
+권한 거부는 빈 결과가 아니라
 `host_permission_required` 또는 `cookie_permission_required` readiness로
 표시한다.
 
@@ -61,9 +66,10 @@ host 권한은 사용자가 특정 사이트에서 캡처를 시작할 때 해�
 | 거부 | 거부 | sidepanel 문서/설정 UI만 동작 |
 | 실행 중 revoke | 무관 | hook 해제, raw buffer 폐기, 구조화된 중단 |
 
-T0는 source/dist manifest에 필수 `cookies`, `host_permissions`, 정적
-`content_scripts`가 없는지와 동적 bundle 생성을 검사한다. T1 Chromium
-runtime은 최초 미승인 상태, 브라우저에 저장된 승인 상태, 캡처/쿠키 사용,
+T0는 source/dist manifest에 필수 `cookies`, 정적 `content_scripts`, 허용 목록
+밖의 필수 host permission이 없는지와 동적 bundle 생성을 검사한다. T1 Chromium
+runtime은 선택 권한이 전혀 없는 새 프로필에서 XGEN 세션 감지, 브라우저에
+저장된 고객 사이트 승인 상태, 캡처/쿠키 사용,
 실행 중 revoke와 payload 폐기를 검사한다.
 
 headless Chromium은 사용자 승인 모달을 자동 수락할 수 없으므로 최초 승인과

@@ -11,6 +11,7 @@
 | `activeTab`, `scripting` | 사용자가 선택한 페이지의 Agent와 hook |
 | `webNavigation` | SPA 및 페이지 이동 감지 |
 | `contextMenus` | 사용자 주도 API 스캔 시작 |
+| XGEN prod/dev host | 현재 XGEN 환경 및 로그인 세션 감지 |
 
 강한 권한은 사용 시 선택적으로 요청한다.
 
@@ -19,7 +20,8 @@
 | `<all_urls>` 선언의 일부 origin | 해당 사이트에서 캡처 시작 | 현재 origin만 |
 | `cookies` | live cookie 기반 auth 연결 | 별도 사용자 승인과 host 권한 필요 |
 
-정적 `<all_urls>` content script와 필수 `cookies` 권한은 없다.
+정적 `<all_urls>` content script와 필수 `cookies` 권한은 없다. 설치 시 host
+권한은 `xgen.x2bee.com`과 `dev-xgen.x2bee.com` 제어 페이지로만 제한한다.
 `web_accessible_resources.matches`의 `<all_urls>` 표시는 리소스 노출 대상
 선언이며 host 접근 권한을 부여하지 않는다. 상세한 readiness, revoke 및
 마이그레이션 정책은 [Optional Permissions 설계](design/optional-permissions.md)를

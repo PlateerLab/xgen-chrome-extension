@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.3 - 2026-08-10
+
+### Fixed
+
+- Grant install-time host access only to the official prod/dev XGEN control
+  pages so a pinned side panel can detect the active login after browser or
+  page reload without relying on temporary `activeTab` access.
+- Run the XGEN session regression in a clean Chromium profile with no optional
+  host or cookie permissions, matching a fresh unpacked installation.
+- Keep customer-site capture and live-cookie permissions optional and
+  origin-scoped.
+
 ## 0.8.2 - 2026-08-10
 
 ### Fixed

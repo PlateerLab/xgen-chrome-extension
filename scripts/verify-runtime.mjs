@@ -2642,6 +2642,19 @@ async function verifyGraphQLImportUi(
 }
 
 async function verifyDevXgenOriginDetection(extensionPage, browserContext) {
+  assert.equal(
+    await containsExtensionPermissions(
+      extensionPage,
+      { origins: ['https://dev-xgen.x2bee.com/*'] },
+    ),
+    true,
+    'trusted dev-xgen control-plane access must be available in a clean profile',
+  );
+  assert.equal(
+    await containsExtensionPermissions(extensionPage, { permissions: ['cookies'] }),
+    false,
+    'dev-xgen session detection must not depend on optional cookie permission',
+  );
   await browserContext.route('https://dev-xgen.x2bee.com/**', async (route) => {
     await route.fulfill({
       status: 200,
@@ -2730,11 +2743,7 @@ async function verifyDevXgenOriginDetection(extensionPage, browserContext) {
   );
 
   await devPage.close();
-  await removeExtensionPermissions(
-    extensionPage,
-    { origins: ['https://dev-xgen.x2bee.com/*'] },
-  );
-  console.log('dev-xgen session auto-detection and refresh verified');
+  console.log('clean-profile dev-xgen session auto-detection and refresh verified');
 }
 
 async function verifyRelayCommandBridge(extensionPage, targetPage, commandResults) {
@@ -3252,6 +3261,7 @@ async function main() {
     const deniedTargetPage = await context.newPage();
     await deniedTargetPage.goto(url);
     await verifyDeniedOptionalPermissions(deniedExtensionPage, deniedTargetPage, url);
+    await verifyDevXgenOriginDetection(deniedExtensionPage, context);
     await context.close();
     context = undefined;
 
@@ -3261,7 +3271,6 @@ async function main() {
       origins: [
         `${parsedFixtureUrl.protocol}//${parsedFixtureUrl.hostname}/*`,
         'http://localhost/*',
-        'https://dev-xgen.x2bee.com/*',
       ],
     });
 
@@ -3287,8 +3296,6 @@ async function main() {
     const unsupportedStart = await sendExtensionMessage(extensionPage, { type: 'START_CAPTURE_SESSION' });
     assert.equal(unsupportedStart?.ok, false, `START_CAPTURE_SESSION should reject extension pages: ${JSON.stringify(unsupportedStart)}`);
     assert.match(unsupportedStart?.error || '', /http\/https|API 캡처|No active tab/);
-
-    await verifyDevXgenOriginDetection(extensionPage, context);
 
     const targetPage = await context.newPage();
     await targetPage.goto(url);

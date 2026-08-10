@@ -126,6 +126,21 @@ artifact 파이프라인 자체를 검증하려면 Actions의 `Run workflow`에�
 
 T2의 기본 probe는 PR workflow와 분리된 비파괴 검증이다.
 
+실제 로그인 쿠키와 새 Chrome 프로필에서 확장 세션 연결을 먼저 검증하려면
+다음 명령을 사용한다. 이 검사는 optional host/cookie 권한을 사전 승인하지 않고
+dev XGEN 페이지, stale localhost 교체, providers 인증 호출, 페이지 새로고침을
+검증하며 로컬 screenshot artifact를 남긴다.
+
+```bash
+export PATHFINDER_XGEN_URL='https://dev-xgen.x2bee.com'
+export PATHFINDER_XGEN_TOKEN='...'
+npm run verify:xgen-session-live
+```
+
+토큰 원문은 출력하거나 artifact에 기록하지 않는다. 실제 고객사 데이터가 보일 수
+있는 screenshot은 로컬 `artifacts/live-xgen-session/`에만 저장하며 CI에는
+업로드하지 않는다.
+
 ```bash
 export PATHFINDER_XGEN_URL='https://dev-xgen.x2bee.com'
 export PATHFINDER_XGEN_TOKEN='...'

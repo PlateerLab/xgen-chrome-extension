@@ -19,10 +19,10 @@ async function testManifestPermissionContract() {
       !manifest.permissions?.includes('cookies'),
       `${manifestPath}: cookies must not be an install-time permission`,
     );
-    assert.ok(
-      !manifest.host_permissions?.length,
-      `${manifestPath}: install-time host permissions must be empty`,
-    );
+    assert.deepEqual(manifest.host_permissions, [
+      'https://xgen.x2bee.com/*',
+      'https://dev-xgen.x2bee.com/*',
+    ]);
     assert.ok(
       !manifest.content_scripts?.length,
       `${manifestPath}: static all-host content scripts must not be declared`,
