@@ -48,6 +48,7 @@ function captured({
   requestMetadata,
   responseStatus = 200,
   responseBody = {},
+  responseMetadata,
   requestHeaders = {},
   responseHeaders = {},
   contentType = 'application/json',
@@ -74,6 +75,7 @@ function captured({
       : typeof responseBody === 'string'
         ? responseBody
         : JSON.stringify(responseBody),
+    ...(responseMetadata ? { responseMetadata } : {}),
     contentType,
     duration: 12,
     origin: 'user',
@@ -737,6 +739,56 @@ function testAnalyticsHeavyCaptureKeepsPrimaryApiHost(analyzeTrace) {
   assert.equal(analysis.tools.length, 1);
   assert.equal(analysis.tools[0].templatedPath, '/api/goods/v1/search');
   assert.equal(analysis.dropped.find((d) => d.reason === 'analytics/tracking')?.count, 5);
+}
+
+function testTopFrameApiOutranksExternalSdkTraffic(analyzeTrace) {
+  const topFrameContext = {
+    kind: 'top_frame',
+    frameId: 0,
+    frameOrigin: 'https://customer.example',
+  };
+  const analysis = analyzeTrace([
+    captured({
+      id: 'customer-data',
+      timestamp: 1,
+      url: 'https://customer.example/api/projects/map?_=1786321524576',
+      responseBody: null,
+      responseMetadata: {
+        bodyCaptured: false,
+        bodyTruncated: true,
+        limitations: ['response_content_length_exceeds_limit'],
+      },
+      captureContext: topFrameContext,
+    }),
+    ...Array.from({ length: 3 }, (_, index) => captured({
+      id: `external-map-${index}`,
+      timestamp: index + 2,
+      method: index === 2 ? 'POST' : 'GET',
+      url: `https://maps-provider.example/internal/map/${index}`,
+      responseBody: { ok: true },
+      captureContext: topFrameContext,
+    })),
+  ]);
+
+  assert.equal(analysis.primaryHost, 'customer.example');
+  assert.equal(analysis.tools.length, 1);
+  assert.equal(analysis.tools[0].templatedPath, '/api/projects/map');
+  assert.deepEqual(
+    analysis.tools[0].queryParamKeys,
+    [],
+    'a timestamp-shaped jQuery cache buster must not become a tool input',
+  );
+  assert.equal(
+    analysis.tools[0].isLowPriority,
+    false,
+    'a safely omitted large response must remain selected by default',
+  );
+  assert.equal(
+    analysis.dropped.find(
+      (entry) => entry.reason === '다른 호스트 (primary=customer.example 아님)',
+    )?.count,
+    3,
+  );
 }
 
 function testAuthHostDoesNotStealPrimaryHost(analyzeTrace) {
@@ -2837,6 +2889,7 @@ async function main() {
     testAuthProfileResolution(authProfileResolution);
     testTraceFiltering(analyzeTrace);
     testAnalyticsHeavyCaptureKeepsPrimaryApiHost(analyzeTrace);
+    testTopFrameApiOutranksExternalSdkTraffic(analyzeTrace);
     testAuthHostDoesNotStealPrimaryHost(analyzeTrace);
     testPathTemplating(analyzeTrace);
     testSingleNumericPathIsConservative(analyzeTrace);

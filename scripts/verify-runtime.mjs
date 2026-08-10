@@ -929,6 +929,12 @@ function startFixtureServer() {
       return;
     }
 
+    if (req.url === '/api/eager/v1/bootstrap') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ready: true, source: 'document-start' }));
+      return;
+    }
+
     if (req.url?.startsWith('/fixture-base/api/relative/v1/list')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ rows: [{ id: 'REL-10001' }] }));
@@ -1068,6 +1074,24 @@ self.addEventListener('message', (event) => {
       <button id="distractor-button">Distractor action</button>
     </main>
   </body>
+</html>`);
+      return;
+    }
+
+    if (req.url === '/eager-navigation') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(`<!doctype html>
+<html>
+  <head>
+    <title>PathFinder eager navigation fixture</title>
+    <script>
+      window.eagerApiPromise = fetch('/api/eager/v1/bootstrap').then((response) => {
+        if (!response.ok) throw new Error('eager bootstrap failed: ' + response.status);
+        return response.json();
+      });
+    </script>
+  </head>
+  <body><main>Eager API request started during document initialization.</main></body>
 </html>`);
       return;
     }
@@ -3659,15 +3683,21 @@ async function main() {
     );
 
     const secondApis = await runCaptureSession(extensionPage, targetPage, async () => {
-      await targetPage.goto(`${url}after-navigation`);
+      await targetPage.goto(`${url}eager-navigation`);
       await targetPage.waitForLoadState('domcontentloaded');
-      await targetPage.waitForTimeout(300);
+      await targetPage.evaluate(() => window.eagerApiPromise);
       await targetPage.evaluate(async () => {
         const detail = await fetch('/api/goods/v1/detail?goodsNo=987654&siteNo=1000');
         if (!detail.ok) throw new Error(`fixture detail fetch failed: ${detail.status}`);
         await detail.json();
       });
     }, 'navigation reinjection');
+
+    const eagerApi = findApi(secondApis, 'GET', '/api/eager/v1/bootstrap');
+    assert.ok(
+      eagerApi,
+      `document-start API was missed after navigation: ${JSON.stringify(captureSummary(secondApis))}`,
+    );
 
     const detailApi = findApi(secondApis, 'GET', '/api/goods/v1/detail?goodsNo=987654&siteNo=1000');
     assert.ok(
@@ -3676,8 +3706,8 @@ async function main() {
     );
     assert.equal(
       secondApis.length,
-      1,
-      `navigation session should reset old captures: ${JSON.stringify(captureSummary(secondApis))}`,
+      2,
+      `navigation session should contain only eager and explicit APIs: ${JSON.stringify(captureSummary(secondApis))}`,
     );
 
     const extraStop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });

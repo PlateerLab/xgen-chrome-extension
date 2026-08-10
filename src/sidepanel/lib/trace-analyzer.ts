@@ -147,6 +147,20 @@ function tryParseUrl(u: string): URL | null {
   try { return new URL(u); } catch { return null; }
 }
 
+function isLikelyCacheBusterQuery(key: string, value: string | null): boolean {
+  // jQuery and similar clients append `_=<epoch milliseconds>` to GET requests.
+  // Require both the conventional key and a timestamp-shaped value so a real
+  // business field named `_` is not removed indiscriminately.
+  return key === '_' && /^\d{10,16}$/.test(value ?? '');
+}
+
+function topFrameOriginHost(api: CapturedApi): string | null {
+  if (api.captureContext?.kind !== 'top_frame' || !api.captureContext.frameOrigin) {
+    return null;
+  }
+  return tryParseUrl(api.captureContext.frameOrigin)?.host ?? null;
+}
+
 function isAnalyticsCall(url: URL): boolean {
   if (ANALYTICS_HOST_PATTERNS.some((p) => p.test(url.host))) return true;
   if (ANALYTICS_PATH_PATTERNS.some((p) => p.test(url.pathname))) return true;
@@ -170,6 +184,17 @@ function isAuthCall(api: CapturedApi, url: URL): boolean {
 function isEmptyAck(body: string | null): boolean {
   if (!body) return true;
   return EMPTY_ACK_BODIES.has(body.trim());
+}
+
+function isLowPriorityResponse(api: CapturedApi): boolean {
+  if (!isEmptyAck(api.responseBody)) return false;
+  const metadata = api.responseMetadata;
+  if (!metadata) return true;
+  // A response body omitted for privacy/memory limits is still a meaningful API
+  // response. Only an actually observed empty acknowledgement is low priority.
+  if (metadata.bodyTruncated) return false;
+  if (metadata.limitations.length > 0) return false;
+  return metadata.bodyCaptured;
 }
 
 function safeJsonParse(s: string | null): unknown {
@@ -1140,14 +1165,22 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
     else nonAuthStage.push(c);
   }
 
-  // 5. 가장 많이 등장한 host를 primary로 선정
+  // 5. top-frame과 같은 origin의 API가 있으면 그 host를 primary로 우선한다.
+  // 지도/결제 SDK처럼 외부 host가 더 자주 호출돼도 사용자가 연 페이지의 API를
+  // 컬렉션 대상으로 유지한다. same-origin API가 없으면 기존 빈도 정책으로 돌아간다.
   const hostCount = new Map<string, number>();
+  const sameOriginHostCount = new Map<string, number>();
   const primaryHostCandidates = nonAuthStage.length > 0 ? nonAuthStage : stage;
   for (const c of primaryHostCandidates) {
     const h = tryParseUrl(c.url)!.host;
     hostCount.set(h, (hostCount.get(h) ?? 0) + 1);
+    if (topFrameOriginHost(c) === h) {
+      sameOriginHostCount.set(h, (sameOriginHostCount.get(h) ?? 0) + 1);
+    }
   }
-  const primaryHost = [...hostCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  const primaryHost = [...(
+    sameOriginHostCount.size > 0 ? sameOriginHostCount : hostCount
+  ).entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
 
   stage = nonAuthStage;
 
@@ -1194,15 +1227,16 @@ export function analyzeTrace(captures: CapturedApi[]): TraceAnalysis {
       for (const m of members) {
         const u = tryParseUrl(m.url)!;
         for (const key of u.searchParams.keys()) {
+          const value = u.searchParams.get(key);
+          if (isLikelyCacheBusterQuery(key, value)) continue;
           queryKeys.add(key);
           // 첫 본 값을 default로 보존 (이미 있으면 유지).
           if (!(key in querySample)) {
-            const v = u.searchParams.get(key);
-            if (v !== null) querySample[key] = v;
+            if (value !== null) querySample[key] = value;
           }
         }
       }
-      const allEmpty = members.every((m) => isEmptyAck(m.responseBody));
+      const allEmpty = members.every(isLowPriorityResponse);
       const first = members[0];
       const requestBodySample = safeJsonParse(first.requestBody);
       const responseSample = safeJsonParse(first.responseBody);

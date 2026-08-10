@@ -158,11 +158,17 @@ export function apiHookRelayFunction() {
   const stopRelay = ((event: CustomEvent) => {
     if (event.detail?.active !== false) return;
     window.removeEventListener('xgen:api-captured', relayCapturedApi);
+    window.removeEventListener('xgen:api-hook-ready', announceRelayReady);
     window.removeEventListener('xgen:api-hook-control', stopRelay);
     (window as any).__xgenApiRelayActive = false;
   }) as EventListener;
+  const announceRelayReady = () => {
+    window.dispatchEvent(new CustomEvent('xgen:api-relay-ready'));
+  };
   window.addEventListener('xgen:api-captured', relayCapturedApi);
+  window.addEventListener('xgen:api-hook-ready', announceRelayReady);
   window.addEventListener('xgen:api-hook-control', stopRelay);
+  announceRelayReady();
 
   console.log('[XGEN API Relay] 릴레이 활성화');
 }

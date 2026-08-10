@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.1 - 2026-08-10
+
+### Fixed
+
+- Re-inject the capture relay and MAIN-world hook at navigation commit so APIs
+  fired by the next document's initialization code are observed before
+  `DOMContentLoaded`.
+- Keep the completed-navigation injection as an idempotent fallback for browser
+  timing differences.
+- Add a real Chromium regression for an API request started synchronously from
+  the destination document's `<head>`.
+- Prefer a same-origin top-frame API over noisier third-party SDK traffic when
+  choosing the collection host.
+- Keep safely omitted large responses selected by default instead of treating
+  them as empty acknowledgements.
+- Ignore timestamp-shaped jQuery `_` cache busters so they do not become
+  required Planflow inputs.
+
 ## 0.8.0 - 2026-08-10
 
 ### Added
