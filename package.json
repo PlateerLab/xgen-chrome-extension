@@ -1,6 +1,6 @@
 {
   "name": "xgen-chrome-extension",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
     "verify:pathfinder:trace": "node scripts/verify-pathfinder.mjs",
     "verify:pathfinder:xgen-dev-fixture": "node scripts/verify-xgen-dev-fixture.mjs",
     "verify:pathfinder:runtime": "node scripts/verify-runtime.mjs",
+    "verify:xgen-session-live": "node scripts/verify-live-xgen-session.mjs",
     "verify:pathfinder:artifacts": "node scripts/verify-runtime-failure-artifacts.mjs",
     "verify:xgen-dev": "node scripts/verify-xgen-dev.mjs",
     "package:release": "npm run build && node scripts/package-release.mjs"
