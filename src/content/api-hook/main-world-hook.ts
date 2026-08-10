@@ -6,13 +6,26 @@ export function mainWorldHookFunction() {
   // 이미 wrapper가 설치돼 있으면 다시 감싸지 않고 관찰만 재개한다.
   if ((window as any).__xgenApiHookInstalled) {
     (window as any).__xgenApiHookActive = true;
+    window.dispatchEvent(new CustomEvent('xgen:api-hook-ready'));
     return;
   }
   (window as any).__xgenApiHookInstalled = true;
   (window as any).__xgenApiHookActive = true;
+  let relayReady = false;
+  const pendingDetails: any[] = [];
+  const relayReadyListener = () => {
+    relayReady = true;
+    for (const detail of pendingDetails.splice(0)) {
+      window.dispatchEvent(new CustomEvent('xgen:api-captured', { detail }));
+    }
+  };
+  window.addEventListener('xgen:api-relay-ready', relayReadyListener);
   window.addEventListener('xgen:api-hook-control', ((event: CustomEvent) => {
     if (event.detail?.active === false) {
       (window as any).__xgenApiHookActive = false;
+      relayReady = false;
+      pendingDetails.splice(0);
+      window.removeEventListener('xgen:api-relay-ready', relayReadyListener);
     }
   }) as EventListener);
 
@@ -377,8 +390,18 @@ export function mainWorldHookFunction() {
   }
 
   function dispatch(detail: any) {
+    if (!relayReady) {
+      // A document_start hook can observe a response before the isolated-world
+      // relay is ready. Keep a bounded in-memory queue and replay it after the
+      // relay handshake; nothing is persisted in page or extension storage.
+      if (pendingDetails.length >= 200) pendingDetails.shift();
+      pendingDetails.push(detail);
+      return;
+    }
     window.dispatchEvent(new CustomEvent('xgen:api-captured', { detail }));
   }
+
+  window.dispatchEvent(new CustomEvent('xgen:api-hook-ready'));
 
   // ── fetch 후킹 ──
   const originalFetch = window.fetch;

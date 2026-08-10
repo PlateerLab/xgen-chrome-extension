@@ -1,11 +1,11 @@
 {
   "name": "xgen-chrome-extension",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite build --watch",
-    "build": "tsc && vite build && vite build --config vite.content.config.ts",
+    "build": "tsc && vite build && vite build --config vite.content.config.ts && vite build --config vite.capture-main.config.ts",
     "preview": "vite preview",
     "verify:pathfinder": "node scripts/verify-all.mjs",
     "verify:pathfinder:contract": "node scripts/verify-xgen-contract.mjs",

@@ -70,6 +70,8 @@ const authProfileUpsertsByDomain = new Map<
 >();
 const CAPTURE_TAB_MAX = 500;
 const CONTENT_SCRIPT_BUNDLE = 'pathfinder-content.js';
+const EARLY_CAPTURE_SCRIPT_BUNDLE = 'pathfinder-capture-main.js';
+const EARLY_CAPTURE_SCRIPT_ID = 'pathfinder-capture-main';
 const CONTENT_SCRIPT_ORIGINS_KEY = 'runtime:content-script-origins';
 let contentScriptOriginUpdate: Promise<void> = Promise.resolve();
 
@@ -427,6 +429,29 @@ async function injectApiHookIntoTab(tabId: number): Promise<void> {
   hookedTabs.add(tabId);
 }
 
+async function registerEarlyCaptureScript(url: string): Promise<void> {
+  const pattern = originPatternForUrl(url);
+  if (!pattern) throw new Error('API 캡처는 http/https 페이지에서만 사용할 수 있습니다.');
+  await chrome.scripting.unregisterContentScripts({
+    ids: [EARLY_CAPTURE_SCRIPT_ID],
+  }).catch(() => {});
+  await chrome.scripting.registerContentScripts([{
+    id: EARLY_CAPTURE_SCRIPT_ID,
+    js: [EARLY_CAPTURE_SCRIPT_BUNDLE],
+    matches: [pattern],
+    allFrames: true,
+    runAt: 'document_start',
+    world: 'MAIN' as any,
+    persistAcrossSessions: false,
+  }]);
+}
+
+async function unregisterEarlyCaptureScript(): Promise<void> {
+  await chrome.scripting.unregisterContentScripts({
+    ids: [EARLY_CAPTURE_SCRIPT_ID],
+  }).catch(() => {});
+}
+
 async function injectContentScriptIntoTab(tabId: number): Promise<void> {
   const tab = await chrome.tabs.get(tabId);
   if (!isInjectableTabUrl(tab.url)) return;
@@ -533,6 +558,7 @@ async function finishCaptureSession(
   session.phase = 'stopping';
   await persistCaptureSession(session);
   await unhookApiFrames(session.tabId).catch(() => {});
+  await unregisterEarlyCaptureScript();
   await chrome.tabs.sendMessage(session.tabId, {
     type: 'HIDE_FLOATING_OVERLAY',
   } satisfies ExtensionMessage).catch(() => {});
@@ -562,6 +588,7 @@ async function unhookApiFrames(tabId: number): Promise<void> {
 }
 
 async function recoverInterruptedCaptureSession(): Promise<void> {
+  await unregisterEarlyCaptureScript();
   const stored = await chrome.storage.session.get(CAPTURE_SESSION_METADATA_KEY);
   const value = stored[CAPTURE_SESSION_METADATA_KEY] as Partial<PersistedCaptureSession> | undefined;
   if (!value) return;
@@ -1014,6 +1041,7 @@ chrome.runtime.onMessage.addListener(
               count: 0,
             });
             frameCaptureStateByTab.set(tabId, newFrameCaptureState());
+            await registerEarlyCaptureScript(tab.url);
             await handlePickerHookInject(tabId);
             startingSession.phase = 'active';
             await persistCaptureSession(startingSession);
@@ -2798,7 +2826,43 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // Navigation은 tab ID를 유지하므로 새 document가 열리는 순간 이전 origin의 context를
 // 폐기한다. 새 Content Script 관찰이 도착하기 전까지 stale context를 반환하지 않는다.
 chrome.webNavigation.onCommitted.addListener((details) => {
-  if (details.frameId === 0) pageContextByTab.delete(details.tabId);
+  if (details.frameId !== 0) return;
+  pageContextByTab.delete(details.tabId);
+  if (!hookedTabs.has(details.tabId)) return;
+
+  // onCompleted에서 재주입하면 새 문서의 초기화 스크립트가 즉시 호출하는 API를
+  // 놓칠 수 있다. commit 직후 relay와 MAIN-world hook을 먼저 설치하고,
+  // onCompleted 재주입은 timing race에 대한 fallback으로 남긴다.
+  void (async () => {
+    const readiness = await inspectHostPermission(details.url);
+    if (!readiness.ready) {
+      await abortTabForPermission(details.tabId, 'host_permission_required');
+      return;
+    }
+    appendCapturedApi(details.tabId, {
+      id: crypto.randomUUID(),
+      tabId: details.tabId,
+      timestamp: Date.now(),
+      url: details.url,
+      method: 'NAVIGATION',
+      requestHeaders: {},
+      requestBody: null,
+      responseStatus: 200,
+      responseHeaders: {},
+      responseBody: null,
+      contentType: '',
+      duration: 0,
+    } as CapturedApi);
+    frameCaptureStateByTab.set(details.tabId, newFrameCaptureState());
+    await injectApiHookIntoTab(details.tabId);
+    console.log(
+      `[XGEN SW] API hook injected at navigation commit: ${safeUrlForLog(details.url)}`,
+    );
+  })().catch((err) => {
+    // 새 document가 아직 scripting target으로 준비되지 않은 브라우저에서는
+    // onCompleted listener가 다시 시도한다.
+    console.warn('[XGEN SW] Early navigation hook injection deferred:', errorMessage(err));
+  });
 });
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
   if (details.frameId === 0) pageContextByTab.delete(details.tabId);
@@ -2839,23 +2903,8 @@ chrome.webNavigation.onCompleted.addListener(async (details) => {
     return;
   }
 
-  // 네비게이션 기록을 캡처 데이터에 추가
-  appendCapturedApi(tabId, {
-    id: crypto.randomUUID(),
-    tabId,
-    timestamp: Date.now(),
-    url: details.url,
-    method: 'NAVIGATION',
-    requestHeaders: {},
-    requestBody: null,
-    responseStatus: 200,
-    responseHeaders: {},
-    responseBody: null,
-    contentType: '',
-    duration: 0,
-  } as CapturedApi);
-
-  // hook 자동 재주입 (페이지 이동으로 이전 hook 소멸)
+  // commit 시점 조기 주입이 timing race로 실패했을 때의 fallback. hook 함수는
+  // idempotent하므로 이미 설치된 경우에는 관찰 상태만 다시 활성화한다.
   try {
     await injectApiHookIntoTab(tabId);
     console.log(`[XGEN SW] API hook re-injected after navigation: ${safeUrlForLog(details.url)}`);
