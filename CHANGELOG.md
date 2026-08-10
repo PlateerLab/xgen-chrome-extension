@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.2 - 2026-08-10
+
+### Fixed
+
+- Detect the active dev/prod XGEN origin and existing login cookie as soon as
+  the side panel opens, without requiring users to start an API capture first.
+- Prefer the XGEN tab currently in view over a stale localhost or another
+  environment URL, and keep detection working after page reloads.
+- Refresh the settings panel from the resolved session and show when a login
+  session has been detected.
+- Scope compatibility tokens to their XGEN origin so switching environments
+  cannot reuse a stale token from another server.
+- Clear the cached origin token when the active XGEN page confirms that the
+  user has logged out.
+
 ## 0.8.1 - 2026-08-10
 
 ### Fixed

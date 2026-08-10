@@ -70,6 +70,12 @@ function setExtensionStorage(page, values) {
   }), values);
 }
 
+function getExtensionLocalStorage(page, keys) {
+  return page.evaluate((storageKeys) => new Promise((resolve) => {
+    chrome.storage.local.get(storageKeys, (result) => resolve(result));
+  }), keys);
+}
+
 function getExtensionSessionStorage(page, key) {
   return page.evaluate(
     (storageKey) => chrome.storage.session.get(storageKey),
@@ -2645,53 +2651,90 @@ async function verifyDevXgenOriginDetection(extensionPage, browserContext) {
   <head><title>XGEN dev fixture</title></head>
   <body>
     <main>Dev XGEN fixture</main>
-    <script>
-      localStorage.setItem('xgen_access_token', 'dev-xgen-token');
-      localStorage.setItem('accessToken', 'dev-xgen-token');
-    </script>
   </body>
 </html>`,
     });
   });
 
+  await setExtensionStorage(extensionPage, {
+    serverUrl: 'http://localhost:8080',
+    authToken: 'stale-local-token',
+  });
+  await browserContext.addCookies([{
+    name: 'xgen_access_token',
+    value: 'dev-xgen-token',
+    url: 'https://dev-xgen.x2bee.com/',
+    sameSite: 'Lax',
+  }]);
+
   const devPage = await browserContext.newPage();
   await devPage.goto('https://dev-xgen.x2bee.com/main?view=tool-storage');
   await devPage.waitForLoadState('domcontentloaded');
-  await devPage.waitForFunction(() => localStorage.getItem('accessToken') === 'dev-xgen-token');
 
   const tabId = await findTabIdByUrl(extensionPage, '^https://dev-xgen\\.x2bee\\.com/main');
   assert.ok(tabId, 'dev-xgen tab id should be discoverable');
-  const start = await sendExtensionMessage(extensionPage, {
-    type: 'START_CAPTURE_SESSION',
-    tabId,
-  });
-  assert.equal(start?.ok, true, `dev-xgen content injection failed: ${JSON.stringify(start)}`);
-  const stop = await sendExtensionMessage(extensionPage, { type: 'STOP_CAPTURE_SESSION' });
-  assert.equal(stop?.ok, true, `dev-xgen capture cleanup failed: ${JSON.stringify(stop)}`);
-  if (stop.resultId) {
-    await sendExtensionMessage(extensionPage, {
-      type: 'ACK_CAPTURE_RESULT',
-      resultId: stop.resultId,
-    });
-  }
 
   let config;
   for (let attempt = 0; attempt < 25; attempt++) {
     config = await sendExtensionMessage(extensionPage, { type: 'GET_CHAT_CONFIG', tabId });
     if (config?.serverUrl === 'https://dev-xgen.x2bee.com' && config?.authToken === 'dev-xgen-token') {
-      await devPage.close();
-      await removeExtensionPermissions(
-        extensionPage,
-        { origins: ['https://dev-xgen.x2bee.com/*'] },
-      );
-      console.log('dev-xgen origin token detection verified');
-      return;
+      break;
     }
     await wait(200);
   }
 
+  assert.equal(
+    config?.serverUrl,
+    'https://dev-xgen.x2bee.com',
+    `active dev-xgen origin should override stale localhost: ${JSON.stringify(config)}`,
+  );
+  assert.equal(
+    config?.authToken,
+    'dev-xgen-token',
+    `existing dev-xgen cookie should be detected without starting capture: ${JSON.stringify(config)}`,
+  );
+  const synchronizedStorage = await getExtensionLocalStorage(extensionPage, [
+    'serverUrl',
+    'authToken',
+    'token:https://dev-xgen.x2bee.com',
+  ]);
+  assert.equal(synchronizedStorage.serverUrl, 'https://dev-xgen.x2bee.com');
+  assert.equal(synchronizedStorage.authToken, 'dev-xgen-token');
+  assert.equal(
+    synchronizedStorage['token:https://dev-xgen.x2bee.com'],
+    'dev-xgen-token',
+  );
+
+  await devPage.reload();
+  await devPage.waitForLoadState('domcontentloaded');
+  const refreshedConfig = await sendExtensionMessage(extensionPage, {
+    type: 'GET_CHAT_CONFIG',
+    tabId,
+  });
+  assert.equal(refreshedConfig?.serverUrl, 'https://dev-xgen.x2bee.com');
+  assert.equal(refreshedConfig?.authToken, 'dev-xgen-token');
+
+  await browserContext.clearCookies({
+    name: 'xgen_access_token',
+    domain: 'dev-xgen.x2bee.com',
+  });
+  const loggedOutConfig = await sendExtensionMessage(extensionPage, {
+    type: 'GET_CHAT_CONFIG',
+    tabId,
+  });
+  assert.equal(loggedOutConfig?.serverUrl, 'https://dev-xgen.x2bee.com');
+  assert.equal(
+    loggedOutConfig?.authToken,
+    '',
+    'removing the XGEN login cookie should clear the cached origin token',
+  );
+
   await devPage.close();
-  assert.fail(`dev-xgen origin token detection failed: ${JSON.stringify(config)}`);
+  await removeExtensionPermissions(
+    extensionPage,
+    { origins: ['https://dev-xgen.x2bee.com/*'] },
+  );
+  console.log('dev-xgen session auto-detection and refresh verified');
 }
 
 async function verifyRelayCommandBridge(extensionPage, targetPage, commandResults) {

@@ -46,6 +46,7 @@ export function SettingsBar({ targetTabId, targetTabUrl }: SettingsBarProps) {
   const [permissionPending, setPermissionPending] = useState(false);
   const [compatibility, setCompatibility] = useState<XgenCompatibilityResult | null>(null);
   const [compatibilityPending, setCompatibilityPending] = useState(false);
+  const [sessionDetected, setSessionDetected] = useState(false);
 
   // Load saved settings + fetch providers
   useEffect(() => {
@@ -83,6 +84,9 @@ export function SettingsBar({ targetTabId, targetTabUrl }: SettingsBarProps) {
           setProviders([]);
         }
       }
+      if (changes[STORAGE_KEYS.AUTH_TOKEN]?.newValue !== undefined) {
+        setSessionDetected(Boolean(changes[STORAGE_KEYS.AUTH_TOKEN].newValue));
+      }
     };
     chrome.storage.local.onChanged.addListener(listener);
     return () => chrome.storage.local.onChanged.removeListener(listener);
@@ -106,6 +110,23 @@ export function SettingsBar({ targetTabId, targetTabUrl }: SettingsBarProps) {
       setLoading(false);
     }
   }, []);
+
+  // 저장값보다 현재 탭의 해석된 XGEN 세션을 우선한다. 패널을 열거나 대상 탭이
+  // 정해지는 즉시 dev/prod origin과 로그인 토큰을 함께 반영한다.
+  useEffect(() => {
+    chrome.runtime.sendMessage({
+      type: 'GET_CHAT_CONFIG',
+      ...(typeof targetTabId === 'number' ? { tabId: targetTabId } : {}),
+    } satisfies ExtensionMessage).then((config) => {
+      const detectedUrl = String(config?.serverUrl || '');
+      const detectedToken = String(config?.authToken || '');
+      if (!detectedUrl) return;
+      setServerUrl(detectedUrl);
+      setServerUrlDraft(detectedUrl);
+      setSessionDetected(Boolean(detectedToken));
+      void fetchProviders(detectedUrl, detectedToken);
+    }).catch(() => {});
+  }, [fetchProviders, targetTabId]);
 
   const inspectCompatibility = useCallback(async (url: string, token: string) => {
     if (!url) {
@@ -294,6 +315,8 @@ export function SettingsBar({ targetTabId, targetTabUrl }: SettingsBarProps) {
             <div className="text-[10px] text-gray-400 mt-1 truncate">
               {loading
                 ? '서버 감지 중...'
+                : sessionDetected && serverUrl
+                  ? `로그인 세션 감지됨 · ${serverUrl.replace(/^https?:\/\//, '')}`
                 : serverUrl
                   ? `현재: ${serverUrl.replace(/^https?:\/\//, '')}`
                   : '비워두면 active 탭/저장된 토큰으로 자동 감지'}
